@@ -13,21 +13,21 @@ def a2s(vector):
     
     return result
 
-def a2sf(vector):
+def a2sf(vector, gamma = 0.2):
     result = np.zeros_like(vector)
     
     sum = 0
     for idx in range(vector.shape[-1]):
         sum += vector[idx]
         result[idx] = sum
-        sum *= 0.3
+        sum *= gamma
 
     return result
 
 dir_path = os.path.dirname(__file__)
 
 dataset = "arc_e"
-layer = 0
+layer = 15
 
 prompts = {
     "winogrande": "Dharma wanted to bake some cookies and cakes for the bake sale. She ended up only baking the cakes because she didn't have a cookie sheet.\n\nI always wonder how people prefer reading in a library instead of at the house because the lack of people at the library would make it easier to concentrate.",
@@ -64,7 +64,7 @@ for i in argm:
 for i, idx in enumerate([21,49,74,113]):
     result = tensor[idx:,idx]
     aas = a2s(result)
-    aasf = a2sf(result)
+    aasf = a2sf(result, gamma=0.2)
     x = x_value[idx:]
     
     fig, ax1 = plt.subplots()
