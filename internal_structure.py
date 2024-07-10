@@ -29,21 +29,20 @@ prompts = {
 ratio = 0.2
 
 methods = {
-    "no_pruning": (0.0, 1.0, 1.0, True),
-    "h2o": (ratio/2, ratio/2, 1.0, True),
-    "A2SF_ZERO": (ratio, 0.00, 0.1, True),
-    "A2SF_RECENT": (ratio-0.05, 0.05, 0.1, True),
-    "A2SF_TW_ZERO": (ratio, 0.00, 0.1, False),
-    "A2SF_TW_RECENT": (ratio-0.05, 0.05, 0.1, False),
-    "NOHIS_ZERO": (ratio, 0.00, 0.0, True),
-    "NOHIS_RECENT": (ratio-0.05, 0.05, 0.0, True),
+    "no_pruning": (0.0, 1.0, 1.0),
+    "h2o": (ratio/2, ratio/2, 1.0),
+    "A2SF_ZERO": (ratio, 0.00, 0.1),
+    "A2SF_RECENT": (ratio-0.05, 0.05, 0.1),
+    "A2SF_TW_ZERO": (ratio, 0.00, 0.1),
+    "A2SF_TW_RECENT": (ratio-0.05, 0.05, 0.1),
+    "NOHIS_ZERO": (ratio, 0.00, 0.0),
+    "NOHIS_RECENT": (ratio-0.05, 0.05, 0.0),
 }
 
-for name, (i, j, k, h) in tqdm(methods.items()):
+for name, (i, j, k) in tqdm(methods.items()):
     config.heavy_ratio = i
     config.recent_ratio = j
     config.penalty = k
-    config.penalty_mode = h
 
     if (i + j < 1.0):
         if check_point is None:

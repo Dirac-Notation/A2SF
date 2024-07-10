@@ -13,60 +13,61 @@ import torch.nn.functional as F
 from torch.cuda.amp import autocast
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 
-
 from transformers.models.llama.configuration_llama import LlamaConfig
-from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding, LlamaAttention, apply_rotary_pos_emb
-
+from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding, LlamaAttention, LlamaDecoderLayer, apply_rotary_pos_emb
 
 __all__ = ['convert_kvcache_llama_heavy_recent', 'LlamaAttention_heavy_hitter']
 
+# def low_dimension_attention(query_states, key_states, heavy_budget, recent_budget, penalty):
 
-def low_dimension_attention(query_states, key_states, heavy_budget, recent_budget, penalty, penalty_mode):
+#     cache_budget = heavy_budget + recent_budget
 
-    cache_budget = heavy_budget + recent_budget
-
-    # attn_weights (BS, head, query, keys)
-    dtype_query_states = query_states.dtype
+#     # attn_weights (BS, head, query, keys)
+#     dtype_query_states = query_states.dtype
     
-    batch_size = query_states.shape[0]
-    head_num = query_states.shape[1]
-    seq_length = query_states.shape[2]
-    state_dimension = query_states.shape[3]
+#     batch_size = query_states.shape[0]
+#     head_num = query_states.shape[1]
+#     seq_length = query_states.shape[2]
+#     state_dimension = query_states.shape[3]
     
-    history_mask = torch.zeros(batch_size, head_num, seq_length, dtype=dtype_query_states, device=query_states.device)
-    small_dimensions = None
+#     history_mask = torch.zeros(batch_size, head_num, seq_length, dtype=dtype_query_states, device=query_states.device)
+#     small_dimensions = None
     
-    attn_shape = (batch_size, head_num, seq_length, seq_length)
-    result_attention = torch.zeros(attn_shape, dtype=dtype_query_states, device=query_states.device)
+#     attn_shape = (batch_size, head_num, seq_length, seq_length)
+#     result_attention = torch.zeros(attn_shape, dtype=dtype_query_states, device=query_states.device)
 
-    for token_index in range(seq_length):
-        if token_index > cache_budget:
-            if small_dimensions is None:
-                _, small_dimensions = keys[:,:,:token_index-1,:].abs().mean(dim=-2).topk(state_dimension-6, largest=False, dim=-1)
+#     for token_index in range(seq_length):
+#         if token_index > cache_budget:
+#             if small_dimensions is None:
+#                 _, small_dimensions = keys[:,:,:token_index-1,:].abs().mean(dim=-2).topk(state_dimension-32, largest=False, dim=-1)
             
-            history = history_mask[:,:,:token_index] + tmp_attn.squeeze(2)
+#             history = history_mask[:,:,:token_index] + tmp_attn.squeeze(2)
             
-            if recent_budget != 0:
-                _, unnecessary_tokens = history[:,:,:-recent_budget].topk(1, largest=False, dim=-1)
-            else:
-                _, unnecessary_tokens = history[:,:,:].topk(1, largest=False, dim=-1)
+#             if recent_budget != 0:
+#                 _, unnecessary_tokens = history[:,:,:-recent_budget].topk(1, largest=False, dim=-1)
+#             else:
+#                 _, unnecessary_tokens = history[:,:,:].topk(1, largest=False, dim=-1)
             
-            batch_indices, head_indices = torch.meshgrid(torch.arange(batch_size), torch.arange(head_num))
-            batch_indices_exp = batch_indices.unsqueeze(-1).expand_as(unnecessary_tokens)
-            head_indices_exp = head_indices.unsqueeze(-1).expand_as(unnecessary_tokens)
+#             batch_indices, head_indices = torch.meshgrid(torch.arange(batch_size), torch.arange(head_num))
+#             batch_indices_exp = batch_indices.unsqueeze(-1).expand_as(unnecessary_tokens)
+#             head_indices_exp = head_indices.unsqueeze(-1).expand_as(unnecessary_tokens)
             
-            keys[batch_indices_exp, head_indices_exp, unnecessary_tokens, small_dimensions] = 0
-            history_mask[batch_indices_exp, head_indices_exp, unnecessary_tokens] = torch.inf
+#             normal = torch.norm(keys[batch_indices_exp, head_indices_exp, unnecessary_tokens], dim=-1)
+#             keys[batch_indices_exp, head_indices_exp, unnecessary_tokens, small_dimensions] = 0
+#             after_normal = torch.norm(keys[batch_indices_exp, head_indices_exp, unnecessary_tokens], dim=-1)
+#             scale = (normal/after_normal).unsqueeze(-1)
+#             keys[batch_indices_exp, head_indices_exp, unnecessary_tokens] *= scale
+#             history_mask[batch_indices_exp, head_indices_exp, unnecessary_tokens] = torch.inf
             
-        query = query_states[:,:,token_index,:].unsqueeze(2)
-        keys = key_states[:,:,:token_index+1,:]
+#         query = query_states[:,:,token_index,:].unsqueeze(2)
+#         keys = key_states[:,:,:token_index+1,:]
         
-        tmp_attn = torch.matmul(query, keys.transpose(2,3))/math.sqrt(state_dimension)
-        result_attention[:,:,token_index,:token_index+1] = tmp_attn.squeeze(2)
+#         tmp_attn = torch.matmul(query, keys.transpose(2,3))/math.sqrt(state_dimension)
+#         result_attention[:,:,token_index,:token_index+1] = tmp_attn.squeeze(2)
             
-    return result_attention
+#     return result_attention
 
-def local_heavy_hitter_mask(attn_weights, heavy_budget, recent_budget, penalty, penalty_mode):
+def heavy_hitter_mask(attn_weights, heavy_budget, recent_budget, penalty):
 
     # attn_weights (BS, head, query, keys)
     dtype_attn_weights = attn_weights.dtype
@@ -76,45 +77,34 @@ def local_heavy_hitter_mask(attn_weights, heavy_budget, recent_budget, penalty, 
     score_shape = attn_weights[:,:,0,:].shape
 
     select_score = torch.zeros(score_shape, dtype=torch.float, device=attn_weights.device)
-    penalty_score = torch.zeros(score_shape, dtype=torch.float, device=attn_weights.device)
-    penalty_divider = torch.zeros(score_shape, dtype=torch.float, device=attn_weights.device)
     
-    mask_bottom = torch.zeros_like(attn_weights, dtype=torch.bool)
-    mask_bottom[:,:,0,0] = True # First Token
+    attn_mask = torch.ones_like(attn_weights, dtype=torch.bool)
+    attn_mask = torch.triu(attn_mask, diagonal=-recent_budget)
+    attn_mask[:,:,:cache_budget+1,:cache_budget+1] = True
+    attn_mask = torch.tril(attn_mask, diagonal=0)
+    
+    attn_scores = torch.softmax(attn_weights, dim=-1, dtype=torch.float32).to(dtype_attn_weights)
+    
+    for token_index in range(cache_budget):
+        select_score = penalty*select_score + attn_scores[:,:,token_index,:]
 
-    score_cache_index = 0
-    score_cache_budget = 3
-    score_cache = torch.zeros_like(attn_weights[:,:,:score_cache_budget,:], dtype=torch.float, device=attn_weights.device)
-
-    for token_index in range(seq_length-1):
+    for token_index in range(cache_budget, seq_length-1):
         # Current Step Calculate
-        current_mask = mask_bottom[:,:,token_index,:]
+        current_score = attn_scores[:,:,token_index,:]
+        current_mask = attn_mask[:,:,token_index,:]
         
-        tmp_attn = current_mask * attn_weights[:,:,token_index,:] + ~current_mask*torch.finfo(attn_weights.dtype).min
-        tmp_attn = torch.softmax(tmp_attn, dim=-1, dtype=torch.float32).to(dtype_attn_weights)
+        current_score *= current_mask
+        current_score /= current_score.sum(dim=-1).unsqueeze(dim=-1)
         
-        if penalty_mode: # Fixed Penalty
-            select_score = penalty*select_score + tmp_attn
-        else: # Token-wise Penalty
-            score_cache[:,:,score_cache_index,:] = tmp_attn
-            score_cache_index = (score_cache_index + 1) % score_cache_budget
-            
-            select_score = torch.mean(score_cache, dim=-2)
-        
-        select_score *= current_mask
+        select_score = penalty*current_mask*select_score + current_score
         
         # Next Mask Make
         local_index = token_index - recent_budget
-        if token_index >= cache_budget:
-            if heavy_budget > 0:
-                _, tmp_topk_index = torch.topk(select_score[:,:,:local_index+1], k=heavy_budget, dim=-1)
-                mask_bottom[:,:,token_index+1,:] = mask_bottom[:,:,token_index+1,:].scatter(-1, tmp_topk_index, True) # (head, keys)
-            
-            mask_bottom[:,:,token_index+1, local_index+1:token_index+2] = True # recent
-        else:
-            mask_bottom[:,:,token_index+1, :token_index+2] = True # recent
+        if heavy_budget > 0:
+            _, topk_indices = torch.topk(select_score[:,:,:local_index+1], k=heavy_budget, dim=-1)
+            attn_mask[:,:,token_index+1,:].scatter_(-1, topk_indices, True)
     
-    return mask_bottom
+    return attn_mask
 
 class LlamaAttention_heavy_hitter(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
@@ -141,7 +131,6 @@ class LlamaAttention_heavy_hitter(nn.Module):
         self.heavy_budget_ratio = config.heavy_ratio
         self.recent_budget_ratio = config.recent_ratio
         self.penalty = config.penalty
-        self.penalty_mode = config.penalty_mode
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
@@ -180,20 +169,19 @@ class LlamaAttention_heavy_hitter(nn.Module):
 
         past_key_value = (key_states, value_states) if use_cache else None
 
-        ################################################################################################
+        ################################################################################################ start
         
-        # attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
-        attn_weights = low_dimension_attention(
-            query_states=query_states,
-            key_states=key_states,
-            heavy_budget=heavy_budget,
-            recent_budget=recent_budget,
-            penalty=self.penalty,
-            penalty_mode=self.penalty_mode
-        )
+        # attn_weights = low_dimension_attention(
+        #     query_states=query_states,
+        #     key_states=key_states,
+        #     heavy_budget=heavy_budget,
+        #     recent_budget=recent_budget,
+        #     penalty=self.penalty,
+        # )
         
-        ################################################################################################
+        ################################################################################################ end
 
         if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
             raise ValueError(
@@ -209,19 +197,18 @@ class LlamaAttention_heavy_hitter(nn.Module):
             attn_weights = attn_weights + attention_mask
             attn_weights = torch.max(attn_weights, torch.tensor(torch.finfo(attn_weights.dtype).min))
         
-        ################################################################################################
+        ################################################################################################ start
         
-        # mask_bottom = local_heavy_hitter_mask(
-        #     attn_weights=attn_weights,
-        #     heavy_budget=heavy_budget,
-        #     recent_budget=recent_budget,
-        #     penalty=self.penalty,
-        #     penalty_mode=self.penalty_mode
-        # ) # Default: No padding applied to input
-        
-        # attn_weights[~mask_bottom] = torch.min(attention_mask)
-        
-        ################################################################################################
+        mask_bottom = heavy_hitter_mask(
+            attn_weights=attn_weights,
+            heavy_budget=heavy_budget,
+            recent_budget=recent_budget,
+            penalty=self.penalty,
+        )
+
+        attn_weights[~mask_bottom] = torch.min(attention_mask)
+
+        ################################################################################################ end
 
         # upcast attention to fp32
         attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
@@ -243,15 +230,21 @@ class LlamaAttention_heavy_hitter(nn.Module):
         
         return attn_output, attn_weights, past_key_value
 
-
 def convert_kvcache_llama_heavy_recent(model, config):
-
-    for name, module in reversed(model._modules.items()):
-
+    from .ideal_llama import LlamaAttention_heavy_hitter_ideal
+    
+    for name, module in model._modules.items():
+        if isinstance(module, LlamaDecoderLayer):
+            tmp_heavy_ratio = [0.69, 0.38, 0.23, 0.18, 0.12, 0.18, 0.2, 0.19, 0.21, 0.19, 0.21, 0.21, 0.22, 0.2, 0.2, 0.2, 0.21, 0.18, 0.2, 0.18, 0.15, 0.12, 0.15, 0.13, 0.15, 0.12, 0.19, 0.14, 0.14, 0.14, 0.11, 0.23][int(name)]
+            if config.recent_ratio > 0.0:
+                tmp_heavy_ratio /= 2
+                config.recent_ratio = tmp_heavy_ratio
+            config.heavy_ratio = tmp_heavy_ratio
+        
         if len(list(module.children())) > 0:
             model._modules[name] = convert_kvcache_llama_heavy_recent(module, config)
-
-        if isinstance(module, LlamaAttention) or isinstance(module, LlamaAttention_heavy_hitter):
+        
+        if isinstance(module, LlamaAttention) or isinstance(module, LlamaAttention_heavy_hitter) or isinstance(module, LlamaAttention_heavy_hitter_ideal):
             model._modules[name] = LlamaAttention_heavy_hitter(config)
 
     return model

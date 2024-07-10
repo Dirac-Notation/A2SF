@@ -23,14 +23,12 @@ def lm_model(model_name: str,
              heavy_ratio: float = 0.1,
              recent_ratio: float = 0.1,
              penalty: float = 1.0,
-             penalty_mode: bool=True,
              ideal: bool=False
             ):
     config = AutoConfig.from_pretrained(model_name)
     config.heavy_ratio = heavy_ratio
     config.recent_ratio = recent_ratio
     config.penalty = penalty
-    config.penalty_mode = penalty_mode
 
     lm.model.cpu()
 

@@ -13,15 +13,12 @@ import torch.nn.functional as F
 from torch.cuda.amp import autocast
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 
-
 from transformers.models.llama.configuration_llama import LlamaConfig
-from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding, LlamaAttention, apply_rotary_pos_emb
-
+from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding, LlamaAttention, LlamaDecoderLayer, apply_rotary_pos_emb
 
 __all__ = ['convert_kvcache_llama_heavy_recent', 'LlamaAttention_heavy_hitter']
 
-
-def local_heavy_hitter_mask(attn_weights, heavy_budget, penalty_mode, value):
+def heavy_hitter_ideal_mask(attn_weights, heavy_budget):
 
     # attn_weights (BS, head, query, keys)
     dtype_attn_weights = attn_weights.dtype
@@ -30,27 +27,21 @@ def local_heavy_hitter_mask(attn_weights, heavy_budget, penalty_mode, value):
     cache_budget = heavy_budget
     
     mask_bottom = torch.zeros_like(attn_weights, dtype=torch.bool)
-    mask_bottom[:,:,0,0] = True # First Token
+    mask_bottom[:,:,:cache_budget+1,:cache_budget+1] = True # First Token
+    mask_bottom = torch.tril(mask_bottom, diagonal=0)
 
-    for token_index in range(seq_length):
+    for token_index in range(cache_budget+1, seq_length):
         # Current Step Calculate
         
         tmp_attn = torch.softmax(attn_weights[:,:,token_index,:], dim=-1, dtype=torch.float32).to(dtype_attn_weights)
-        
-        if not penalty_mode:
-            tmp_attn *= value.norm(dim=-1)
                     
         # Next Mask Make
-        if token_index > cache_budget:
-            _, tmp_topk_index = torch.topk(tmp_attn, k=heavy_budget, dim=-1)
-            mask_bottom[:,:,token_index,:] = mask_bottom[:,:,token_index,:].scatter(-1, tmp_topk_index, True) # (head, keys)
-            
-        else:
-            mask_bottom[:,:,token_index, :token_index+1] = True # recent
+        _, tmp_topk_index = torch.topk(tmp_attn, k=heavy_budget, dim=-1)
+        mask_bottom[:,:,token_index,:] = mask_bottom[:,:,token_index,:].scatter(-1, tmp_topk_index, True) # (head, keys)
     
     return mask_bottom
 
-class LlamaAttention_heavy_hitter(nn.Module):
+class LlamaAttention_heavy_hitter_ideal(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
     def __init__(self, config: LlamaConfig):
@@ -75,7 +66,6 @@ class LlamaAttention_heavy_hitter(nn.Module):
         self.heavy_budget_ratio = config.heavy_ratio
         self.recent_budget_ratio = config.recent_ratio
         self.penalty = config.penalty
-        self.penalty_mode = config.penalty_mode
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
@@ -125,15 +115,13 @@ class LlamaAttention_heavy_hitter(nn.Module):
             attn_weights = attn_weights + attention_mask
             attn_weights = torch.max(attn_weights, torch.tensor(torch.finfo(attn_weights.dtype).min))
 
-        ### Heavy + Recent
+        ### Heavy
         heavy_budget = int(self.heavy_budget_ratio * attn_weights.shape[-1])
         
         # Heavy Hitter Mask
-        mask_bottom = local_heavy_hitter_mask(
+        mask_bottom = heavy_hitter_ideal_mask(
             attn_weights=attn_weights,
             heavy_budget=heavy_budget,
-            penalty_mode=self.penalty_mode,
-            value=value_states
         ) # Default: No padding applied to input
         
         attn_weights[~mask_bottom] = torch.min(attention_mask)
@@ -158,15 +146,21 @@ class LlamaAttention_heavy_hitter(nn.Module):
         
         return attn_output, attn_weights, past_key_value
 
-
 def convert_kvcache_llama_heavy_recent_ideal(model, config):
-
+    from .modify_llama import LlamaAttention_heavy_hitter
+    
     for name, module in reversed(model._modules.items()):
-
+        if isinstance(module, LlamaDecoderLayer):
+            tmp_heavy_ratio = [0.70, 0.40, 0.24, 0.18, 0.12, 0.17, 0.20, 0.19, 0.21, 0.19, 0.21, 0.22, 0.21, 0.20, 0.21, 0.20, 0.22, 0.19, 0.20, 0.18, 0.16, 0.12, 0.13, 0.13, 0.13, 0.12, 0.19, 0.14, 0.15, 0.12, 0.16, 0.22][int(name)]
+            if config.recent_ratio > 0.0:
+                tmp_heavy_ratio /= 2
+                config.recent_ratio = tmp_heavy_ratio
+            config.heavy_ratio = tmp_heavy_ratio
+            
         if len(list(module.children())) > 0:
             model._modules[name] = convert_kvcache_llama_heavy_recent_ideal(module, config)
 
-        if isinstance(module, LlamaAttention) or isinstance(module, LlamaAttention_heavy_hitter):
-            model._modules[name] = LlamaAttention_heavy_hitter(config)
+        if isinstance(module, LlamaAttention) or isinstance(module, LlamaAttention_heavy_hitter) or isinstance(module, LlamaAttention_heavy_hitter_ideal):
+            model._modules[name] = LlamaAttention_heavy_hitter_ideal(config)
 
     return model

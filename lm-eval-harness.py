@@ -53,20 +53,12 @@ if __name__ == "__main__":
                 print(f"================={ratio}=================")
 
                 config = {
-                    # "Local": (0.0, ratio, 1.0, True, False),
-                    # "H2O": (ratio/2, ratio/2, 1.0, True, False),
-                    # "A2SF_ZERO": (ratio, 0.00, 0.1, True, False),
-                    # "A2SF_RECENT": (ratio-0.05, 0.05, 0.1, True, False),
-                    # "A2SF_TENDANCY_ZERO": (ratio, 0.00, 0.1, False, False),
-                    # "A2SF_TENDANCY_RECENT": (ratio-0.05, 0.05, 0.1, False, False),
-                    # "NOHIS_ZERO": (ratio, 0.00, 0.0, True, False),
-                    # "NOHIS_RECENT": (ratio-0.05, 0.05, 0.0, True, False),
-                    # "IDEAL": (ratio, 0.00, 1.0, True, True),
-                    # "IDEAL_VALUE": (ratio, 0.00, 1.0, False, True),
-                    "A2SF_DIMENSION": (ratio, 0.00, 0.1, True, False),
+                    # "IDEAL": (ratio, 0.00, 1.0, True),
+                    # "H2O": (ratio/2, ratio/2, 1.0, False),
+                    "A2SF_ZERO": (ratio, 0.00, 0.1, False),
                 }
 
-                for method, (select, local, penalty, penalty_mode, ideal) in config.items():
+                for method, (select, local, penalty, ideal) in config.items():
                     lm_model(
                         model_name=model_name,
                         lm=lm,
@@ -75,7 +67,6 @@ if __name__ == "__main__":
                         heavy_ratio=select,
                         recent_ratio=local,
                         penalty=penalty,
-                        penalty_mode=penalty_mode,
                         ideal=ideal
                     )
                     print(method)

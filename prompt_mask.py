@@ -30,29 +30,27 @@ prompts = {
 ratio = 0.2
 
 methods = {
-    # "NO_PRUNING": (0.0, 1.0, 1.0, True, False),
-    # "H2O": (ratio/2, ratio/2, 1.0, True, False),
-    # "A2SF_ZERO": (ratio, 0.00, 0.1, True, False),
-    # "NOHIS_ZERO": (ratio, 0.00, 0.0, True, False),
-    # "IDEAL": (ratio, 0.0, 1.0, True, True),
-    "LOW_DIMENSION": (ratio, 0.0, 0.1, True, False),
+    # "NO_PRUNING": (0.0, 1.0, 1.0, False),
+    # "IDEAL": (ratio, 0.0, 1.0, True),
+    "H2O": (ratio/2, ratio/2, 1.0, False),
+    # "A2SF_ZERO": (ratio, 0.00, 0.1, False),
+    # "LOW_DIMENSION": (ratio, 0.0, 0.1, False),
 }
 
-for name, (i, j, k, h, l) in tqdm(methods.items()):
+for name, (i, j, k, ideal) in tqdm(methods.items()):
     config.heavy_ratio = i
     config.recent_ratio = j
     config.penalty = k
-    config.penalty_mode = h
 
     if (i + j < 1.0):
         if check_point is None:
             model.cpu()
             check_point = copy.deepcopy(model.state_dict())
         
-        if not l:
-            convert_kvcache_llama_heavy_recent(model, config)
-        else:
+        if ideal:
             convert_kvcache_llama_heavy_recent_ideal(model, config)
+        else:
+            convert_kvcache_llama_heavy_recent(model, config)
         model.load_state_dict(check_point)
         torch.cuda.empty_cache()
         model.half().eval().cuda()
