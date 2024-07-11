@@ -18,14 +18,14 @@ def make_mask(input_tensor, heavy_ratio, penalty):
     tensor = torch.clone(input_tensor)
     cache_budget = int(tensor.shape[-2]*heavy_ratio)
     
-    a2sf = torch.zeros_like(tensor[:,:,0,:])
-    tmp_mask = torch.ones_like(tensor[:,:,0,:])
+    a2sf = torch.zeros_like(tensor[:,0,:])
+    tmp_mask = torch.ones_like(tensor[:,0,:])
     
     for i in range(cache_budget):
-        a2sf = penalty*a2sf + tensor[:,:,i,:]
+        a2sf = penalty*a2sf + tensor[:,i,:]
     
     for i in range(cache_budget, tensor.shape[-2]):
-        current_score = tensor[:,:,i,:]
+        current_score = tensor[:,i,:]
         
         current_score *= tmp_mask
         current_score /= (torch.sum(current_score, dim=-1).unsqueeze(dim=-1) + 1e-10)
@@ -37,7 +37,7 @@ def make_mask(input_tensor, heavy_ratio, penalty):
                 a2sf[a2sf!=torch.inf] = 0
                 a2sf += current_score
         
-            min_index = torch.argmin(a2sf[:,:,:i+1], axis=-1).unsqueeze(dim=-1)
+            min_index = torch.argmin(a2sf[:,:i+1], axis=-1).unsqueeze(dim=-1)
             tmp_mask.scatter_(-1, min_index, 0)
             a2sf.scatter_(-1, min_index, np.inf)
 
@@ -47,46 +47,51 @@ def similarity(tensor_a, tensor_b):
     return torch.sum(torch.multiply(tensor_a, tensor_b))/(torch.norm(tensor_a)*torch.norm(tensor_b) + 1e-10)
 
 model_name = "meta-llama/Llama-2-7b-hf"
+penalty = 0.1
+data_size = 1000
+search_iter = 100
 
 config = AutoConfig.from_pretrained(model_name)
 tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
 model = AutoModelForCausalLM.from_pretrained(model_name).half().eval().cuda()
 
-file_path = "/home/smp9898/A2SF/lm/openbookqa-5.jsonl"
+for dataset in ["piqa", "arc_challenge", "mathqa"]:
+    file_path = f"/home/smp9898/A2SF/lm/{dataset}-5.jsonl"
 
-with open(file_path, "r") as file:
-    lines = file.readlines()
+    with open(file_path, "r") as file:
+        lines = file.readlines()
 
-ratios = 0.2
-penalties = torch.arange(0.0, 1.0, 0.05)
-similarities = torch.zeros_like(penalties)
-data_size = 1000
+    result_ratio = None
 
-for _ in tqdm(range(data_size)):
-    prompt = random.choice(lines)
-    
-    input_ids = tokenizer(get_prompt(prompt), add_special_tokens=True, return_tensors='pt').input_ids.cuda()
+    for _ in tqdm(range(data_size)):
+        prompt = random.choice(lines)
+        
+        input_ids = tokenizer(get_prompt(prompt), add_special_tokens=True, return_tensors='pt').input_ids.cuda()
 
-    with torch.no_grad():
-        result = model(input_ids, output_attentions=True)
+        with torch.no_grad():
+            result = model(input_ids, output_attentions=True)
 
-    tensors = torch.stack(result.attentions).squeeze(1)
+        tensors = torch.stack(result.attentions).squeeze(1)
 
-    tmp = []
-    for penalty in penalties:
-        masked_tensors = make_mask(tensors, ratios, penalty)
-        tmp.append(torch.mean(torch.tensor([similarity(tensors[i], masked_tensors[i]) for i in range(tensors.shape[0])])))
-    tmp = torch.tensor(tmp)
+        ratios = 0.2*torch.ones(tensors.shape[0])
+        similarities = torch.tensor([similarity(tensors[i], make_mask(tensors[i], ratios[i], penalty)) for i in range(ratios.shape[0])])
 
-    if torch.any(torch.isnan(tmp)):
-        continue
+        for i in range(search_iter):
+            max_i = torch.argmax(similarities)
+            min_i = torch.argmin(similarities)
+            
+            ratios[max_i] -= 0.01
+            ratios[min_i] += 0.01
+            
+            similarities[max_i] = similarity(tensors[max_i], make_mask(tensors[max_i], ratios[max_i], penalty))
+            similarities[min_i] = similarity(tensors[min_i], make_mask(tensors[min_i], ratios[min_i], penalty))
 
-    similarities += tmp
+        if result_ratio is None:
+            result_ratio = ratios
+        else:
+            result_ratio += ratios
 
-similarities /= data_size
+    result_ratio /= data_size
 
-plt.plot(penalties, similarities)
-plt.savefig("asdf.png")
-
-print(similarities)
-print(f"best : {penalties[torch.argmax(similarities)]:.2f}")
+    print(dataset)
+    print(result_ratio)

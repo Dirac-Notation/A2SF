@@ -52,41 +52,44 @@ config = AutoConfig.from_pretrained(model_name)
 tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
 model = AutoModelForCausalLM.from_pretrained(model_name).half().eval().cuda()
 
-file_path = "/home/smp9898/A2SF/lm/openbookqa-5.jsonl"
+for dataset in ["mathqa", "piqa", "arc_challenge", "arc_easy", "openbookqa"]:
+    file_path = f"/home/smp9898/A2SF/lm/{dataset}-5.jsonl"
 
-with open(file_path, "r") as file:
-    lines = file.readlines()
+    with open(file_path, "r") as file:
+        lines = file.readlines()
 
-ratios = 0.2
-penalties = torch.arange(0.0, 1.0, 0.05)
-similarities = torch.zeros_like(penalties)
-data_size = 1000
+    ratios = 0.2
+    penalties = torch.arange(0.0, 1.0, 0.05)
+    similarities = torch.zeros_like(penalties)
+    data_size = 1000
 
-for _ in tqdm(range(data_size)):
-    prompt = random.choice(lines)
-    
-    input_ids = tokenizer(get_prompt(prompt), add_special_tokens=True, return_tensors='pt').input_ids.cuda()
+    for _ in tqdm(range(data_size)):
+        prompt = random.choice(lines)
+        
+        input_ids = tokenizer(get_prompt(prompt), add_special_tokens=True, return_tensors='pt').input_ids.cuda()
 
-    with torch.no_grad():
-        result = model(input_ids, output_attentions=True)
+        with torch.no_grad():
+            result = model(input_ids, output_attentions=True)
 
-    tensors = torch.stack(result.attentions).squeeze(1)
+        tensors = torch.stack(result.attentions).squeeze(1)
 
-    tmp = []
-    for penalty in penalties:
-        masked_tensors = make_mask(tensors, ratios, penalty)
-        tmp.append(torch.mean(torch.tensor([similarity(tensors[i], masked_tensors[i]) for i in range(tensors.shape[0])])))
-    tmp = torch.tensor(tmp)
+        tmp = []
+        for penalty in penalties:
+            masked_tensors = make_mask(tensors, ratios, penalty)
+            tmp.append(torch.mean(torch.tensor([similarity(tensors[i], masked_tensors[i]) for i in range(tensors.shape[0])])))
+        tmp = torch.tensor(tmp)
 
-    if torch.any(torch.isnan(tmp)):
-        continue
+        if torch.any(torch.isnan(tmp)):
+            continue
 
-    similarities += tmp
+        similarities += tmp
 
-similarities /= data_size
+    similarities /= data_size
 
-plt.plot(penalties, similarities)
-plt.savefig("asdf.png")
+    plt.plot(penalties, similarities, label=dataset)
 
-print(similarities)
-print(f"best : {penalties[torch.argmax(similarities)]:.2f}")
+    for i in range(similarities.shape[0]): print(f"{penalties[i]:.2f} {similarities[i]:.4f}")
+    print(f"best[{dataset}] : {penalties[torch.argmax(similarities)]:.2f}")
+
+plt.legend()
+plt.savefig(f"forgetting_factor_fixed_ratio_020.png")
