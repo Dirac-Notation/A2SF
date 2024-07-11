@@ -55,7 +55,26 @@ if __name__ == "__main__":
                 config = {
                     # "IDEAL": (ratio, 0.00, 1.0, True),
                     # "H2O": (ratio/2, ratio/2, 1.0, False),
-                    "A2SF_ZERO": (ratio, 0.00, 0.1, False),
+                    "A2SF_0": (ratio, 0.00, 0.00, False),
+                    "A2SF_5": (ratio, 0.00, 0.05, False),
+                    "A2SF_10": (ratio, 0.00, 0.10, False),
+                    "A2SF_15": (ratio, 0.00, 0.15, False),
+                    "A2SF_20": (ratio, 0.00, 0.20, False),
+                    "A2SF_25": (ratio, 0.00, 0.25, False),
+                    "A2SF_30": (ratio, 0.00, 0.30, False),
+                    "A2SF_35": (ratio, 0.00, 0.35, False),
+                    "A2SF_40": (ratio, 0.00, 0.40, False),
+                    "A2SF_45": (ratio, 0.00, 0.45, False),
+                    "A2SF_50": (ratio, 0.00, 0.50, False),
+                    "A2SF_55": (ratio, 0.00, 0.55, False),
+                    "A2SF_60": (ratio, 0.00, 0.60, False),
+                    "A2SF_65": (ratio, 0.00, 0.65, False),
+                    "A2SF_70": (ratio, 0.00, 0.70, False),
+                    "A2SF_75": (ratio, 0.00, 0.75, False),
+                    "A2SF_80": (ratio, 0.00, 0.80, False),
+                    "A2SF_85": (ratio, 0.00, 0.85, False),
+                    "A2SF_90": (ratio, 0.00, 0.90, False),
+                    "A2SF_95": (ratio, 0.00, 0.95, False),
                 }
 
                 for method, (select, local, penalty, ideal) in config.items():

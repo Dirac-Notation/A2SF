@@ -32,17 +32,7 @@ if __name__ == '__main__':
 
                 for text in batch['text']:
                     item = {
-                        "best_of": 1, 
-                        "echo": True, 
-                        "logprobs": 1, 
-                        "max_tokens": 0, 
-                        "model": "x", 
-                        "n": 1, 
                         "prompt": text, 
-                        "request_type": "language-model-inference", 
-                        "stop": None, 
-                        "temperature": 0, 
-                        "top_p": 1
                     }
 
                     f.write(json.dumps(item) + '\n')

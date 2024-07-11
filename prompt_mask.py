@@ -32,8 +32,8 @@ ratio = 0.2
 methods = {
     # "NO_PRUNING": (0.0, 1.0, 1.0, False),
     # "IDEAL": (ratio, 0.0, 1.0, True),
-    "H2O": (ratio/2, ratio/2, 1.0, False),
-    # "A2SF_ZERO": (ratio, 0.00, 0.1, False),
+    # "H2O": (ratio/2, ratio/2, 1.0, False),
+    "A2SF_ZERO": (ratio, 0.00, 0.1, False),
     # "LOW_DIMENSION": (ratio, 0.0, 0.1, False),
 }
 

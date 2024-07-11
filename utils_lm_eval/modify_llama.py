@@ -78,11 +78,7 @@ def heavy_hitter_mask(attn_weights, heavy_budget, recent_budget, penalty):
 
     select_score = torch.zeros(score_shape, dtype=torch.float, device=attn_weights.device)
     
-    attn_mask = torch.ones_like(attn_weights, dtype=torch.bool)
-    attn_mask = torch.triu(attn_mask, diagonal=-recent_budget)
-    attn_mask[:,:,:cache_budget+1,:cache_budget+1] = True
-    attn_mask = torch.tril(attn_mask, diagonal=0)
-    
+    attn_mask = torch.ones_like(attn_weights, dtype=torch.bool, device=attn_weights.device)
     attn_scores = torch.softmax(attn_weights, dim=-1, dtype=torch.float32).to(dtype_attn_weights)
     
     for token_index in range(cache_budget):
@@ -96,13 +92,18 @@ def heavy_hitter_mask(attn_weights, heavy_budget, recent_budget, penalty):
         current_score *= current_mask
         current_score /= current_score.sum(dim=-1).unsqueeze(dim=-1)
         
-        select_score = penalty*current_mask*select_score + current_score
+        if penalty != 0.0:
+            select_score = penalty*select_score + current_score
+        else:
+            select_score[select_score != torch.inf] = 0 
+            select_score += current_score
         
         # Next Mask Make
         local_index = token_index - recent_budget
         if heavy_budget > 0:
-            _, topk_indices = torch.topk(select_score[:,:,:local_index+1], k=heavy_budget, dim=-1)
-            attn_mask[:,:,token_index+1,:].scatter_(-1, topk_indices, True)
+            min_index = torch.argmin(select_score[:,:,:local_index+1], dim=-1).unsqueeze(dim=-1)
+            select_score.scatter_(-1, min_index, torch.inf)
+            attn_mask[:,:,token_index+1,:] = current_mask.scatter(-1, min_index, False)
     
     return attn_mask
 
@@ -234,12 +235,12 @@ def convert_kvcache_llama_heavy_recent(model, config):
     from .ideal_llama import LlamaAttention_heavy_hitter_ideal
     
     for name, module in model._modules.items():
-        if isinstance(module, LlamaDecoderLayer):
-            tmp_heavy_ratio = [0.69, 0.38, 0.23, 0.18, 0.12, 0.18, 0.2, 0.19, 0.21, 0.19, 0.21, 0.21, 0.22, 0.2, 0.2, 0.2, 0.21, 0.18, 0.2, 0.18, 0.15, 0.12, 0.15, 0.13, 0.15, 0.12, 0.19, 0.14, 0.14, 0.14, 0.11, 0.23][int(name)]
-            if config.recent_ratio > 0.0:
-                tmp_heavy_ratio /= 2
-                config.recent_ratio = tmp_heavy_ratio
-            config.heavy_ratio = tmp_heavy_ratio
+        # if isinstance(module, LlamaDecoderLayer):
+        #     tmp_heavy_ratio = [0.69, 0.38, 0.23, 0.18, 0.12, 0.18, 0.2, 0.19, 0.21, 0.19, 0.21, 0.21, 0.22, 0.2, 0.2, 0.2, 0.21, 0.18, 0.2, 0.18, 0.15, 0.12, 0.15, 0.13, 0.15, 0.12, 0.19, 0.14, 0.14, 0.14, 0.11, 0.23][int(name)]
+        #     if config.recent_ratio > 0.0:
+        #         tmp_heavy_ratio /= 2
+        #         config.recent_ratio = tmp_heavy_ratio
+        #     config.heavy_ratio = tmp_heavy_ratio
         
         if len(list(module.children())) > 0:
             model._modules[name] = convert_kvcache_llama_heavy_recent(module, config)
