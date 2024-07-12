@@ -52,7 +52,8 @@ config = AutoConfig.from_pretrained(model_name)
 tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
 model = AutoModelForCausalLM.from_pretrained(model_name).half().eval().cuda()
 
-for dataset in ["mathqa", "piqa", "arc_challenge", "arc_easy", "openbookqa"]:
+plt.figure(figsize=(9,6))
+for idx, dataset in enumerate(["mathqa", "piqa", "arc_challenge", "arc_easy", "openbookqa"]):
     file_path = f"/home/smp9898/A2SF/lm/{dataset}-5.jsonl"
 
     with open(file_path, "r") as file:
@@ -61,7 +62,7 @@ for dataset in ["mathqa", "piqa", "arc_challenge", "arc_easy", "openbookqa"]:
     ratios = 0.2
     penalties = torch.arange(0.0, 1.0, 0.05)
     similarities = torch.zeros_like(penalties)
-    data_size = 1000
+    data_size = 200
 
     for _ in tqdm(range(data_size)):
         prompt = random.choice(lines)
@@ -86,10 +87,12 @@ for dataset in ["mathqa", "piqa", "arc_challenge", "arc_easy", "openbookqa"]:
 
     similarities /= data_size
 
-    plt.plot(penalties, similarities, label=dataset)
-
     for i in range(similarities.shape[0]): print(f"{penalties[i]:.2f} {similarities[i]:.4f}")
     print(f"best[{dataset}] : {penalties[torch.argmax(similarities)]:.2f}")
 
-plt.legend()
+    plt.subplot(2, 3, idx+1)
+    plt.title(f"{dataset} : {penalties[torch.argmax(similarities)]:.2f}")
+    plt.plot(penalties, similarities)
+
+plt.tight_layout()
 plt.savefig(f"forgetting_factor_fixed_ratio_020.png")
