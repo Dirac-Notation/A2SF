@@ -15,7 +15,7 @@ def extract_dataset_acc(text):
             results[current_key].append((dataset, acc))
     return results
 
-with open("5shot_fixed_ratio_020.txt", "r") as f:
+with open("1shot_result.txt", "r") as f:
     text = f.read()
 
 results = extract_dataset_acc(text)

@@ -38,7 +38,7 @@ if __name__ == "__main__":
         
         for model_name in model_list:
             
-            lm = huggingface.HFLM(model_name, batch_size="auto")
+            lm = huggingface.HFLM(model_name, batch_size=16)
             
             lm.model.cpu()
             check_point = copy.deepcopy(lm.model.state_dict())
@@ -46,15 +46,15 @@ if __name__ == "__main__":
 
             print(f"model: {model_name}")
             
-            print("Full")
-            lm_test(lm, task_list, num_fewshot)
+            # print("Full")
+            # lm_test(lm, task_list, num_fewshot)
 
             for ratio in ratio_list:
                 print(f"================={ratio}=================")
 
                 config = {
                     # "IDEAL": (ratio, 0.00, 1.0, True),
-                    # "H2O": (ratio/2, ratio/2, 1.0, False),
+                    "H2O": (ratio/2, ratio/2, 1.0, False),
                     # "A2SF_0": (ratio, 0.00, 0.00, False),
                     # "A2SF_5": (ratio, 0.00, 0.05, False),
                     # "A2SF_10": (ratio, 0.00, 0.10, False),

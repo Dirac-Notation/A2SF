@@ -56,7 +56,7 @@ tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
 model = AutoModelForCausalLM.from_pretrained(model_name).half().eval().cuda()
 
 for dataset in ["piqa", "arc_challenge", "arc_easy", "openbookqa", "mathqa"]:
-    file_path = f"/home/smp9898/A2SF/lm/{dataset}-5.jsonl"
+    file_path = f"/home/smp9898/A2SF/lm/{dataset}-1.jsonl"
 
     with open(file_path, "r") as file:
         lines = file.readlines()
@@ -73,7 +73,7 @@ for dataset in ["piqa", "arc_challenge", "arc_easy", "openbookqa", "mathqa"]:
 
         tensors = torch.stack(result.attentions).squeeze(1)
 
-        ratios = 0.3*torch.ones(tensors.shape[0])
+        ratios = 0.05*torch.ones(tensors.shape[0])
         similarities = torch.tensor([similarity(tensors[i], make_mask(tensors[i], ratios[i], penalty)) for i in range(ratios.shape[0])])
 
         for i in range(search_iter):
