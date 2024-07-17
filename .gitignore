@@ -2,6 +2,7 @@
 *.npy
 *.png
 *.pyc
+related_works
 
 lm
 tmp
