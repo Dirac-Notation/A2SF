@@ -30,9 +30,7 @@ if __name__ == "__main__":
         
         for model_name in model_list:
             
-            lm = huggingface.HFLM(model_name, batch_size=16)
-            
-            lm.model.cpu()
+            lm = huggingface.HFLM(model_name, device="cpu", batch_size=16)
             check_point = copy.deepcopy(lm.model.state_dict())
             lm.model.cuda()
 
