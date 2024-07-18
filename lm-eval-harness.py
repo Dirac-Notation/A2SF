@@ -8,13 +8,7 @@ from lm_eval.tasks import initialize_tasks
 
 from utils_lm_eval.lm_model import lm_model
 
-def lm_test(lm_model: huggingface.HFLM, task_list, num_fewshot):
-    results = evaluator.evaluate(lm_model, tasks.get_task_dict(task_list, num_fewshot=num_fewshot, fewshot_split="validation"))
-
-    print(evaluator.make_table(results))
-    if "groups" in results:
-        print(evaluator.make_table(results, "groups"))
-    print("==============================================")
+initialize_tasks()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate language models on various tasks.")
@@ -30,8 +24,6 @@ if __name__ == "__main__":
     model_list = args.model_list
     fewshot_list = args.fewshot_list
     ratio_list = args.ratio_list
-
-    initialize_tasks()
 
     for num_fewshot in fewshot_list:
         print(f"fewshot: {num_fewshot}")
@@ -89,7 +81,12 @@ if __name__ == "__main__":
                         penalty=penalty,
                         ideal=ideal
                     )
+                    results = evaluator.evaluate(lm_model, tasks.get_task_dict(task_list, num_fewshot=num_fewshot, fewshot_split="validation"))
+
                     print(method)
-                    lm_test(lm, task_list, num_fewshot)
-            
+                    print(evaluator.make_table(results))
+                    if "groups" in results:
+                        print(evaluator.make_table(results, "groups"))
+                    print("==============================================")
+                            
             lm.model.cpu()
