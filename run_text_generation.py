@@ -1,23 +1,3 @@
-#!/usr/bin/env python
-# coding=utf-8
-# Copyright 2018 Google AI, Google Brain and Carnegie Mellon University Authors and the HuggingFace Inc. team.
-# Copyright (c) 2018, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-""" Conditional text generation with the auto-regressive models
-"""
-
-
 import argparse
 import logging
 
@@ -47,8 +27,6 @@ from rouge import Rouge
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 
 from utils_hh.modify_llama import convert_kvcache_llama_heavy_recent, LlamaAttention_heavy_hitter
-from utils_hh.modify_opt import convert_kvcache_opt_heavy_recent, OPTAttention_Mask
-
 
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
@@ -64,22 +42,14 @@ def set_seed(args):
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
 
-ENABLE_Heavy_Hitter_FUNCTIONS = {
-    "llama": convert_kvcache_llama_heavy_recent,
-    "opt": convert_kvcache_opt_heavy_recent,
-}
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--model_arch", type=str, default='llama')
     parser.add_argument("--model_name", type=str, default='huggyllama/llama-7b')
-
     parser.add_argument("--cache_ratio", type=float, default=0.2)
     parser.add_argument("--penalty", type=float, default=0.1)
-
     parser.add_argument("--length", type=int, default=64)
-
     parser.add_argument("--seed", type=int, default=42, help="random seed for initialization")
 
     args = parser.parse_args()
@@ -122,7 +92,7 @@ if __name__ == "__main__":
     config.recent_ratio = args.cache_ratio/2
     config.penalty = 1.0
     
-    model = ENABLE_Heavy_Hitter_FUNCTIONS[args.model_arch](model, config)
+    model = convert_kvcache_llama_heavy_recent(model, config)
     model.load_state_dict(check_point)
     model.half().eval().to(args.device)
 
@@ -143,7 +113,7 @@ if __name__ == "__main__":
     config.recent_ratio = 0.0
     config.penalty = args.penalty
     
-    model = ENABLE_Heavy_Hitter_FUNCTIONS[args.model_arch](model, config)
+    model = convert_kvcache_llama_heavy_recent(model, config)
     model.load_state_dict(check_point)
     model.half().eval().to(args.device)
 
