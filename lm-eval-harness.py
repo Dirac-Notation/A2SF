@@ -32,6 +32,7 @@ if __name__ == "__main__":
             
             lm = huggingface.HFLM(model_name, device="cpu", batch_size=16)
             check_point = copy.deepcopy(lm.model.state_dict())
+            lm._device = "cuda"
             lm.model.cuda()
 
             print(f"model: {model_name}")
@@ -40,11 +41,9 @@ if __name__ == "__main__":
             # lm_test(lm, task_list, num_fewshot)
 
             for ratio in ratio_list:
-                print(f"================={ratio}=================")
-
                 config = {
                     # "IDEAL": (ratio, 0.00, 1.0, True),
-                    "H2O": (ratio/2, ratio/2, 1.0, False),
+                    # "H2O": (ratio/2, ratio/2, 1.0, False),
                     # "A2SF_0": (ratio, 0.00, 0.00, False),
                     # "A2SF_5": (ratio, 0.00, 0.05, False),
                     # "A2SF_10": (ratio, 0.00, 0.10, False),
@@ -65,7 +64,7 @@ if __name__ == "__main__":
                     # "A2SF_85": (ratio, 0.00, 0.85, False),
                     # "A2SF_90": (ratio, 0.00, 0.90, False),
                     # "A2SF_95": (ratio, 0.00, 0.95, False),
-                    # "A2SF": (ratio, 0.00, 0.2, False),
+                    "A2SF": (ratio, 0.00, 0.2, False),
                 }
 
                 for method, (select, local, penalty, ideal) in config.items():
@@ -79,9 +78,11 @@ if __name__ == "__main__":
                         penalty=penalty,
                         ideal=ideal
                     )
-                    results = evaluator.evaluate(lm_model, tasks.get_task_dict(task_list, num_fewshot=num_fewshot, fewshot_split="validation"))
+                    
+                    print(f"================={method} {select} {local} {penalty}=================")
+                    
+                    results = evaluator.evaluate(lm, tasks.get_task_dict(task_list, num_fewshot=num_fewshot, fewshot_split="validation"))
 
-                    print(method)
                     print(evaluator.make_table(results))
                     if "groups" in results:
                         print(evaluator.make_table(results, "groups"))
