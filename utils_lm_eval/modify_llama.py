@@ -241,6 +241,9 @@ def convert_kvcache_llama_heavy_recent(model, config):
                 tmp_heavy_ratio /= 2
                 config.recent_ratio = tmp_heavy_ratio
             config.heavy_ratio = tmp_heavy_ratio
+            
+            tmp_factor = [0.2, 0.35, 0, 0.3, 0.3, 0.25, 0.35, 0.35, 0.5, 0.4, 0.25, 0.5, 0.45, 0.5, 0.5, 0.5, 0.5, 0.65, 0.5, 0.6, 0.5, 0.45, 0.45, 0.4, 0.5, 0.5, 0.4, 0.4, 0.05, 0.15, 0.05, 0.75][int(name)]
+            config.penalty = tmp_factor
         
         if len(list(module.children())) > 0:
             model._modules[name] = convert_kvcache_llama_heavy_recent(module, config)

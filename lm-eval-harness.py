@@ -36,12 +36,10 @@ if __name__ == "__main__":
             lm.model.cuda()
 
             print(f"model: {model_name}")
-            
-            # print("Full")
-            # lm_test(lm, task_list, num_fewshot)
 
             for ratio in ratio_list:
                 config = {
+                    # "Full": (ratio, 0.00, 1.0, True),
                     # "IDEAL": (ratio, 0.00, 1.0, True),
                     # "H2O": (ratio/2, ratio/2, 1.0, False),
                     # "A2SF_0": (ratio, 0.00, 0.00, False),
@@ -68,16 +66,17 @@ if __name__ == "__main__":
                 }
 
                 for method, (select, local, penalty, ideal) in config.items():
-                    lm_model(
-                        model_name=model_name,
-                        lm=lm,
-                        check_point=check_point,
-                        device="cuda",
-                        heavy_ratio=select,
-                        recent_ratio=local,
-                        penalty=penalty,
-                        ideal=ideal
-                    )
+                    if method != "Full":
+                        lm_model(
+                            model_name=model_name,
+                            lm=lm,
+                            check_point=check_point,
+                            device="cuda",
+                            heavy_ratio=select,
+                            recent_ratio=local,
+                            penalty=penalty,
+                            ideal=ideal
+                        )
                     
                     print(f"================={method} {select} {local} {penalty}=================")
                     
