@@ -66,6 +66,7 @@ if __name__ == "__main__":
                 }
 
                 for method, (select, local, penalty, ideal) in config.items():
+<<<<<<< Updated upstream
                     if method != "Full":
                         lm_model(
                             model_name=model_name,
@@ -77,6 +78,18 @@ if __name__ == "__main__":
                             penalty=penalty,
                             ideal=ideal
                         )
+=======
+                    lm_model(
+                        model_name=model_name,
+                        lm=lm,
+                        check_point=check_point,
+                        device="cuda",
+                        heavy_ratio=select,
+                        recent_ratio=local,
+                        penalty=penalty,
+                        ideal=ideal
+                    )
+>>>>>>> Stashed changes
                     
                     print(f"================={method} {select} {local} {penalty}=================")
                     
