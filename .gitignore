@@ -1,9 +1,0 @@
-*.txt
-*.npy
-*.png
-*.pyc
-data
-related_works
-
-lm
-tmp
