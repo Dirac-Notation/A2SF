@@ -23,12 +23,14 @@ def lm_model(model_name: str,
              heavy_ratio: float = 0.1,
              recent_ratio: float = 0.1,
              penalty: float = 1.0,
-             ideal: bool=False
+             ideal: bool=False,
+             enable_cam: bool=False
             ):
     config = AutoConfig.from_pretrained(model_name)
     config.heavy_ratio = heavy_ratio
     config.recent_ratio = recent_ratio
     config.penalty = penalty
+    config.enable_cam = enable_cam
 
     lm.model.cpu()
 

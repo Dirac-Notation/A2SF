@@ -18,55 +18,6 @@ from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding, Llama
 
 __all__ = ['convert_kvcache_llama_heavy_recent', 'LlamaAttention_heavy_hitter']
 
-# def low_dimension_attention(query_states, key_states, heavy_budget, recent_budget, penalty):
-
-#     cache_budget = heavy_budget + recent_budget
-
-#     # attn_weights (BS, head, query, keys)
-#     dtype_query_states = query_states.dtype
-    
-#     batch_size = query_states.shape[0]
-#     head_num = query_states.shape[1]
-#     seq_length = query_states.shape[2]
-#     state_dimension = query_states.shape[3]
-    
-#     history_mask = torch.zeros(batch_size, head_num, seq_length, dtype=dtype_query_states, device=query_states.device)
-#     small_dimensions = None
-    
-#     attn_shape = (batch_size, head_num, seq_length, seq_length)
-#     result_attention = torch.zeros(attn_shape, dtype=dtype_query_states, device=query_states.device)
-
-#     for token_index in range(seq_length):
-#         if token_index > cache_budget:
-#             if small_dimensions is None:
-#                 _, small_dimensions = keys[:,:,:token_index-1,:].abs().mean(dim=-2).topk(state_dimension-32, largest=False, dim=-1)
-            
-#             history = history_mask[:,:,:token_index] + tmp_attn.squeeze(2)
-            
-#             if recent_budget != 0:
-#                 _, unnecessary_tokens = history[:,:,:-recent_budget].topk(1, largest=False, dim=-1)
-#             else:
-#                 _, unnecessary_tokens = history[:,:,:].topk(1, largest=False, dim=-1)
-            
-#             batch_indices, head_indices = torch.meshgrid(torch.arange(batch_size), torch.arange(head_num))
-#             batch_indices_exp = batch_indices.unsqueeze(-1).expand_as(unnecessary_tokens)
-#             head_indices_exp = head_indices.unsqueeze(-1).expand_as(unnecessary_tokens)
-            
-#             normal = torch.norm(keys[batch_indices_exp, head_indices_exp, unnecessary_tokens], dim=-1)
-#             keys[batch_indices_exp, head_indices_exp, unnecessary_tokens, small_dimensions] = 0
-#             after_normal = torch.norm(keys[batch_indices_exp, head_indices_exp, unnecessary_tokens], dim=-1)
-#             scale = (normal/after_normal).unsqueeze(-1)
-#             keys[batch_indices_exp, head_indices_exp, unnecessary_tokens] *= scale
-#             history_mask[batch_indices_exp, head_indices_exp, unnecessary_tokens] = torch.inf
-            
-#         query = query_states[:,:,token_index,:].unsqueeze(2)
-#         keys = key_states[:,:,:token_index+1,:]
-        
-#         tmp_attn = torch.matmul(query, keys.transpose(2,3))/math.sqrt(state_dimension)
-#         result_attention[:,:,token_index,:token_index+1] = tmp_attn.squeeze(2)
-            
-#     return result_attention
-
 def heavy_hitter_mask(attn_weights, heavy_budget, recent_budget, penalty):
 
     # attn_weights (BS, head, query, keys)
@@ -107,6 +58,38 @@ def heavy_hitter_mask(attn_weights, heavy_budget, recent_budget, penalty):
     
     return attn_mask
 
+def cam_matmul(attn_weights, value_states, attention_mask, recent_budget, heavy_budget):
+    seq_length = attn_weights.shape[-1]
+    
+    attn_output = torch.zeros_like(value_states)
+    attn_output[:,:,0,:] = value_states[:,:,0,:]
+    
+    for token_index in range(1, seq_length):
+        previous_index = token_index - 1
+        previous_mask = attention_mask[:,:,previous_index,:token_index]
+        current_mask = attention_mask[:,:,token_index,:token_index]
+        
+        removed_token = torch.logical_xor(previous_mask, current_mask)
+        if token_index > recent_budget + heavy_budget:
+            removed_token_index = torch.nonzero(removed_token, as_tuple=True)[2].view(removed_token.size(0), removed_token.size(1), 1)
+            
+            average_score = torch.sum(attn_weights[:,:,:token_index,:token_index], dim=-2)/torch.arange(token_index, 0, -1, device=attn_weights.device)
+            merge_prob = torch.gather(average_score, -1, removed_token_index)/torch.max(average_score, dim=-1).values.unsqueeze(-1)
+            merge_mask = torch.bernoulli(merge_prob.clamp(min=0,max=1))
+            
+            removed_value = torch.gather(value_states, 2, removed_token_index.unsqueeze(-1).expand(-1, -1, -1, value_states.size(3)))
+            removed_value *= merge_mask.unsqueeze(-1)
+            
+            removed_value /= recent_budget + heavy_budget
+            value_states[:,:,token_index-recent_budget:token_index,:] += removed_value
+            
+            # removed_value /= (recent_budget+heavy_budget)
+            # value_states[:,:,:token_index,:] += removed_value
+        
+        attn_output[:,:,token_index:token_index+1,:] = torch.matmul(attn_weights[:,:,token_index:token_index+1,:token_index+1], value_states[:,:,:token_index+1,:])
+        
+    return attn_output
+
 class LlamaAttention_heavy_hitter(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
@@ -132,6 +115,7 @@ class LlamaAttention_heavy_hitter(nn.Module):
         self.heavy_budget_ratio = config.heavy_ratio
         self.recent_budget_ratio = config.recent_ratio
         self.penalty = config.penalty
+        self.enable_cam = config.enable_cam
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
@@ -147,8 +131,8 @@ class LlamaAttention_heavy_hitter(nn.Module):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         
         ### Heavy + Recent
-        heavy_budget = int(self.heavy_budget_ratio * hidden_states.shape[-2])
-        recent_budget = int(self.recent_budget_ratio * hidden_states.shape[-2])
+        recent_budget = math.floor(self.recent_budget_ratio * hidden_states.shape[-2] + 0.5)
+        heavy_budget = math.floor(self.heavy_budget_ratio * hidden_states.shape[-2] + 0.5)
 
         bsz, q_len, _ = hidden_states.size()
             
@@ -213,7 +197,11 @@ class LlamaAttention_heavy_hitter(nn.Module):
 
         # upcast attention to fp32
         attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-        attn_output = torch.matmul(attn_weights, value_states)
+        
+        if self.enable_cam:
+            attn_output = cam_matmul(attn_weights, value_states, mask_bottom, recent_budget, heavy_budget)
+        else:
+            attn_output = torch.matmul(attn_weights, value_states)
 
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
             raise ValueError(
@@ -235,15 +223,15 @@ def convert_kvcache_llama_heavy_recent(model, config):
     from .ideal_llama import LlamaAttention_heavy_hitter_ideal
     
     for name, module in model._modules.items():
-        if isinstance(module, LlamaDecoderLayer):
-            tmp_heavy_ratio = [0.61, 0.41, 0.24, 0.16, 0.12, 0.17, 0.19, 0.2, 0.21, 0.2, 0.21, 0.21, 0.23, 0.2, 0.21, 0.2, 0.21, 0.19, 0.18, 0.17, 0.17, 0.16, 0.14, 0.1, 0.15, 0.12, 0.17, 0.12, 0.17, 0.18, 0.18, 0.22][int(name)]
-            if config.recent_ratio > 0.0:
-                tmp_heavy_ratio /= 2
-                config.recent_ratio = tmp_heavy_ratio
-            config.heavy_ratio = tmp_heavy_ratio
+        # if isinstance(module, LlamaDecoderLayer):
+        #     tmp_heavy_ratio = [0.61, 0.41, 0.24, 0.16, 0.12, 0.17, 0.19, 0.2, 0.21, 0.2, 0.21, 0.21, 0.23, 0.2, 0.21, 0.2, 0.21, 0.19, 0.18, 0.17, 0.17, 0.16, 0.14, 0.1, 0.15, 0.12, 0.17, 0.12, 0.17, 0.18, 0.18, 0.22][int(name)]
+        #     if config.recent_ratio > 0.0:
+        #         tmp_heavy_ratio /= 2
+        #         config.recent_ratio = tmp_heavy_ratio
+        #     config.heavy_ratio = tmp_heavy_ratio
             
-            tmp_factor = [0.2, 0.35, 0, 0.3, 0.3, 0.25, 0.35, 0.35, 0.5, 0.4, 0.25, 0.5, 0.45, 0.5, 0.5, 0.5, 0.5, 0.65, 0.5, 0.6, 0.5, 0.45, 0.45, 0.4, 0.5, 0.5, 0.4, 0.4, 0.05, 0.15, 0.05, 0.75][int(name)]
-            config.penalty = tmp_factor
+        #     tmp_factor = [0.2, 0.35, 0, 0.3, 0.3, 0.25, 0.35, 0.35, 0.5, 0.4, 0.25, 0.5, 0.45, 0.5, 0.5, 0.5, 0.5, 0.65, 0.5, 0.6, 0.5, 0.45, 0.45, 0.4, 0.5, 0.5, 0.4, 0.4, 0.05, 0.15, 0.05, 0.75][int(name)]
+        #     config.penalty = tmp_factor
         
         if len(list(module.children())) > 0:
             model._modules[name] = convert_kvcache_llama_heavy_recent(module, config)
