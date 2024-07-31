@@ -18,13 +18,13 @@ from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding, Llama
 
 __all__ = ['convert_kvcache_llama_heavy_recent', 'LlamaAttention_heavy_hitter']
 
-def heavy_hitter_mask(attn_weights, heavy_budget, recent_budget, penalty):
+def eviction_mask(attn_weights, streaming_budget, selecting_budget, recent_budget, forgetting_factor):
 
     # attn_weights (BS, head, query, keys)
     dtype_attn_weights = attn_weights.dtype
     seq_length = attn_weights.shape[-1]
     
-    cache_budget = heavy_budget + recent_budget
+    cache_budget = streaming_budget + selecting_budget + recent_budget
     score_shape = attn_weights[:,:,0,:].shape
 
     select_score = torch.zeros(score_shape, dtype=torch.float, device=attn_weights.device)
@@ -33,7 +33,7 @@ def heavy_hitter_mask(attn_weights, heavy_budget, recent_budget, penalty):
     attn_scores = torch.softmax(attn_weights, dim=-1, dtype=torch.float32).to(dtype_attn_weights)
     
     for token_index in range(cache_budget):
-        select_score = penalty*select_score + attn_scores[:,:,token_index,:]
+        select_score = forgetting_factor*select_score + attn_scores[:,:,token_index,:]
 
     for token_index in range(cache_budget, seq_length-1):
         # Current Step Calculate
@@ -43,15 +43,15 @@ def heavy_hitter_mask(attn_weights, heavy_budget, recent_budget, penalty):
         current_score *= current_mask
         current_score /= current_score.sum(dim=-1).unsqueeze(dim=-1)
         
-        if penalty != 0.0:
-            select_score = penalty*select_score + current_score
+        if forgetting_factor != 0.0:
+            select_score = forgetting_factor*select_score + current_score
         else:
             select_score[select_score != torch.inf] = 0 
             select_score += current_score
         
         # Next Mask Make
         local_index = token_index - recent_budget
-        if heavy_budget > 0:
+        if selecting_budget > 0:
             min_index = torch.argmin(select_score[:,:,:local_index+1], dim=-1).unsqueeze(dim=-1)
             select_score.scatter_(-1, min_index, torch.inf)
             attn_mask[:,:,token_index+1,:] = current_mask.scatter(-1, min_index, False)
@@ -80,9 +80,10 @@ class LlamaAttention_heavy_hitter(nn.Module):
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
         self.rotary_emb = LlamaRotaryEmbedding(self.head_dim, max_position_embeddings=self.max_position_embeddings)
 
-        self.heavy_budget_ratio = config.heavy_ratio
-        self.recent_budget_ratio = config.recent_ratio
-        self.penalty = config.penalty
+        self.streaming_ratio = config.streaming_ratio
+        self.selecting_ratio = config.selecting_ratio
+        self.recent_ratio = config.recent_ratio
+        self.forgetting_factor = config.forgetting_factor
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
@@ -98,8 +99,9 @@ class LlamaAttention_heavy_hitter(nn.Module):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         
         ### Heavy + Recent
-        recent_budget = math.floor(self.recent_budget_ratio * hidden_states.shape[-2] + 0.5)
-        heavy_budget = math.floor(self.heavy_budget_ratio * hidden_states.shape[-2] + 0.5)
+        streaming_budget = math.floor(self.streaming_ratio * hidden_states.shape[-2] + 0.5)
+        selecting_budget = math.floor(self.selecting_ratio * hidden_states.shape[-2] + 0.5)
+        recent_budget = math.floor(self.recent_ratio * hidden_states.shape[-2] + 0.5)
 
         bsz, q_len, _ = hidden_states.size()
             
@@ -120,20 +122,8 @@ class LlamaAttention_heavy_hitter(nn.Module):
             value_states = torch.cat([past_key_value[1], value_states], dim=2)
 
         past_key_value = (key_states, value_states) if use_cache else None
-
-        ################################################################################################ start
         
         attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
-
-        # attn_weights = low_dimension_attention(
-        #     query_states=query_states,
-        #     key_states=key_states,
-        #     heavy_budget=heavy_budget,
-        #     recent_budget=recent_budget,
-        #     penalty=self.penalty,
-        # )
-        
-        ################################################################################################ end
 
         if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
             raise ValueError(
@@ -151,11 +141,12 @@ class LlamaAttention_heavy_hitter(nn.Module):
         
         ################################################################################################ start
         
-        mask_bottom = heavy_hitter_mask(
+        mask_bottom = eviction_mask(
             attn_weights=attn_weights,
-            heavy_budget=heavy_budget,
+            streaming_budget=streaming_budget,
+            selecting_budget=selecting_budget,
             recent_budget=recent_budget,
-            penalty=self.penalty,
+            penalty=self.forgetting_factor,
         )
 
         attn_weights[~mask_bottom] = torch.min(attention_mask)

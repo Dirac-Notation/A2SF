@@ -2,6 +2,8 @@ import torch
 import math
 
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
+from tqdm import tqdm
+
 from utils_real_drop.modify_llama import H2OLlamaForCausalLM, H2OLlamaAttention
 
 name = "meta-llama/Llama-2-7b-hf"
@@ -9,13 +11,13 @@ input_length = 2048
 
 config = AutoConfig.from_pretrained(name)
 
-# config.hh_size = math.ceil(input_length*0.2)
-# config.recent_size = math.ceil(input_length*0.2)
-# config.scoring_policy = "h2o"
+config.hh_size = math.ceil(input_length*0.2)
+config.recent_size = math.ceil(input_length*0.2)
+config.scoring_policy = "h2o"
 
-config.hh_size = math.ceil(input_length*0.2)*2
-config.recent_size = 0
-config.scoring_policy = "a2sf"
+# config.hh_size = math.ceil(input_length*0.2)*2
+# config.recent_size = 0
+# config.scoring_policy = "a2sf"
 
 config.forgetting_factor = 0.2
 
@@ -31,12 +33,22 @@ input_ids = torch.randint(low=0, high=vocab_size, size=(2, input_length)).to(mod
 
 starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
 
-starter.record()
-model.generate(
-    input_ids=input_ids,
-    max_length=2048*2
-)
-ender.record()
-torch.cuda.synchronize()
+result_list = []
 
-print(starter.elapsed_time(ender))
+for _ in tqdm(range(10)):
+    starter.record()
+    model.generate(
+        input_ids=input_ids,
+        max_length=2048*2
+    )
+    ender.record()
+    torch.cuda.synchronize()
+    
+    for name, m in model.named_modules():
+        if isinstance(m, H2OLlamaAttention):
+            m._clean_cache()
+
+result_list.append(starter.elapsed_time(ender))
+averaged_result = sum(result_list)/len(result_list)
+
+print(f"{config.scoring_policy} average latency({2*input_length} tokens) : {averaged_result/1000:.2f}s")
