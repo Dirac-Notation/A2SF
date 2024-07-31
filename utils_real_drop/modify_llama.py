@@ -232,13 +232,17 @@ class H2OKVCache_LayerWise:
         self,
         hh_size=4,
         recent_size=512,
+        forgetting_factor=0.2,
+        scoring_policy="a2sf",
         k_seq_dim=2,
         v_seq_dim=2,
     ):
-        print(f"H2OKVCache-LayerWise: {hh_size}, {recent_size}")
+        # print(f"H2OKVCache-LayerWise: {hh_size}, {recent_size}")
         self.hh_size = hh_size
         self.recent_size = recent_size
         self.cache_size = hh_size + recent_size
+        self.forgetting_factor = forgetting_factor
+        self.scoring_policy = scoring_policy
         self.k_seq_dim = k_seq_dim
         self.v_seq_dim = v_seq_dim
         self.hh_score = None
@@ -256,62 +260,76 @@ class H2OKVCache_LayerWise:
         # hh-selection
         bsz, num_heads, _, head_dim = past_key_values[0].shape
 
-        select_hh_scores = self.hh_score[:, :seq_len - self.recent_size]
+        select_hh_scores = self.hh_score[:,:,:(seq_len-self.recent_size)]
         _, keep_topk = torch.topk(select_hh_scores, self.hh_size, dim=-1)
         keep_topk = keep_topk.sort().values
-
+        
         # keep_recent = torch.arange(seq_len - self.recent_size, seq_len).expand(keep_topk.shape[0], 1).to(keep_topk.device)
-        keep_recent = torch.arange(seq_len - self.recent_size, seq_len, device=keep_topk.device).repeat(keep_topk.shape[0], 1)
-        keep_idx = torch.cat([keep_topk, keep_recent], dim=-1)
-
+        if self.recent_size > 0:
+            keep_recent = torch.arange(seq_len-self.recent_size, seq_len, device=keep_topk.device).repeat(*keep_topk.shape[:2], 1)
+            keep_idx = torch.cat([keep_topk, keep_recent], dim=-1)
+        else:
+            keep_idx = keep_topk
+        
         mask = torch.zeros(self.hh_score.shape, dtype=torch.bool).to(past_key_values[0].device)
         mask = mask.scatter(-1, keep_idx, 1)
+        
+        k_hh_recent = past_key_values[0][mask].view(bsz, num_heads, -1, head_dim)
+        v_hh_recent = past_key_values[1][mask].view(bsz, num_heads, -1, head_dim)
 
-        k_hh_recent = past_key_values[0].squeeze()[mask].view(bsz, num_heads, -1, head_dim)
-        v_hh_recent = past_key_values[1].squeeze()[mask].view(bsz, num_heads, -1, head_dim)
-
-        self.hh_score= self.hh_score[mask].view(num_heads, self.cache_size)
+        self.hh_score= self.hh_score[mask].view(bsz, num_heads, self.cache_size)
 
         return (k_hh_recent, v_hh_recent)
 
-    def evict_for_space(self, past_key_values, num_coming):
-        if past_key_values is None:
-            return None
-        seq_len = past_key_values[0][0].size(self.k_seq_dim)
-        if seq_len + num_coming <= self.cache_size:
-            return past_key_values
+    # def evict_for_space(self, past_key_values, num_coming):
+    #     if past_key_values is None:
+    #         return None
+    #     seq_len = past_key_values[0][0].size(self.k_seq_dim)
+    #     if seq_len + num_coming <= self.cache_size:
+    #         return past_key_values
 
-        # hh-selection
-        bsz, num_heads, _, head_dim = past_key_values[0].shape
+    #     # hh-selection
+    #     bsz, num_heads, _, head_dim = past_key_values[0].shape
 
-        select_hh_scores = self.hh_score[:, :seq_len - self.recent_size + num_coming]
-        _, keep_topk = torch.topk(select_hh_scores, self.hh_size, dim=-1)
-        keep_topk = keep_topk.sort().values
+    #     select_hh_scores = self.hh_score[:, :seq_len - self.recent_size + num_coming]
+    #     _, keep_topk = torch.topk(select_hh_scores, self.hh_size, dim=-1)
+    #     keep_topk = keep_topk.sort().values
 
-        # keep_recent = torch.arange(seq_len - self.recent_size, seq_len).expand(keep_topk.shape[0], 1).to(keep_topk.device)
-        keep_recent = torch.arange(seq_len - self.recent_size + num_coming, seq_len, device=keep_topk.device).repeat(keep_topk.shape[0], 1)
-        keep_idx = torch.cat([keep_topk, keep_recent], dim=-1)
+    #     # keep_recent = torch.arange(seq_len - self.recent_size, seq_len).expand(keep_topk.shape[0], 1).to(keep_topk.device)
+    #     keep_recent = torch.arange(seq_len - self.recent_size + num_coming, seq_len, device=keep_topk.device).repeat(keep_topk.shape[0], 1)
+    #     keep_idx = torch.cat([keep_topk, keep_recent], dim=-1)
 
-        mask = torch.zeros(self.hh_score.shape, dtype=torch.bool).to(past_key_values[0].device)
-        mask = mask.scatter(-1, keep_idx, 1)
+    #     mask = torch.zeros(self.hh_score.shape, dtype=torch.bool).to(past_key_values[0].device)
+    #     mask = mask.scatter(-1, keep_idx, 1)
 
-        k_hh_recent = past_key_values[0].squeeze()[mask].view(bsz, num_heads, -1, head_dim)
-        v_hh_recent = past_key_values[1].squeeze()[mask].view(bsz, num_heads, -1, head_dim)
+    #     k_hh_recent = past_key_values[0].squeeze()[mask].view(bsz, num_heads, -1, head_dim)
+    #     v_hh_recent = past_key_values[1].squeeze()[mask].view(bsz, num_heads, -1, head_dim)
 
-        self.hh_score= self.hh_score[mask].view(num_heads, self.cache_size)
+    #     self.hh_score= self.hh_score[mask].view(num_heads, self.cache_size)
 
-        return (k_hh_recent, v_hh_recent)
+    #     return (k_hh_recent, v_hh_recent)
 
     def _update_hh_score(self, attn_score_cache):
-
-        num_new_tokens = attn_score_cache.shape[2]
-
-        if self.hh_score is None:
-            self.hh_score = attn_score_cache.sum(0).sum(1)
-        else:
-            attn_score_cache = attn_score_cache.sum(0).sum(1)
-            attn_score_cache[:, :-num_new_tokens] += self.hh_score
-            self.hh_score = attn_score_cache
+        # attn_score_cache.shape → [batch, heads, query, key]
+        
+        if self.scoring_policy == "h2o":
+            if self.hh_score is None:
+                self.hh_score = attn_score_cache.sum(2)
+            else:
+                attn_score_cache = attn_score_cache.sum(2)
+                attn_score_cache[:,:,:-1] += self.hh_score
+                self.hh_score = attn_score_cache
+        elif self.scoring_policy == "a2sf":
+            if self.hh_score is None:
+                self.hh_score = attn_score_cache
+                f = self.hh_score.shape[2]
+                forgetting = self.forgetting_factor**(torch.arange(f, 0, -1, dtype=self.hh_score.dtype, device=self.hh_score.device)-1)
+                self.hh_score *= forgetting.unsqueeze(0).unsqueeze(0).unsqueeze(-1)
+                self.hh_score = self.hh_score.sum(2)
+            else:
+                attn_score_cache = attn_score_cache.sum(2)
+                attn_score_cache[:,:,:-1] += self.hh_score * self.forgetting_factor
+                self.hh_score = attn_score_cache
 
     def _clean_scores(self):
         self.hh_score = None
@@ -345,9 +363,12 @@ class H2OLlamaAttention(nn.Module):
         self.kv_cache = H2OKVCache_LayerWise(
             hh_size=config.hh_size,
             recent_size=config.recent_size,
+            forgetting_factor=config.forgetting_factor,
+            scoring_policy=config.scoring_policy,
             k_seq_dim=2,
             v_seq_dim=2,
         )
+        self.seq_length = 0
 
     def _init_rope(self):
         if self.config.rope_scaling is None:
@@ -393,7 +414,7 @@ class H2OLlamaAttention(nn.Module):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
 
         bsz, q_len, _ = hidden_states.size()
-
+        
         if self.config.pretraining_tp > 1:
             key_value_slicing = (
                 self.num_key_value_heads * self.head_dim
@@ -461,6 +482,9 @@ class H2OLlamaAttention(nn.Module):
         query_states = apply_rotary_pos_emb_single(query_states, cos, sin, position_ids)
         key_states = apply_rotary_pos_emb_single(key_states, cos, sin, position_ids)
 
+        if query_states.shape[2] == 1:
+            import pdb; pdb.set_trace()
+
         if past_key_value is not None:
             # reuse k, v, self_attention
             key_states = torch.cat([past_key_value[0], key_states], dim=2)
@@ -471,11 +495,10 @@ class H2OLlamaAttention(nn.Module):
         # repeat k/v heads if n_kv_heads < n_heads
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
-
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(
-            self.head_dim
-        )
-
+        
+        print(query_states.shape, key_states.transpose(2,3).shape)
+        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+        
         if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
             raise ValueError(
                 f"Attention weights should be of size {(bsz, self.num_heads, q_len, kv_seq_len)}, but is"
@@ -493,7 +516,7 @@ class H2OLlamaAttention(nn.Module):
         attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(
             query_states.dtype
         )
-
+        
         past_key_value = self.kv_cache(past_key_value, attn_weights.detach().clone())
 
         attn_output = torch.matmul(attn_weights, value_states)
@@ -522,10 +545,10 @@ class H2OLlamaAttention(nn.Module):
             )
         else:
             attn_output = self.o_proj(attn_output)
-
+        
         if not output_attentions:
             attn_weights = None
-
+        
         return attn_output, attn_weights, past_key_value
 
 
@@ -535,3 +558,34 @@ class H2OLlamaForCausalLM(LlamaForCausalLM):
         num_layers = len(self.model.layers)
         for layer_idx in range(num_layers):
             self.model.layers[layer_idx].self_attn = H2OLlamaAttention(config)
+
+    def prepare_inputs_for_generation(
+        self, input_ids, past_key_values=None, attention_mask=None, inputs_embeds=None, **kwargs
+    ):
+        if past_key_values is not None:
+            
+            input_ids = input_ids[:, -1:]
+
+        position_ids = kwargs.get("position_ids", None)
+        if attention_mask is not None and position_ids is None:
+            # create position_ids on the fly for batch generation
+            position_ids = attention_mask.long().cumsum(-1) - 1
+            position_ids.masked_fill_(attention_mask == 0, 1)
+            if past_key_values:
+                position_ids = position_ids[:, -input_ids.shape[1] :]
+
+        # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
+        if inputs_embeds is not None and past_key_values is None:
+            model_inputs = {"inputs_embeds": inputs_embeds}
+        else:
+            model_inputs = {"input_ids": input_ids}
+
+        model_inputs.update(
+            {
+                "position_ids": position_ids,
+                "past_key_values": past_key_values,
+                "use_cache": kwargs.get("use_cache"),
+                "attention_mask": attention_mask,
+            }
+        )
+        return model_inputs

@@ -58,38 +58,6 @@ def heavy_hitter_mask(attn_weights, heavy_budget, recent_budget, penalty):
     
     return attn_mask
 
-def cam_matmul(attn_weights, value_states, attention_mask, recent_budget, heavy_budget):
-    seq_length = attn_weights.shape[-1]
-    
-    attn_output = torch.zeros_like(value_states)
-    attn_output[:,:,0,:] = value_states[:,:,0,:]
-    
-    for token_index in range(1, seq_length):
-        previous_index = token_index - 1
-        previous_mask = attention_mask[:,:,previous_index,:token_index]
-        current_mask = attention_mask[:,:,token_index,:token_index]
-        
-        removed_token = torch.logical_xor(previous_mask, current_mask)
-        if token_index > recent_budget + heavy_budget:
-            removed_token_index = torch.nonzero(removed_token, as_tuple=True)[2].view(removed_token.size(0), removed_token.size(1), 1)
-            
-            average_score = torch.sum(attn_weights[:,:,:token_index,:token_index], dim=-2)/torch.arange(token_index, 0, -1, device=attn_weights.device)
-            merge_prob = torch.gather(average_score, -1, removed_token_index)/torch.max(average_score, dim=-1).values.unsqueeze(-1)
-            merge_mask = torch.bernoulli(merge_prob.clamp(min=0,max=1))
-            
-            removed_value = torch.gather(value_states, 2, removed_token_index.unsqueeze(-1).expand(-1, -1, -1, value_states.size(3)))
-            removed_value *= merge_mask.unsqueeze(-1)
-            
-            removed_value /= recent_budget + heavy_budget
-            value_states[:,:,token_index-recent_budget:token_index,:] += removed_value
-            
-            # removed_value /= (recent_budget+heavy_budget)
-            # value_states[:,:,:token_index,:] += removed_value
-        
-        attn_output[:,:,token_index:token_index+1,:] = torch.matmul(attn_weights[:,:,token_index:token_index+1,:token_index+1], value_states[:,:,:token_index+1,:])
-        
-    return attn_output
-
 class LlamaAttention_heavy_hitter(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
@@ -115,7 +83,6 @@ class LlamaAttention_heavy_hitter(nn.Module):
         self.heavy_budget_ratio = config.heavy_ratio
         self.recent_budget_ratio = config.recent_ratio
         self.penalty = config.penalty
-        self.enable_cam = config.enable_cam
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
@@ -198,10 +165,7 @@ class LlamaAttention_heavy_hitter(nn.Module):
         # upcast attention to fp32
         attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
         
-        if self.enable_cam:
-            attn_output = cam_matmul(attn_weights, value_states, mask_bottom, recent_budget, heavy_budget)
-        else:
-            attn_output = torch.matmul(attn_weights, value_states)
+        attn_output = torch.matmul(attn_weights, value_states)
 
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
             raise ValueError(

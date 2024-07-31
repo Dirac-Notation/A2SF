@@ -26,9 +26,9 @@ for dataset, prompt in prompts.items():
     tokens = tokenizer.tokenize(prompt)
 
     for i in tqdm(range(32)):
-        for t in ["key", "value"]:
+        for t in ["key_states", "value_states"]:
             for head in range(32):
-                state = np.load(os.path.join(dir_path, "npy", dataset, "no_pruning", t, f"{i}.npy"))
+                state = torch.load(os.path.join(dir_path, "pt", dataset, "FULL", t, f"{i}.pt")).numpy()
                 
                 folder_path = os.path.join(dir_path, "dimension", dataset, t, str(i))
                 if not os.path.exists(folder_path):
@@ -38,7 +38,6 @@ for dataset, prompt in prompts.items():
                 
                 z = np.abs(state[0,head])
                 
-                               
                 plt.imshow(z, origin="lower")
                 plt.xlabel("Channel Index")
                 plt.ylabel("Token Index")

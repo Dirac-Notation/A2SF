@@ -41,14 +41,12 @@ if __name__ == "__main__":
                 config = {
                     # "Full": (ratio, 0.00, 1.0, True),
                     # "IDEAL": (ratio, 0.00, 1.0, True),
-                    # "H2O": (ratio/2, ratio/2, 1.0, False, False),
-                    # "H2O_cam": (ratio/2, ratio/2, 1.0, False, True),
+                    # "H2O": (ratio/2, ratio/2, 1.0, False),
                     # "A2SF": (ratio, 0.00, 0.2, False),
-                    # "A2SF_recent": (3*ratio/4, ratio/4, 0.2, False, False),
-                    "A2SF_recent_cam": (3*ratio/4, ratio/4, 0.2, False, True),
+                    # "A2SF_recent": (3*ratio/4, ratio/4, 0.2, False),
                 }
 
-                for method, (select, local, penalty, ideal, cam) in config.items():
+                for method, (select, local, penalty, ideal) in config.items():
                     
                     if method != "Full":
                         lm_model(
@@ -60,7 +58,6 @@ if __name__ == "__main__":
                             recent_ratio=local,
                             penalty=penalty,
                             ideal=ideal,
-                            enable_cam=cam
                         )
                     
                     print(f"================={method} {select} {local} {penalty}=================")

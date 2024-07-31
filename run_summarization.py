@@ -19,7 +19,6 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 from transformers.models.llama.configuration_llama import LlamaConfig
 
 from utils_hh.modify_llama import convert_kvcache_llama_heavy_recent, LlamaAttention_heavy_hitter
-from utils_hh.modify_opt import convert_kvcache_opt_heavy_recent, OPTAttention_Mask
 
 MAX_LENGTH = int(10000)  # Hardcoded max length to avoid infinite loop
 
@@ -30,12 +29,10 @@ def set_seed(args):
 
 ENABLE_Heavy_Hitter_FUNCTIONS = {
     "llama": convert_kvcache_llama_heavy_recent,
-    "opt": convert_kvcache_opt_heavy_recent,
 }
 
 TAGET_MODULE = {
     "llama": LlamaAttention_heavy_hitter,
-    "opt": OPTAttention_Mask
 }
 
 if __name__ == '__main__':
