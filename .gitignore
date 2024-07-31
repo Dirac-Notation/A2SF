@@ -2,4 +2,5 @@
 *.npy
 *.png
 *.pyc
+*.pt
 data
