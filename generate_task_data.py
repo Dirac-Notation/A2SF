@@ -19,6 +19,9 @@ if __name__ == '__main__':
     total_batch = 1
     pe = 'fixed'
 
+    if not os.path.exists("data"):
+        os.makedirs("data")
+
     for task_name in args.task_list:
         for fewshot in args.fewshot_list:
             output_path = os.path.join("data", f"{task_name}-{fewshot}shot.jsonl")

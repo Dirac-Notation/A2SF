@@ -11,19 +11,10 @@ from utils_lm_eval.lm_model import lm_model
 initialize_tasks()
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Evaluate language models on various tasks.")
-    
-    parser.add_argument("--task_list", nargs="+", help="List of tasks to evaluate")
-    parser.add_argument("--model_list", nargs="+", help="List of model names")
-    parser.add_argument("--fewshot_list", nargs="+", type=int, help="List of fewshot values")
-    parser.add_argument("--ratio_list", nargs="+", type=float, help="List of ratio values")
-
-    args = parser.parse_args()
-
-    task_list = args.task_list
-    model_list = args.model_list
-    fewshot_list = args.fewshot_list
-    ratio_list = args.ratio_list
+    task_list = ["openbookqa", "piqa", "arc_challenge", "arc_easy", "mathqa", "winogrande"]
+    model_list = ["meta-llama/Llama-2-7b-hf"]
+    fewshot_list = [5]
+    ratio_list = [0.1, 0.2]
 
     for num_fewshot in fewshot_list:
         print(f"fewshot: {num_fewshot}")
@@ -38,15 +29,10 @@ if __name__ == "__main__":
             print(f"model: {model_name}")
 
             for ratio in ratio_list:
-                config = {
-                    "Full": (0.0, 1.0, 0.0, 1.0, False),
-                    "STREAMING_LLM": (ratio/2, 0.0, ratio/2, 1.0, False),
-                    "H2O": (0.0, ratio/2, ratio/2, 1.0, False),
-                    "A2SF": (0.0, ratio, 0.0, 0.2, False),
-                    "STREAMING_A2SF": (ratio/3, ratio/3, ratio/3, 0.2, False),
-                }
+                config = {}
+                for i in range(24,32): config[f"ASDF_{i}"] = (0.0, ratio, 0.0, 0.2, i)
 
-                for method, (streaming, selecting, recent, factor, ideal) in config.items():
+                for method, (streaming, selecting, recent, factor, tmp) in config.items():
                     
                     if method != "Full":
                         lm_model(
@@ -58,7 +44,7 @@ if __name__ == "__main__":
                             selecting_ratio=selecting,
                             recent_ratio=recent,
                             forgetting_factor=factor,
-                            ideal=ideal,
+                            tmp=tmp,
                         )
                     
                     print(f"================={method} streaming : {streaming:.2f} / selecting : {selecting:.2f} / recent : {recent:.2f} / factor : {factor:.2f}=================")

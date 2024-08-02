@@ -20,15 +20,21 @@ def lm_model(model_name: str,
              lm: HFLM=None,
              check_point=None,
              device="cpu",
-             heavy_ratio: float = 0.1,
+             streaming_ratio: float = 0.0,
+             selecting_ratio: float = 0.1,
              recent_ratio: float = 0.1,
-             penalty: float = 1.0,
+             layerwise_ratio: list = None,
+             forgetting_factor: float = 1.0,
+             tmp: int = 0,
              ideal: bool=False,
             ):
     config = AutoConfig.from_pretrained(model_name)
-    config.heavy_ratio = heavy_ratio
+    config.streaming_ratio = streaming_ratio
+    config.selecting_ratio = selecting_ratio
     config.recent_ratio = recent_ratio
-    config.penalty = penalty
+    config.forgetting_factor = forgetting_factor
+    config.layerwise_ratio = layerwise_ratio
+    config.tmp = tmp
 
     lm.model.cpu()
 

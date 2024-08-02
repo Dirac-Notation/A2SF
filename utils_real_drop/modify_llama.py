@@ -246,6 +246,8 @@ class H2OKVCache_LayerWise:
         self.k_seq_dim = k_seq_dim
         self.v_seq_dim = v_seq_dim
         self.hh_score = None
+        
+        self.prompting = True
 
     def __call__(self, past_key_values, attn_score_cache):
 
@@ -261,18 +263,25 @@ class H2OKVCache_LayerWise:
         bsz, num_heads, _, head_dim = past_key_values[0].shape
 
         select_hh_scores = self.hh_score[:,:,:(seq_len-self.recent_size)]
-        _, keep_topk = torch.topk(select_hh_scores, self.hh_size, dim=-1)
-        keep_topk = keep_topk.sort().values
         
-        # keep_recent = torch.arange(seq_len - self.recent_size, seq_len).expand(keep_topk.shape[0], 1).to(keep_topk.device)
-        if self.recent_size > 0:
-            keep_recent = torch.arange(seq_len-self.recent_size, seq_len, device=keep_topk.device).repeat(*keep_topk.shape[:2], 1)
-            keep_idx = torch.cat([keep_topk, keep_recent], dim=-1)
+        if self.prompting:
+            self.prompting = False
+            
+            _, keep_topk = torch.topk(select_hh_scores, self.hh_size, dim=-1)
+            
+            if self.recent_size > 0:
+                keep_recent = torch.arange(seq_len-self.recent_size, seq_len, device=keep_topk.device).repeat(*keep_topk.shape[:2], 1)
+                keep_idx = torch.cat([keep_topk, keep_recent], dim=-1)
+            else:
+                keep_idx = keep_topk
+            
+            mask = torch.zeros(self.hh_score.shape, dtype=torch.bool).to(past_key_values[0].device)
+            mask = mask.scatter(-1, keep_idx, 1)
         else:
-            keep_idx = keep_topk
+            keep_idx = torch.argmin(select_hh_scores, dim=-1).unsqueeze(-1)
         
-        mask = torch.zeros(self.hh_score.shape, dtype=torch.bool).to(past_key_values[0].device)
-        mask = mask.scatter(-1, keep_idx, 1)
+            mask = torch.ones(self.hh_score.shape, dtype=torch.bool).to(past_key_values[0].device)
+            mask = mask.scatter(-1, keep_idx, 0)
         
         k_hh_recent = past_key_values[0][mask].view(bsz, num_heads, -1, head_dim)
         v_hh_recent = past_key_values[1][mask].view(bsz, num_heads, -1, head_dim)
@@ -281,37 +290,7 @@ class H2OKVCache_LayerWise:
 
         return (k_hh_recent, v_hh_recent)
 
-    # def evict_for_space(self, past_key_values, num_coming):
-    #     if past_key_values is None:
-    #         return None
-    #     seq_len = past_key_values[0][0].size(self.k_seq_dim)
-    #     if seq_len + num_coming <= self.cache_size:
-    #         return past_key_values
-
-    #     # hh-selection
-    #     bsz, num_heads, _, head_dim = past_key_values[0].shape
-
-    #     select_hh_scores = self.hh_score[:, :seq_len - self.recent_size + num_coming]
-    #     _, keep_topk = torch.topk(select_hh_scores, self.hh_size, dim=-1)
-    #     keep_topk = keep_topk.sort().values
-
-    #     # keep_recent = torch.arange(seq_len - self.recent_size, seq_len).expand(keep_topk.shape[0], 1).to(keep_topk.device)
-    #     keep_recent = torch.arange(seq_len - self.recent_size + num_coming, seq_len, device=keep_topk.device).repeat(keep_topk.shape[0], 1)
-    #     keep_idx = torch.cat([keep_topk, keep_recent], dim=-1)
-
-    #     mask = torch.zeros(self.hh_score.shape, dtype=torch.bool).to(past_key_values[0].device)
-    #     mask = mask.scatter(-1, keep_idx, 1)
-
-    #     k_hh_recent = past_key_values[0].squeeze()[mask].view(bsz, num_heads, -1, head_dim)
-    #     v_hh_recent = past_key_values[1].squeeze()[mask].view(bsz, num_heads, -1, head_dim)
-
-    #     self.hh_score= self.hh_score[mask].view(num_heads, self.cache_size)
-
-    #     return (k_hh_recent, v_hh_recent)
-
     def _update_hh_score(self, attn_score_cache):
-        # attn_score_cache.shape → [batch, heads, query, key]
-        
         if self.scoring_policy == "h2o":
             if self.hh_score is None:
                 self.hh_score = attn_score_cache.sum(2)
@@ -333,6 +312,7 @@ class H2OKVCache_LayerWise:
 
     def _clean_scores(self):
         self.hh_score = None
+        self.prompting = True
 
 
 class H2OLlamaAttention(nn.Module):

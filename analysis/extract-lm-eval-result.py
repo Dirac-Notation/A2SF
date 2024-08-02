@@ -6,7 +6,7 @@ def extract_dataset_acc(text):
     current_key = ''
     for idx, line in enumerate(lines):
         if '====' in line:
-            current_key = lines[idx+1]
+            current_key = line.replace("=", "").split(" ")[0]
             results[current_key] = []
         elif '|acc     |' in line:
             parts = re.split(r'\|', line)
@@ -15,7 +15,7 @@ def extract_dataset_acc(text):
             results[current_key].append((dataset, acc))
     return results
 
-with open("1shot_result.txt", "r") as f:
+with open("/home/smp9898/A2SF/0_8.txt", "r") as f:
     text = f.read()
 
 results = extract_dataset_acc(text)
@@ -30,5 +30,5 @@ for key in results:
 for dataset in dataset_results:
     print(dataset)
     for key, acc in dataset_results[dataset]:
-        print(f"{key} {acc}")
+        print(f"{acc}")
     print()

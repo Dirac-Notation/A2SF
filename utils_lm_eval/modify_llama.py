@@ -51,10 +51,9 @@ def eviction_mask(attn_weights, streaming_budget, selecting_budget, recent_budge
         
         # Next Mask Make
         local_index = token_index - recent_budget
-        if selecting_budget > 0:
-            min_index = torch.argmin(select_score[:,:,:local_index+1], dim=-1).unsqueeze(dim=-1)
-            select_score.scatter_(-1, min_index, torch.inf)
-            attn_mask[:,:,token_index+1,:] = current_mask.scatter(-1, min_index, False)
+        min_index = torch.argmin(select_score[:,:,streaming_budget:local_index+1], dim=-1).unsqueeze(dim=-1) + streaming_budget
+        select_score.scatter_(-1, min_index, torch.inf)
+        attn_mask[:,:,token_index+1,:] = current_mask.scatter(-1, min_index, False)
     
     return attn_mask
 
@@ -146,7 +145,7 @@ class LlamaAttention_heavy_hitter(nn.Module):
             streaming_budget=streaming_budget,
             selecting_budget=selecting_budget,
             recent_budget=recent_budget,
-            penalty=self.forgetting_factor,
+            forgetting_factor=self.forgetting_factor,
         )
 
         attn_weights[~mask_bottom] = torch.min(attention_mask)
@@ -178,15 +177,27 @@ def convert_kvcache_llama_heavy_recent(model, config):
     from .ideal_llama import LlamaAttention_heavy_hitter_ideal
     
     for name, module in model._modules.items():
-        # if isinstance(module, LlamaDecoderLayer):
+        if isinstance(module, LlamaDecoderLayer):
         #     tmp_heavy_ratio = [0.61, 0.41, 0.24, 0.16, 0.12, 0.17, 0.19, 0.2, 0.21, 0.2, 0.21, 0.21, 0.23, 0.2, 0.21, 0.2, 0.21, 0.19, 0.18, 0.17, 0.17, 0.16, 0.14, 0.1, 0.15, 0.12, 0.17, 0.12, 0.17, 0.18, 0.18, 0.22][int(name)]
         #     if config.recent_ratio > 0.0:
         #         tmp_heavy_ratio /= 2
         #         config.recent_ratio = tmp_heavy_ratio
         #     config.heavy_ratio = tmp_heavy_ratio
             
-        #     tmp_factor = [0.2, 0.35, 0, 0.3, 0.3, 0.25, 0.35, 0.35, 0.5, 0.4, 0.25, 0.5, 0.45, 0.5, 0.5, 0.5, 0.5, 0.65, 0.5, 0.6, 0.5, 0.45, 0.45, 0.4, 0.5, 0.5, 0.4, 0.4, 0.05, 0.15, 0.05, 0.75][int(name)]
-        #     config.penalty = tmp_factor
+            # tmp_factor = [0.2, 0.35, 0, 0.3, 0.3, 0.25, 0.35, 0.35, 0.5, 0.4, 0.25, 0.5, 0.45, 0.5, 0.5, 0.5, 0.5, 0.65, 0.5, 0.6, 0.5, 0.45, 0.45, 0.4, 0.5, 0.5, 0.4, 0.4, 0.05, 0.15, 0.05, 0.75][int(name)]
+            # config.penalty = tmp_factor
+            if config.tmp is not None:
+                ratio = config.streaming_ratio + config.selecting_ratio + config.recent_ratio
+                if int(name) != config.tmp:
+                    config.forgetting_factor = 0.2
+                    config.streaming_ratio = 0.0
+                    config.selecting_ratio = ratio
+                    config.recent_ratio = 0.0
+                else:
+                    config.forgetting_factor = 1.0
+                    config.streaming_ratio = 0.0
+                    config.selecting_ratio = ratio/2
+                    config.recent_ratio = ratio/2
         
         if len(list(module.children())) > 0:
             model._modules[name] = convert_kvcache_llama_heavy_recent(module, config)
