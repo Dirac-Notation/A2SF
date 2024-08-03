@@ -54,21 +54,20 @@ config = AutoConfig.from_pretrained(model_name)
 tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
 model = AutoModelForCausalLM.from_pretrained(model_name).half().eval().cuda()
 
-ratios = 0.2
-data_ratio = 0.1
-penalties = torch.arange(0.0, 1.0, 0.1)
-
-plt.figure(figsize=(9,6))
 for idx, dataset in enumerate(["openbookqa", "piqa", "arc_challenge", "arc_easy", "mathqa"]):
     file_path = f"/home/smp9898/A2SF/data/{dataset}-5shot.jsonl"
 
     with open(file_path, "r") as file:
         lines = file.readlines()
-    
-    # similarities = torch.zeros_like(penalties)
-    data_size = int(data_ratio * len(lines))
-    # data_size = 200
-    asdf = []
+
+    ratios = 0.2
+    penalties = torch.arange(0.0, 1.0, 0.1)
+    data_ratio = 0.1 
+    # data_size = int(data_ratio * len(lines))
+    data_size = 200
+    devider = data_size
+    x = []
+    y = []
 
     with tqdm(range(data_size)) as pbar:
         pbar.set_description(dataset)
@@ -89,20 +88,13 @@ for idx, dataset in enumerate(["openbookqa", "piqa", "arc_challenge", "arc_easy"
             tmp = torch.tensor(tmp)
 
             if torch.any(torch.isnan(tmp)):
+                devider -= 1
                 continue
 
-            # similarities += tmp
-        
-            asdf.append(torch.argmax(tmp).item()/10)
+            x.append(input_ids.numel())
+            y.append(torch.argmax(tmp)/10)
+            
+    plt.scatter(x,y, label=dataset, s=5, alpha=0.5)
 
-    print(dataset)
-    print(f"{(sum(asdf)/len(asdf)):.3f}")
-# for i in range(similarities.shape[0]): print(f"{penalties[i]:.2f} {similarities[i]:.4f}")
-# print(f"{penalties[torch.argmax(similarities)]:.2f}")
-
-# # plt.subplot(2, 3, idx+1)
-# # plt.title(f"{dataset} : {penalties[torch.argmax(similarities)]:.2f}")
-# plt.plot(penalties, similarities)
-
-# plt.tight_layout()
-# plt.savefig(os.path.join(dir_path, f"forgetting_factor_fixed_ratio_020_5_shots.png"))
+plt.legend()
+plt.savefig(os.path.join(dir_path, f"length-factor.png"))

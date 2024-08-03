@@ -31,43 +31,43 @@ model.cuda()
 dir_path = os.path.dirname(__file__)
 
 num_layers = 32
-ratio = 0.1
+ratio = 0.2
 
-datasets = ["piqa"]#, "openbookqa", "arc_easy", "arc_challenge", "mathqa"]
-prompts = []
-for dataset in datasets:
-    file_path = f"/home/smp9898/A2SF/data/{dataset}-5shot.jsonl"
-    with open(file_path, "r") as file:
-        lines = file.readlines()
-    
-    prompt = get_prompt(random.choice(lines))
-    prompts.append(tokenizer(prompt, add_special_tokens=True, return_tensors='pt').input_ids.cuda())
+datasets = ["piqa", "openbookqa", "arc_easy", "arc_challenge", "mathqa"]
 
 methods = {
-    # "FULL": (0.0, 0.0, 1.0, 1.0, False),
-    # "STREAMING_LLM": (ratio/2, 0.0, ratio/2, 1.0, False),
-    "H2O": (0.0, ratio/2, ratio/2, 1.0, False, None),
-    # "A2SF": (0.0, ratio, 0.0, 0.2, False),
-    # "STREAMING A2SF": (ratio/3, ratio/3, ratio/3, 0.2, False),
-    "A2SF_1": (0.0, ratio/2, ratio/2, 1.0, False, 1),
-    "A2SF_3": (0.0, ratio/2, ratio/2, 1.0, False, 3)
+    "FULL": (0.0, 0.0, 1.0, 1.0, None),
+    "H2O": (0.0, ratio/2, ratio/2, 1.0, None),
+    "A2SF": (0.0, ratio, 0.0, 0.2, None),
 }
 
-column = 3
-row = math.ceil(len(methods)/3)
+column = 2
+row = len(methods)
 result_dict = {}
 
-for method, (i, j, k, h, ideal, tmp) in methods.items():
+prompts = []
+for dataset in datasets:
+    random_index = None
+    for shot in [0, 1]:
+        file_path = f"/home/smp9898/A2SF/data/{dataset}-{shot}shot.jsonl"
+        with open(file_path, "r") as file:
+            lines = file.readlines()
+        
+        if random_index is None:
+            random_index = random.randint(0,len(lines)-1)
+        
+        prompt = get_prompt(lines[random_index])
+        prompts.append(tokenizer(prompt, add_special_tokens=True, return_tensors='pt').input_ids.cuda())
+
+for method, (i, j, k, h, tmp) in methods.items():
+
     config.streaming_ratio = i
     config.selecting_ratio = j
     config.recent_ratio = k
     config.forgetting_factor = h
     config.tmp = tmp
     
-    if ideal:
-        convert_kvcache_llama_heavy_recent_ideal(model, config)
-    else:
-        convert_kvcache_llama_heavy_recent(model, config)
+    convert_kvcache_llama_heavy_recent(model, config)
     
     model.load_state_dict(check_point)
     torch.cuda.empty_cache()
@@ -81,13 +81,16 @@ for method, (i, j, k, h, ideal, tmp) in methods.items():
             result_dict[method] = []
         result_dict[method].append(result.attentions)
 
-for index in range(len(prompts)):
+for index in range(0, 10, 2):
     for layer in tqdm(range(num_layers)):
         data_dict = {}
         result_path = os.path.join(dir_path, "mask", str(index), str(layer))
         
         for method in methods:
-            data_dict[method] = result_dict[method][index][layer].cpu().detach().squeeze(0)
+            data_dict[method] = (
+                result_dict[method][index][layer].cpu().detach().squeeze(0),
+                result_dict[method][index+1][layer].cpu().detach().squeeze(0)
+            )
 
         if not os.path.exists(result_path):
             os.makedirs(result_path)
@@ -96,13 +99,14 @@ for index in range(len(prompts)):
             plt.figure(figsize=(column*7, row*7))
             
             for idx, (method, data) in enumerate(data_dict.items()):
-                tmp = torch.pow(data[ln], 1/3).numpy()
+                for shot_index in range(2):
+                    tmp = torch.pow(data[shot_index][ln], 1/3).numpy()
 
-                plt.subplot(row, column, idx+1)
-                plt.title(method, fontsize=20)
-                plt.xticks([])
-                plt.yticks([])
-                plt.imshow(tmp, cmap="Blues")
+                    plt.subplot(row, column, column*idx+shot_index+1)
+                    plt.title(method, fontsize=20)
+                    plt.xticks([])
+                    plt.yticks([])
+                    plt.imshow(tmp, cmap="Blues")
             plt.tight_layout()
             plt.savefig(os.path.join(result_path, f"test_{ln}.png"))
             plt.close()
