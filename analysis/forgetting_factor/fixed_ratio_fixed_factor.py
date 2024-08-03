@@ -10,6 +10,8 @@ from tqdm import tqdm
 
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 
+dir_path = os.path.dirname(__file__)
+
 def get_prompt(json_line):
     data = json.loads(json_line)
     return data["prompt"]
@@ -44,7 +46,7 @@ def make_mask(input_tensor, heavy_ratio, penalty):
     return tensor
 
 def similarity(tensor_a, tensor_b):
-    return torch.sum(torch.multiply(tensor_a, tensor_b))/(torch.norm(tensor_a)*torch.norm(tensor_b) + 1e-10)
+    return torch.sum(torch.multiply(tensor_a, tensor_b)/(torch.norm(tensor_a)*torch.norm(tensor_b) + 1e-10))
 
 model_name = "meta-llama/Llama-2-7b-hf"
 
@@ -52,18 +54,19 @@ config = AutoConfig.from_pretrained(model_name)
 tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
 model = AutoModelForCausalLM.from_pretrained(model_name).half().eval().cuda()
 
-# plt.figure(figsize=(9,6))
+plt.figure(figsize=(9,6))
 for idx, dataset in enumerate(["openbookqa", "piqa", "arc_challenge", "arc_easy", "mathqa"]):
-    file_path = f"/home/smp9898/A2SF/lm/{dataset}-1.jsonl"
+    file_path = f"/home/smp9898/A2SF/data/{dataset}-5shot.jsonl"
 
     with open(file_path, "r") as file:
         lines = file.readlines()
 
     ratios = 0.2
-    penalties = torch.arange(0.0, 1.0, 0.05)
+    penalties = torch.arange(0.0, 1.0, 0.1)
     similarities = torch.zeros_like(penalties)
-    data_ratio = 0.1
-    data_size = int(len(lines) * data_ratio)
+    data_ratio = 0.1 
+    data_size = int(data_ratio * len(lines))
+    devider = data_size
 
     with tqdm(range(data_size)) as pbar:
         pbar.set_description(dataset)
@@ -80,18 +83,19 @@ for idx, dataset in enumerate(["openbookqa", "piqa", "arc_challenge", "arc_easy"
             tmp = []
             for penalty in penalties:
                 masked_tensors = make_mask(tensors, ratios, penalty)
-                tmp.append(similarity(tensors, masked_tensors)*10 - 9)
+                tmp.append(similarity(tensors, masked_tensors))
             tmp = torch.tensor(tmp)
 
             if torch.any(torch.isnan(tmp)):
+                devider -= 1
                 continue
 
             similarities += tmp
-
-    similarities /= data_size
+    similarities /= devider
+    similarities *= 100
 
     print(dataset)
-    # for i in range(similarities.shape[0]): print(f"{penalties[i]:.2f} {similarities[i]:.4f}")
+    for i in range(similarities.shape[0]): print(f"{penalties[i]:.2f} {similarities[i]:.4f}")
     print(f"{penalties[torch.argmax(similarities)]:.2f}")
 
     plt.subplot(2, 3, idx+1)
@@ -99,4 +103,4 @@ for idx, dataset in enumerate(["openbookqa", "piqa", "arc_challenge", "arc_easy"
     plt.plot(penalties, similarities)
 
 plt.tight_layout()
-plt.savefig(f"forgetting_factor_fixed_ratio_020_1_shots.png")
+plt.savefig(os.path.join(dir_path, f"forgetting_factor_fixed_ratio_020_5_shots.png"))

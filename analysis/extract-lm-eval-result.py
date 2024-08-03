@@ -7,15 +7,16 @@ def extract_dataset_acc(text):
     for idx, line in enumerate(lines):
         if '====' in line:
             current_key = line.replace("=", "").split(" ")[0]
-            results[current_key] = []
-        elif '|acc     |' in line:
+            if current_key not in results.keys():
+                results[current_key] = []
+        if '|acc     |' in line:
             parts = re.split(r'\|', line)
             dataset = parts[1].strip()
             acc = parts[6].strip()
             results[current_key].append((dataset, acc))
     return results
 
-with open("/home/smp9898/A2SF/0_8.txt", "r") as f:
+with open("/home/smp9898/A2SF/llama1_layer_importance.txt", "r") as f:
     text = f.read()
 
 results = extract_dataset_acc(text)

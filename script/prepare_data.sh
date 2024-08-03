@@ -1,5 +1,5 @@
 #!/bin/bash
 
 python -u generate_task_data.py \
-    --task_list openbookqa piqa arc_challenge arc_easy mathqa \
+    --task_list winogrande \
     --fewshot_list 5 \

@@ -25,7 +25,7 @@ def lm_model(model_name: str,
              recent_ratio: float = 0.1,
              layerwise_ratio: list = None,
              forgetting_factor: float = 1.0,
-             tmp: int = 0,
+             tmp: int = None,
              ideal: bool=False,
             ):
     config = AutoConfig.from_pretrained(model_name)

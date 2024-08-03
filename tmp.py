@@ -12,9 +12,9 @@ initialize_tasks()
 
 if __name__ == "__main__":
     task_list = ["openbookqa", "piqa", "arc_challenge", "arc_easy", "mathqa", "winogrande"]
-    model_list = ["meta-llama/Llama-2-7b-hf"]
+    model_list = ["huggyllama/llama-7b"]
     fewshot_list = [5]
-    ratio_list = [0.1, 0.2]
+    ratio_list = [0.1]
 
     for num_fewshot in fewshot_list:
         print(f"fewshot: {num_fewshot}")

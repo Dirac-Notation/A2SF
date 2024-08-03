@@ -25,7 +25,7 @@ def compare_mask(mask1, mask2):
     for i in range(mask1.shape[1]):
         mask_a = mask1[0, i, :, :]
         mask_b = mask2[0, i, :, :]
-        similar = torch.sum(torch.multiply(mask_a, mask_b))/(torch.norm(mask_a) * torch.norm(mask_b) + 1e-10)
+        similar = torch.sum(torch.multiply(mask_a, mask_b)/(torch.norm(mask_a) * torch.norm(mask_b) + 1e-10))
 
         result.append(similar.item())
         

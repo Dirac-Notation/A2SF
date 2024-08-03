@@ -188,7 +188,7 @@ def convert_kvcache_llama_heavy_recent(model, config):
             # config.penalty = tmp_factor
             if config.tmp is not None:
                 ratio = config.streaming_ratio + config.selecting_ratio + config.recent_ratio
-                if int(name) != config.tmp:
+                if int(name) == config.tmp:
                     config.forgetting_factor = 0.2
                     config.streaming_ratio = 0.0
                     config.selecting_ratio = ratio
