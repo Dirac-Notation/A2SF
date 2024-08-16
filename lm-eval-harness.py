@@ -41,8 +41,8 @@ if __name__ == "__main__":
                 config = {
                     # "Full": (0.0, 1.0, 0.0, 1.0, False),
                     # "STREAMING_LLM": (ratio/2, 0.0, ratio/2, 1.0, False),
-                    # "H2O": (0.0, ratio/2, ratio/2, 1.0, False),
-                    # "A2SF": (0.0, ratio, 0.0, 0.2, False),
+                    "H2O": (0.0, ratio/2, ratio/2, 1.0, False),
+                    "A2SF": (0.0, ratio, 0.0, 0.2, False),
                     # "STREAMING_A2SF": (ratio/3, ratio/3, ratio/3, 0.2, False),
                     # "A2SF_0.0": (0.0, ratio, 0.0, 0.0, False),
                     # "A2SF_0.1": (0.0, ratio, 0.0, 0.1, False),
@@ -52,8 +52,8 @@ if __name__ == "__main__":
                     # "A2SF_0.5": (0.0, ratio, 0.0, 0.5, False),
                     # "A2SF_0.6": (0.0, ratio, 0.0, 0.6, False),
                     # "A2SF_0.7": (0.0, ratio, 0.0, 0.7, False),
-                    "A2SF_0.8": (0.0, ratio, 0.0, 0.8, False),
-                    "A2SF_0.9": (0.0, ratio, 0.0, 0.9, False),
+                    # "A2SF_0.8": (0.0, ratio, 0.0, 0.8, False),
+                    # "A2SF_0.9": (0.0, ratio, 0.0, 0.9, False),
                 }
 
                 for method, (streaming, selecting, recent, factor, ideal) in config.items():
