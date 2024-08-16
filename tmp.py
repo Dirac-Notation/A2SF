@@ -11,8 +11,17 @@ from utils_lm_eval.lm_model import lm_model
 initialize_tasks()
 
 if __name__ == "__main__":
-    task_list = ["openbookqa", "piqa", "arc_challenge", "arc_easy", "mathqa", "winogrande"]
-    model_list = ["huggyllama/llama-7b"]
+    parser = argparse.ArgumentParser()
+    
+    parser.add_argument("--start", type=int)
+    parser.add_argument("--end", type=int)
+    
+    args = parser.parse_args()
+    
+    print(f"start {args.start} / end {args.end}")
+    
+    task_list = ["openbookqa", "piqa", "arc_challenge", "arc_easy", "mathqa"]
+    model_list = ["meta-llama/Llama-2-7b-hf", "huggyllama/llama-7b"]
     fewshot_list = [5]
     ratio_list = [0.1]
 
@@ -30,7 +39,7 @@ if __name__ == "__main__":
 
             for ratio in ratio_list:
                 config = {}
-                for i in range(24,32): config[f"ASDF_{i}"] = (0.0, ratio, 0.0, 0.2, i)
+                for i in range(args.start, args.end): config[f"ASDF_{i}"] = (0.0, ratio, 0.0, 0.2, i)
 
                 for method, (streaming, selecting, recent, factor, tmp) in config.items():
                     

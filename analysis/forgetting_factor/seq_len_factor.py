@@ -46,7 +46,10 @@ def make_mask(input_tensor, heavy_ratio, penalty):
     return tensor
 
 def similarity(tensor_a, tensor_b):
-    return torch.sum(torch.multiply(tensor_a, tensor_b)/(torch.norm(tensor_a) + 1e-10))/(torch.norm(tensor_b) + 1e-10)
+    norms = torch.norm(tensor_a, dim=(-1,-2)) * torch.norm(tensor_b, dim=(-1,-2)) + 1e-10
+    headwise_similarity = torch.sum(torch.multiply(tensor_a, tensor_b), dim=(-1,-2))/norms
+    return torch.mean(headwise_similarity).item()
+
 
 model_name = "meta-llama/Llama-2-7b-hf"
 
@@ -55,6 +58,7 @@ tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
 model = AutoModelForCausalLM.from_pretrained(model_name).half().eval().cuda()
 
 for idx, dataset in enumerate(["openbookqa", "piqa", "arc_challenge", "arc_easy", "mathqa"]):
+# for idx, dataset in enumerate(["mathqa"]):
     file_path = f"/home/smp9898/A2SF/data/{dataset}-5shot.jsonl"
 
     with open(file_path, "r") as file:
@@ -63,9 +67,8 @@ for idx, dataset in enumerate(["openbookqa", "piqa", "arc_challenge", "arc_easy"
     ratios = 0.2
     penalties = torch.arange(0.0, 1.0, 0.1)
     data_ratio = 0.1 
-    # data_size = int(data_ratio * len(lines))
-    data_size = 200
-    devider = data_size
+    data_size = int(data_ratio * len(lines))
+    # data_size = 200
     x = []
     y = []
 
@@ -87,14 +90,12 @@ for idx, dataset in enumerate(["openbookqa", "piqa", "arc_challenge", "arc_easy"
                 tmp.append(similarity(tensors, masked_tensors))
             tmp = torch.tensor(tmp)
 
-            if torch.any(torch.isnan(tmp)):
-                devider -= 1
-                continue
-
             x.append(input_ids.numel())
             y.append(torch.argmax(tmp)/10)
             
     plt.scatter(x,y, label=dataset, s=5, alpha=0.5)
 
-plt.legend()
-plt.savefig(os.path.join(dir_path, f"length-factor.png"))
+    plt.legend()
+    plt.ylim((-0.05, 1.05))
+    plt.savefig(os.path.join(dir_path, f"length_factor_{dataset}.png"))
+    plt.close()

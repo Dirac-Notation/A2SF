@@ -5,8 +5,6 @@ def extract_dataset_acc(text):
     results = {}
     current_key = ''
     for idx, line in enumerate(lines):
-        if "huggyllama/llama-7b" in line:
-            return results
         if '====' in line:
             current_key = line.replace("=", "").split(" ")[0]
             if current_key not in results.keys():
@@ -18,7 +16,7 @@ def extract_dataset_acc(text):
             results[current_key].append((dataset, acc))
     return results
 
-with open("/home/smp9898/A2SF/factorwise_89.txt", "r") as f:
+with open("/home/smp9898/A2SF/llama2_factorwise_1shot.txt", "r") as f:
     text = f.read()
 
 results = extract_dataset_acc(text)
@@ -33,5 +31,5 @@ for key in results:
 for dataset in dataset_results:
     print(dataset)
     for key, acc in dataset_results[dataset]:
-        print(f"{acc}")
+        print(f"{key} {acc}")
     print()
