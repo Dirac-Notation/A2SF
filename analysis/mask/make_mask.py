@@ -31,12 +31,12 @@ model.cuda()
 dir_path = os.path.dirname(__file__)
 
 num_layers = 32
-ratio = 0.1
+ratio = 0.2
 
 datasets = ["piqa"]#, "openbookqa", "arc_easy", "arc_challenge", "mathqa"]
 prompts = []
 for dataset in datasets:
-    file_path = f"/home/smp9898/A2SF/data/{dataset}-5shot.jsonl"
+    file_path = f"/home/smp9898/A2SF/data/{dataset}-1shot.jsonl"
     with open(file_path, "r") as file:
         lines = file.readlines()
     
@@ -44,13 +44,15 @@ for dataset in datasets:
     prompts.append(tokenizer(prompt, add_special_tokens=True, return_tensors='pt').input_ids.cuda())
 
 methods = {
-    # "FULL": (0.0, 0.0, 1.0, 1.0, False),
+    "FULL": (0.0, 0.0, 1.0, 1.0, False, None),
     # "STREAMING_LLM": (ratio/2, 0.0, ratio/2, 1.0, False),
+    "LOCAL": (0.0, 0.0, ratio, 1.0, False, None),
     "H2O": (0.0, ratio/2, ratio/2, 1.0, False, None),
-    # "A2SF": (0.0, ratio, 0.0, 0.2, False),
+    "A2SF_010": (0.0, ratio, 0.0, 0.1, False, None),
+    "A2SF_050": (0.0, ratio, 0.0, 0.5, False, None),
     # "STREAMING A2SF": (ratio/3, ratio/3, ratio/3, 0.2, False),
-    "A2SF_1": (0.0, ratio/2, ratio/2, 1.0, False, 1),
-    "A2SF_3": (0.0, ratio/2, ratio/2, 1.0, False, 3)
+    # "A2SF_1": (0.0, ratio/2, ratio/2, 1.0, False, 1),
+    # "A2SF_3": (0.0, ratio/2, ratio/2, 1.0, False, 3)
 }
 
 column = 3

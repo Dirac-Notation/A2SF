@@ -27,9 +27,9 @@ for j in range(len(datasets)):
         
         result += 7*f"{text[0]}\t" + "\n"
         
-        for a in range(4):
+        for a in range(3):
             for b in range(7):
-                result += f"{text[4*b + a + 1]}\t"
+                result += f"{text[3*b + a + 1]}\t"
             result += "\n"
         
         final_result += f"{model_fewshot} | {dataset}\n"

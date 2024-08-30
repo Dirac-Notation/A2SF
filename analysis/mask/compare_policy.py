@@ -46,11 +46,11 @@ prompts = []
 
 seq_length = 0
 for dataset in datasets:
-    file_path = f"/home/smp9898/A2SF/data/{dataset}-5shot.jsonl"
+    file_path = f"/home/smp9898/A2SF/data/{dataset}-1shot.jsonl"
     with open(file_path, "r") as file:
         lines = file.readlines()
     
-    for i in range(20):
+    for i in range(4):
         prompt = get_prompt(random.choice(lines))
         input_ids = tokenizer(prompt, add_special_tokens=True, return_tensors='pt').input_ids
         seq_length += input_ids.numel()
@@ -66,20 +66,21 @@ with tqdm(prompts) as pbar:
         with torch.no_grad():
             result = model(prompt, output_attentions=True)
 
-        full_masks.append([result.attentions[layer].cpu().detach() for layer in range(len(result.attentions))])
+        full_masks.append([result.attentions[layer].cpu().detach().to(torch.float) for layer in range(len(result.attentions))])
 
 num_layers = 32
 ratio = 0.1
 
 methods = {
-    # "LOCAL": (0.0, 0.0, ratio, 1.0, False),
-    "STREAMING_LLM": (ratio/2, 0.0, ratio/2, 1.0, False),
+    "LOCAL": (0.0, 0.0, ratio, 1.0, False),
+    # "STREAMING_LLM": (ratio/2, 0.0, ratio/2, 1.0, False),
     "H2O": (0.0, ratio/2, ratio/2, 1.0, False),
     "A2SF": (0.0, ratio, 0.0, 0.2, False),
 }
 
 mask_list = {
-    "STREAMING_LLM": np.zeros(num_layers),
+    "LOCAL": np.zeros(num_layers),
+    # "STREAMING_LLM": np.zeros(num_layers),
     "H2O": np.zeros(num_layers),
     "A2SF": np.zeros(num_layers),
 }
@@ -89,6 +90,7 @@ for name, (i, j, k, h, ideal) in methods.items():
     config.selecting_ratio = j
     config.recent_ratio = k
     config.forgetting_factor = h
+    config.tmp = None
     
     if ideal:
         convert_kvcache_llama_heavy_recent_ideal(model, config)
@@ -106,7 +108,7 @@ for name, (i, j, k, h, ideal) in methods.items():
             with torch.no_grad():
                 result = model(prompt, output_attentions=True)
             
-            tmp_masks.append([result.attentions[layer].cpu().detach() for layer in range(len(result.attentions))])
+            tmp_masks.append([result.attentions[layer].cpu().detach().to(torch.float) for layer in range(len(result.attentions))])
     
     for index in tqdm(range(len(prompts))):
         for layer in range(num_layers):
