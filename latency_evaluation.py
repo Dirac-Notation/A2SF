@@ -10,22 +10,23 @@ for model_name in ["meta-llama/Llama-2-7b-hf"]:
     config = AutoConfig.from_pretrained(model_name)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     
-    for policy in ["h2o", "a2sf"]:
-        for input_length, batch_size in [(2048, 2), (1024, 4), (512, 8)]:
+    # for policy in ["h2o", "a2sf"]:
+    for policy in ["a2sf"]:
+        # for input_length, batch_size in [(2048, 2), (1024, 4), (512, 8)]:
+        for input_length, batch_size in [(1024, 1)]:
             if model_name == "huggyllama/llama-7b" and input_length == 2048:
                 continue
             
-            config.forgetting_factor = 0.2
+            config.scoring_policy = policy
+            config.hh_size = math.ceil(input_length*0.1)
+            config.recent_size = math.ceil(input_length*0.1)
             if policy == "h2o":
-                config.hh_size = math.ceil(input_length*0.2)
-                config.recent_size = math.ceil(input_length*0.2)
-                config.scoring_policy = "h2o"
+                config.forgetting_factor = 1.0
             elif policy == "a2sf":
-                config.hh_size = math.ceil(input_length*0.2)*2
-                config.recent_size = 0
-                config.scoring_policy = "a2sf"
+                config.forgetting_factor = 0.4
 
             model = H2OLlamaForCausalLM.from_pretrained(model_name, config=config)
+            # model = AutoModelForCausalLM.from_pretrained(model_name, config=config)
             torch.cuda.empty_cache()
             model.eval().half().cuda()
 
@@ -35,14 +36,11 @@ for model_name in ["meta-llama/Llama-2-7b-hf"]:
 
             result_list = []
 
-            for _ in tqdm(range(10)):
+            for _ in tqdm(range(3)):
                 input_ids = torch.randint(low=0, high=vocab_size, size=(batch_size, input_length)).to(model.device)
 
                 starter.record()
-                model.generate(
-                    input_ids=input_ids,
-                    max_length=input_length*2
-                )
+                model.generate(input_ids=input_ids, max_length=2*input_length)
                 ender.record()
                 torch.cuda.synchronize()
                 

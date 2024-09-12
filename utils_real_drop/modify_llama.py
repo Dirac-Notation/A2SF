@@ -7,7 +7,6 @@ import torch.utils.checkpoint
 
 import torch.nn.functional as F
 
-# from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.models.llama.modeling_llama import (
     LlamaAttention,
     rotate_half,
@@ -15,10 +14,10 @@ from transformers.models.llama.modeling_llama import (
     LlamaRotaryEmbedding,
     LlamaLinearScalingRotaryEmbedding,
     LlamaDynamicNTKScalingRotaryEmbedding,
+    apply_rotary_pos_emb,
     LlamaForCausalLM,
 )
 from transformers.models.llama import LlamaConfig
-import types
 
 __all__ = ["H2OLlamaForCausalLM", "H2OLlamaAttention"]
 
@@ -61,8 +60,8 @@ def apply_rotary_pos_emb_single(x, cos, sin, position_ids):
 class H2OKVCache_LayerWise:
     def __init__(
         self,
-        hh_size=4,
-        recent_size=512,
+        hh_size=128,
+        recent_size=128,
         forgetting_factor=0.2,
         scoring_policy="a2sf",
         k_seq_dim=2,
@@ -77,7 +76,8 @@ class H2OKVCache_LayerWise:
         self.v_seq_dim = v_seq_dim
         self.hh_score = None
         
-        self.prompting = True
+        self.prefill = True
+        self.recent_index = recent_size - 2
 
     def __call__(self, past_key_values, attn_score_cache):
         
@@ -94,8 +94,8 @@ class H2OKVCache_LayerWise:
 
         select_hh_scores = self.hh_score[:,:,:(seq_len-self.recent_size)]
         
-        if self.prompting:
-            self.prompting = False
+        if self.prefill:
+            self.prefill = False
             
             _, keep_topk = torch.topk(select_hh_scores, self.hh_size, dim=-1)
             
@@ -107,16 +107,32 @@ class H2OKVCache_LayerWise:
             
             mask = torch.zeros(self.hh_score.shape, dtype=torch.bool).to(past_key_values[0].device)
             mask = mask.scatter(-1, keep_idx, 1)
+
+            k_hh_recent = past_key_values[0][mask].view(bsz, num_heads, -1, head_dim)
+            v_hh_recent = past_key_values[1][mask].view(bsz, num_heads, -1, head_dim)
+            self.hh_score= self.hh_score[mask].view(bsz, num_heads, self.cache_size)
+        
         else:
             keep_idx = torch.argmin(select_hh_scores, dim=-1).unsqueeze(-1)
-        
-            mask = torch.ones(self.hh_score.shape, dtype=torch.bool).to(past_key_values[0].device)
-            mask = mask.scatter(-1, keep_idx, 0)
-        
-        k_hh_recent = past_key_values[0][mask].view(bsz, num_heads, -1, head_dim)
-        v_hh_recent = past_key_values[1][mask].view(bsz, num_heads, -1, head_dim)
-        
-        self.hh_score= self.hh_score[mask].view(bsz, num_heads, self.cache_size)
+            key_value_idx = keep_idx.repeat(1, 1, head_dim).unsqueeze(-2)
+
+            last_recent_index = self.recent_index + 2
+            
+            for i in range(2):
+                last_col_values = past_key_values[i][:,:,-last_recent_index].unsqueeze(-2)
+                past_key_values[i].scatter_(-2, key_value_idx, last_col_values)
+                
+                past_key_values[i][:,:,-last_recent_index] = past_key_values[i][:,:,-1]
+            
+            if self.recent_size != 0:
+                self.recent_index = (self.recent_index - 1) % (self.recent_size - 1)
+
+            last_col_values = self.hh_score[:,:,-1].unsqueeze(-1)
+            self.hh_score.scatter_(-1, keep_idx, last_col_values)
+            
+            k_hh_recent = past_key_values[0][:,:,:-1]
+            v_hh_recent = past_key_values[1][:,:,:-1]
+            self.hh_score = self.hh_score[:,:,:-1]
 
         return (k_hh_recent, v_hh_recent)
 
@@ -142,7 +158,7 @@ class H2OKVCache_LayerWise:
 
     def _clean_scores(self):
         self.hh_score = None
-        self.prompting = True
+        self.prefill = True
 
 
 class H2OLlamaAttention(nn.Module):
@@ -211,6 +227,7 @@ class H2OLlamaAttention(nn.Module):
         return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
 
     def _clean_cache(self):
+        self.seq_length = 0
         self.kv_cache._clean_scores()
 
     def forward(
@@ -341,30 +358,8 @@ class H2OLlamaAttention(nn.Module):
 
 
 class H2OLlamaForCausalLM(LlamaForCausalLM):
-    def __init__(
-        self,
-        model_name = "meta-llama/Llama-2-7b-hf",
-        accumulate_mode = "a2sf",
-        cache_budget = 20,
-        forgetting_factor = 0.1,
-    ):
-        config = LlamaConfig.from_pretrained(model_name)
-        
-        # A2SF Config
-        if accumulate_mode == "h2o":
-            config.hh_size = int(cache_budget/2)
-            config.recent_size = int(cache_budget/2)
-            config.forgetting_factor = 1.0
-        elif accumulate_mode == "a2sf":
-            config.hh_size = cache_budget
-            config.recent_size = 0
-            config.forgetting_factor = forgetting_factor
-        else:
-            assert "Non defined accumulate mode"
-        config.scoring_policy = accumulate_mode
-        
+    def __init__(self, config):
         super().__init__(config)
-        
         num_layers = len(self.model.layers)
         for layer_idx in range(num_layers):
             self.model.layers[layer_idx].self_attn = H2OLlamaAttention(config)

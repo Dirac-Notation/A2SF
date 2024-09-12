@@ -11,10 +11,6 @@ from tqdm import tqdm
 
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 
-sys.path.append("/home/smp9898/A2SF")
-
-from utils_lm_eval.modify_llama import convert_kvcache_llama_heavy_recent
-
 dir_path = os.path.dirname(__file__)
 
 def mode(x: list):
@@ -27,7 +23,8 @@ def mode(x: list):
 
 def get_prompt(json_line):
     data = json.loads(json_line)
-    return data["prompt"]
+    # return data["prompt"]
+    return data["article"] 
 
 def make_mask(input_tensor, heavy_ratio, penalty):
     tensor = torch.clone(input_tensor)
@@ -87,29 +84,30 @@ penalties = torch.arange(0.0, 1.0, 0.1)
 simlir = None
 
 plt.figure(figsize=(9,6))
-for i in range(10):
-    convert_kvcache_llama_heavy_recent(model, config)
-    model = model.half().eval().cuda()
-    for idx, dataset in enumerate(["openbookqa", "piqa", "arc_challenge", "arc_easy", "mathqa"]):
-        file_path = f"/home/smp9898/A2SF/data/{dataset}-5shot.jsonl"
 
-        with open(file_path, "r") as file:
-            lines = file.readlines()
-        
-        # similarities = torch.zeros_like(penalties)
-        # data_size = int(data_ratio * len(lines))
-        data_size = 100
-        asdf = []
-        
-        with tqdm(range(data_size)) as pbar:
-            pbar.set_description(dataset)
-            for _ in pbar:
-                prompt = random.choice(lines)
-                
-                input_ids = tokenizer(get_prompt(prompt), add_special_tokens=True, return_tensors='pt').input_ids.cuda()
+model = model.half().eval().cuda()
+for idx, dataset in enumerate(["xsum"]):
+    file_path = f"/home/smp9898/A2SF/data/{dataset}-3shot.jsonl"
 
-                with torch.no_grad():
-                    result = model(input_ids, output_attentions=True)
+    with open(file_path, "r") as file:
+        lines = file.readlines()
+    
+    # similarities = torch.zeros_like(penalties)
+    # data_size = int(data_ratio * len(lines))
+    data_size = 100
+    asdf = []
+    
+    with tqdm(range(data_size)) as pbar:
+        pbar.set_description(dataset)
+        for _ in pbar:
+            prompt = random.choice(lines)
+            
+            input_ids = tokenizer(get_prompt(prompt), add_special_tokens=True, return_tensors='pt').input_ids.cuda()
+            
+            pbar.set_postfix({"length": input_ids.numel()})
+            
+            with torch.no_grad():
+                result = model(input_ids, output_attentions=False)
     #         tensors = torch.stack(result.attentions).squeeze(1).detach().to(torch.float)
     #         values = torch.stack([result.past_key_values[i][1] for i in range(32)]).squeeze(1).detach().to(torch.float)
 
