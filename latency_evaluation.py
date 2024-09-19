@@ -36,7 +36,7 @@ for model_name in ["meta-llama/Llama-2-7b-hf"]:
 
             result_list = []
 
-            for _ in tqdm(range(3)):
+            for _ in tqdm(range(10)):
                 input_ids = torch.randint(low=0, high=vocab_size, size=(batch_size, input_length)).to(model.device)
 
                 starter.record()

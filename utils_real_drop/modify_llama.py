@@ -80,7 +80,7 @@ class H2OKVCache_LayerWise:
         self.recent_index = recent_size - 2
 
     def __call__(self, past_key_values, attn_score_cache):
-        
+
         self._update_hh_score(attn_score_cache)
 
         if past_key_values is None:
@@ -88,10 +88,8 @@ class H2OKVCache_LayerWise:
         seq_len = past_key_values[0].size(self.k_seq_dim)
         if seq_len <= self.cache_size:
             return past_key_values
-
         # hh-selection
         bsz, num_heads, _, head_dim = past_key_values[0].shape
-
         select_hh_scores = self.hh_score[:,:,:(seq_len-self.recent_size)]
         
         if self.prefill:
@@ -107,32 +105,16 @@ class H2OKVCache_LayerWise:
             
             mask = torch.zeros(self.hh_score.shape, dtype=torch.bool).to(past_key_values[0].device)
             mask = mask.scatter(-1, keep_idx, 1)
-
-            k_hh_recent = past_key_values[0][mask].view(bsz, num_heads, -1, head_dim)
-            v_hh_recent = past_key_values[1][mask].view(bsz, num_heads, -1, head_dim)
-            self.hh_score= self.hh_score[mask].view(bsz, num_heads, self.cache_size)
-        
         else:
             keep_idx = torch.argmin(select_hh_scores, dim=-1).unsqueeze(-1)
-            key_value_idx = keep_idx.repeat(1, 1, head_dim).unsqueeze(-2)
+        
+            mask = torch.ones(self.hh_score.shape, dtype=torch.bool).to(past_key_values[0].device)
+            mask = mask.scatter(-1, keep_idx, 0)
 
-            last_recent_index = self.recent_index + 2
-            
-            for i in range(2):
-                last_col_values = past_key_values[i][:,:,-last_recent_index].unsqueeze(-2)
-                past_key_values[i].scatter_(-2, key_value_idx, last_col_values)
-                
-                past_key_values[i][:,:,-last_recent_index] = past_key_values[i][:,:,-1]
-            
-            if self.recent_size != 0:
-                self.recent_index = (self.recent_index - 1) % (self.recent_size - 1)
+        k_hh_recent = past_key_values[0][mask].view(bsz, num_heads, -1, head_dim)
+        v_hh_recent = past_key_values[1][mask].view(bsz, num_heads, -1, head_dim)
 
-            last_col_values = self.hh_score[:,:,-1].unsqueeze(-1)
-            self.hh_score.scatter_(-1, keep_idx, last_col_values)
-            
-            k_hh_recent = past_key_values[0][:,:,:-1]
-            v_hh_recent = past_key_values[1][:,:,:-1]
-            self.hh_score = self.hh_score[:,:,:-1]
+        self.hh_score= self.hh_score[mask].view(bsz, num_heads, self.cache_size)
 
         return (k_hh_recent, v_hh_recent)
 
