@@ -3,4 +3,5 @@
 *.png
 *.pyc
 *.pt
+*.jsonl
 data
