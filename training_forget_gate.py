@@ -1,55 +1,109 @@
 import torch
-from transformers import LlamaForCausalLM, LlamaTokenizer, AdamW
-from torch.utils.data import DataLoader
+import torch.nn as nn
+import torch.nn.functional as F
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
+from datasets import load_dataset
+from torch.utils.data import DataLoader, Dataset
 import json
+import random
 
-model_name = "llama-2-7b"
-model = LlamaForCausalLM.from_pretrained(model_name)
-tokenizer = LlamaTokenizer.from_pretrained(model_name)
+def get_wikitext2(nsamples, seqlen, tokenizer, batch_size=1):
+    # Load train and test datasets
+    traindata = load_dataset('wikitext', 'wikitext-2-raw-v1', split='train')
 
-train_data = []
-with open('data/data.jsonl', 'r') as f:
-    for line in f:
-        train_data.append(json.loads(line))
-
-train_encodings = tokenizer([item['text'] for item in train_data], truncation=True, padding=True)
-
-class CustomDataset(torch.utils.data.Dataset):
-    def __init__(self, encodings):
-        self.encodings = encodings
-
-    def __getitem__(self, idx):
-        item = {key: torch.tensor(val[idx]) for key, val in self.encodings.items()}
-        return item
-
-    def __len__(self):
-        return len(self.encodings.input_ids)
-
-train_dataset = CustomDataset(train_encodings)
-train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True)
-
-for name, param in model.named_parameters():
-    if 'query' not in name:
-        param.requires_grad = False
-
-device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-model.to(device)
-
-optimizer = AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=5e-5)
-
-model.train()
-for epoch in range(10):
-    for batch in train_loader:
-        optimizer.zero_grad()
-        input_ids = batch['input_ids'].to(device)
-        attention_mask = batch['attention_mask'].to(device)
-        labels = batch['input_ids'].to(device)
-        
-        outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
-        loss = outputs.loss
-        loss.backward()
-        optimizer.step()
+    # Encode datasets
+    trainenc = tokenizer(" ".join(traindata['text']), return_tensors='pt')
     
-    print(f"Epoch {epoch+1} completed with loss: {loss.item()}")
+    # Generate samples from training set
+    trainloader = []
+    for _ in range(nsamples):
+        inps = torch.zeros((batch_size, seqlen)).long()
+        tars = torch.zeros_like(inps)
+        for b in range(batch_size):
+            i = random.randint(0, trainenc.input_ids.shape[1] - seqlen - 1)
+            j = i + seqlen
+            inp = trainenc.input_ids[:, i:j]
+            tar = inp.clone()
+            tar[:, :-1] = -100
+            inps[b] = inp[0]
+            tars[b] = tar[0]
 
-print("Training completed!")
+        trainloader.append((inps, tars))
+
+    return trainloader
+
+class KAttentionDataset(Dataset):
+    def __init__(self, K, Attention):
+        pass
+    
+    def __len__(self):
+        pass
+    
+    def __getitem__(self, idx):
+        pass
+
+class ForgetGate(nn.Module):
+    def __init__(self, num_head, dim_head):
+        super().__init__()
+        
+        self.forget_gate_weight = nn.Parameter(torch.zeros(num_head, 2*dim_head, 1), requires_grad=True)
+        self.forget_gate_bias = nn.Parameter(torch.zeros(1, num_head, 1, 1), requires_grad=True)
+        
+        self.sigmoid = nn.Sigmoid()
+    
+    def forward(self, keys):
+        last_vector = keys[:, :, -1, :]
+        cated_keys = torch.cat((keys, last_vector.unsqueeze(2).expand(-1, -1, keys.size(2), -1)), dim=-1)
+        
+        forget_factors = torch.matmul(cated_keys, self.forget_gate_weight) + self.forget_gate_bias
+        forget_factors = self.sigmoid(forget_factors)
+        
+        return forget_factors.squeeze(-1)
+        
+
+model = AutoModelForCausalLM.from_pretrained("gpt2")
+tokenizer = AutoTokenizer.from_pretrained("gpt2")
+config = AutoConfig.from_pretrained("gpt2")
+gate = ForgetGate(config.n_head, int(config.n_embd/config.n_head))
+
+nsamples = 10
+seqlen = 512
+batch_size = 4
+budget = 200
+
+trainloader = get_wikitext2(
+    nsamples = nsamples,
+    seqlen = seqlen,
+    tokenizer = tokenizer,
+    batch_size = batch_size
+)
+
+model.eval().cuda()
+gate.cuda()
+
+for epoch in range(100): # epochs
+    for li in range(config.n_layer):
+        outputs = model(trainloader[epoch][0].to("cuda"), output_attentions=True)
+        
+        ks = outputs.past_key_values[li][0]
+        ats = outputs.attentions[li]
+        
+        mask = torch.ones((batch_size, config.n_head, seqlen))
+        masked_ats = ats.clone()
+        
+        first_step = True
+        scores = torch.zeros((batch_size, config.n_head, seqlen), device="cuda")
+        
+        for step in range(budget, seqlen):
+            if first_step:
+                for i in range(budget):
+                    forget_factor = gate(ks[:, :, :i+1, :])
+                    scores += masked_ats[:, :, i, :] * F.pad(forget_factor, (0, seqlen - i - 1))
+                first_step = False
+            else:
+                forget_factor = gate(ks[:, :, :step+1, :])
+                scores += masked_ats[:, :, step, :] * F.pad(forget_factor, (0, seqlen - step - 1))
+        
+            min_idx = torch.argmin(scores, dim=-1)
+        
+        import pdb; pdb.set_trace()
