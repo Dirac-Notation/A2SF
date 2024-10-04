@@ -88,13 +88,13 @@ for epoch in range(100): # epochs
         ks = outputs.past_key_values[li][0]
         ats = outputs.attentions[li]
         
-        mask = torch.ones((batch_size, config.n_head, seqlen))
+        mask = torch.ones((batch_size, config.n_head, seqlen), device="cuda")
         masked_ats = ats.clone()
         
         first_step = True
         scores = torch.zeros((batch_size, config.n_head, seqlen), device="cuda")
         
-        for step in range(budget, seqlen):
+        for step in range(budget, seqlen-1):
             if first_step:
                 for i in range(budget):
                     forget_factor = gate(ks[:, :, :i+1, :])
@@ -104,6 +104,10 @@ for epoch in range(100): # epochs
                 forget_factor = gate(ks[:, :, :step+1, :])
                 scores += masked_ats[:, :, step, :] * F.pad(forget_factor, (0, seqlen - step - 1))
         
-            min_idx = torch.argmin(scores, dim=-1)
+
+            min_idx = torch.argmin(scores + 100 * ( 1 - mask ), dim=-1)
+            mask = mask.scatter(-1, min_idx.unsqueeze(-1), 0)
+            
+            masked_ats[:, :, step+1, :] = masked_ats[:, :, step+1, :] * mask
         
         import pdb; pdb.set_trace()
