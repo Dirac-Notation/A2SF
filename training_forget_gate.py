@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.optim as optim
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 from datasets import load_dataset
 from torch.utils.data import DataLoader, Dataset
@@ -78,6 +79,9 @@ trainloader = get_wikitext2(
     batch_size = batch_size
 )
 
+criterion = nn.MSELoss()
+optimizer = optim.Adam(gate.parameters, lr=0.001)
+
 model.eval().cuda()
 gate.cuda()
 
@@ -110,4 +114,4 @@ for epoch in range(100): # epochs
             
             masked_ats[:, :, step+1, :] = masked_ats[:, :, step+1, :] * mask
         
-        import pdb; pdb.set_trace()
+        ats - masked_ats

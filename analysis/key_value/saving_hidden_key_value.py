@@ -6,7 +6,7 @@ import numpy as np
 
 sys.path.append("/home/smp9898/A2SF")
 
-from utils_lm_eval.modify_llama import convert_kvcache_llama_heavy_recent
+from utils_lm_eval.modify_llama_backup import convert_kvcache_llama_heavy_recent
 from tqdm import tqdm
 
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig

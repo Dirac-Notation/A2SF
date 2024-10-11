@@ -12,7 +12,7 @@ from tqdm import tqdm
 
 sys.path.append("/home/smp9898/A2SF")
 
-from utils_lm_eval.modify_llama import convert_kvcache_llama_heavy_recent
+from utils_lm_eval.modify_llama_backup import convert_kvcache_llama_heavy_recent
 from utils_lm_eval.ideal_llama import convert_kvcache_llama_heavy_recent_ideal
 
 def get_prompt(json_line):

@@ -46,10 +46,10 @@ for dataset in datasets:
 methods = {
     "FULL": (0.0, 0.0, 1.0, 1.0, False, None),
     # "STREAMING_LLM": (ratio/2, 0.0, ratio/2, 1.0, False),
-    "LOCAL": (0.0, 0.0, ratio, 1.0, False, None),
-    "H2O": (0.0, ratio/2, ratio/2, 1.0, False, None),
-    "A2SF_010": (0.0, ratio, 0.0, 0.1, False, None),
-    "A2SF_050": (0.0, ratio, 0.0, 0.5, False, None),
+    # "LOCAL": (0.0, 0.0, ratio, 1.0, False, None),
+    # "H2O": (0.0, ratio/2, ratio/2, 1.0, False, None),
+    # "A2SF_010": (0.0, ratio, 0.0, 0.1, False, None),
+    "A2SF_050": (0.0, ratio/2, ratio/2, 0.5, False, None),
     # "STREAMING A2SF": (ratio/3, ratio/3, ratio/3, 0.2, False),
     # "A2SF_1": (0.0, ratio/2, ratio/2, 1.0, False, 1),
     # "A2SF_3": (0.0, ratio/2, ratio/2, 1.0, False, 3)

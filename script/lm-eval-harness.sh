@@ -4,9 +4,9 @@ CUDA=$1
 
 CUDA_VISIBLE_DEVICES=$CUDA python lm-eval-harness.py \
     --task_list openbookqa piqa arc_challenge arc_easy mathqa \
-    --model_list huggyllama/llama-7b \
+    --model_list meta-llama/Llama-2-7b-hf \
     --fewshot_list 5 \
-    --ratio_list 0.3
+    --ratio_list 0.1 0.2 0.3
 
 # Dataset
 ## openbookqa piqa arc_challenge arc_easy mathqa
