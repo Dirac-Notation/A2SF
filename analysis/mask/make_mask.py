@@ -14,7 +14,6 @@ from tqdm import tqdm
 sys.path.append("/home/smp9898/A2SF")
 
 from utils_lm_eval.modify_llama import convert_kvcache_llama_heavy_recent
-from utils_lm_eval.ideal_llama import convert_kvcache_llama_heavy_recent_ideal
 
 def get_prompt(json_line):
     data = json.loads(json_line)
@@ -31,9 +30,9 @@ model.cuda()
 dir_path = os.path.dirname(__file__)
 
 num_layers = 32
-ratio = 0.2
+ratio = 0.1
 
-datasets = ["piqa"]#, "openbookqa", "arc_easy", "arc_challenge", "mathqa"]
+datasets = ["piqa", "openbookqa", "arc_easy", "arc_challenge", "mathqa"]
 prompts = []
 for dataset in datasets:
     file_path = f"/home/smp9898/A2SF/data/{dataset}-1shot.jsonl"
@@ -43,33 +42,28 @@ for dataset in datasets:
     prompt = get_prompt(random.choice(lines))
     prompts.append(tokenizer(prompt, add_special_tokens=True, return_tensors='pt').input_ids.cuda())
 
+# {masking_mode: (streaming_ratio, selecting_ratio, recent_ratio, forgetting_factor)}
 methods = {
-    "FULL": (0.0, 0.0, 1.0, 1.0, False, None),
-    # "STREAMING_LLM": (ratio/2, 0.0, ratio/2, 1.0, False),
-    # "LOCAL": (0.0, 0.0, ratio, 1.0, False, None),
-    # "H2O": (0.0, ratio/2, ratio/2, 1.0, False, None),
-    # "A2SF_010": (0.0, ratio, 0.0, 0.1, False, None),
-    "A2SF_050": (0.0, ratio/2, ratio/2, 0.5, False, None),
-    # "STREAMING A2SF": (ratio/3, ratio/3, ratio/3, 0.2, False),
-    # "A2SF_1": (0.0, ratio/2, ratio/2, 1.0, False, 1),
-    # "A2SF_3": (0.0, ratio/2, ratio/2, 1.0, False, 3)
+    "full": (0.0, 0.0, 1.0, 1.0),
+    "streaming_llm": (ratio/2, 0.0, ratio/2, 1.0),
+    "local": (0.0, 0.0, ratio, 1.0),
+    "h2o": (0.0, ratio/2, ratio/2, 1.0),
+    "a2sf": (0.0, ratio/2, ratio/2, 0.3),
+    "fas": (0.0, ratio/2, ratio/2, 1.0),
 }
 
 column = 3
 row = math.ceil(len(methods)/3)
 result_dict = {}
 
-for method, (i, j, k, h, ideal, tmp) in methods.items():
+for method, (i, j, k, h) in tqdm(methods.items()):
     config.streaming_ratio = i
     config.selecting_ratio = j
     config.recent_ratio = k
     config.forgetting_factor = h
-    config.tmp = tmp
+    config.masking_mode = method
     
-    if ideal:
-        convert_kvcache_llama_heavy_recent_ideal(model, config)
-    else:
-        convert_kvcache_llama_heavy_recent(model, config)
+    convert_kvcache_llama_heavy_recent(model, config)
     
     model.load_state_dict(check_point)
     torch.cuda.empty_cache()

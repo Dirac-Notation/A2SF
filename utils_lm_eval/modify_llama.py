@@ -18,7 +18,26 @@ from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding, Llama
 
 __all__ = ['convert_kvcache_llama_heavy_recent', 'LlamaAttention_heavy_hitter']
 
-def eviction_mask(attn_weights, streaming_budget, selecting_budget, recent_budget, forgetting_factor):
+def optimal_mask(attn_weights, streaming_budget, selecting_budget, recent_budget, forgetting_factor):
+
+    # attn_weights (BS, head, query, keys)
+    dtype_attn_weights = attn_weights.dtype
+    
+    cache_budget = streaming_budget + selecting_budget + recent_budget
+    
+    attn_mask = torch.zeros_like(attn_weights, dtype=torch.bool, device=attn_weights.device)
+    attn_scores = torch.softmax(attn_weights, dim=-1, dtype=torch.float32).to(dtype_attn_weights)
+    
+    attn_mask[:, :, :cache_budget+1, cache_budget+1] = 1
+    attn_mask = attn_mask.tril(0)
+        
+    # Next Mask Make
+    _, topk_indices = torch.topk(attn_scores[:,:,cache_budget+1:,:], k=cache_budget, dim=-1).unsqueeze(dim=-1)
+    attn_mask[:,:,cache_budget+1,:] = attn_mask.scatter(-1, topk_indices, True)
+    
+    return attn_mask
+
+def factoring_average_mask(attn_weights, streaming_budget, selecting_budget, recent_budget):
 
     # attn_weights (BS, head, query, keys)
     dtype_attn_weights = attn_weights.dtype
@@ -44,15 +63,51 @@ def eviction_mask(attn_weights, streaming_budget, selecting_budget, recent_budge
         current_score *= current_mask
         current_score /= current_score.sum(dim=-1).unsqueeze(dim=-1)
         
-        # select_score += (cache_budget + 1) * current_score
+        select_score += (cache_budget + 1) * current_score
         
         tmp_select_score = select_score[:,:,:token_index+1] / torch.arange(token_index + 1, 0, -1, device=device_attn_weights)
 
         # Next Mask Make
-        try:
-            min_index = torch.argmin(tmp_select_score[:,:,streaming_budget:-recent_budget], dim=-1).unsqueeze(dim=-1) + streaming_budget
-        except:
-            import pdb; pdb.set_trace()
+        min_index = torch.argmin(tmp_select_score[:,:,streaming_budget:-recent_budget], dim=-1).unsqueeze(dim=-1) + streaming_budget
+        select_score.scatter_(-1, min_index, torch.inf)
+        attn_mask[:,:,token_index+1,:] = current_mask.scatter(-1, min_index, False)
+    
+    return attn_mask
+
+def a2s_base_mask(attn_weights, streaming_budget, selecting_budget, recent_budget, forgetting_factor):
+
+    # attn_weights (BS, head, query, keys)
+    dtype_attn_weights = attn_weights.dtype
+    seq_length = attn_weights.shape[-1]
+    
+    cache_budget = streaming_budget + selecting_budget + recent_budget
+    score_shape = attn_weights[:,:,0,:].shape
+
+    select_score = torch.zeros(score_shape, dtype=torch.float, device=attn_weights.device)
+    
+    attn_mask = torch.ones_like(attn_weights, dtype=torch.bool, device=attn_weights.device)
+    attn_scores = torch.softmax(attn_weights, dim=-1, dtype=torch.float32).to(dtype_attn_weights)
+    
+    for token_index in range(cache_budget):
+        select_score = forgetting_factor*select_score + attn_scores[:,:,token_index,:]
+
+    for token_index in range(cache_budget, seq_length-1):
+        # Current Step Calculate
+        current_score = attn_scores[:,:,token_index,:]
+        current_mask = attn_mask[:,:,token_index,:]
+        
+        current_score *= current_mask
+        current_score /= current_score.sum(dim=-1).unsqueeze(dim=-1)
+        
+        if forgetting_factor != 0.0:
+            select_score = forgetting_factor*select_score + current_score
+        else:
+            select_score[select_score != torch.inf] = 0 
+            select_score += current_score
+        
+        # Next Mask Make
+        local_index = token_index - recent_budget
+        min_index = torch.argmin(select_score[:,:,streaming_budget:local_index+1], dim=-1).unsqueeze(dim=-1) + streaming_budget
         select_score.scatter_(-1, min_index, torch.inf)
         attn_mask[:,:,token_index+1,:] = current_mask.scatter(-1, min_index, False)
     
@@ -84,6 +139,8 @@ class LlamaAttention_heavy_hitter(nn.Module):
         self.selecting_ratio = config.selecting_ratio
         self.recent_ratio = config.recent_ratio
         self.forgetting_factor = config.forgetting_factor
+        
+        self.masking_mode = config.masking_mode
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
@@ -141,15 +198,24 @@ class LlamaAttention_heavy_hitter(nn.Module):
         
         ################################################################################################ start
         
-        mask_bottom = eviction_mask(
-            attn_weights=attn_weights,
-            streaming_budget=streaming_budget,
-            selecting_budget=selecting_budget,
-            recent_budget=recent_budget,
-            forgetting_factor=self.forgetting_factor,
-        )
+        if self.masking_mode != "full":
+            if self.masking_mode == "fas":
+                mask_bottom = factoring_average_mask(
+                    attn_weights=attn_weights,
+                    streaming_budget=streaming_budget,
+                    selecting_budget=selecting_budget,
+                    recent_budget=recent_budget,
+                )
+            else:
+                mask_bottom = a2s_base_mask(
+                    attn_weights=attn_weights,
+                    streaming_budget=streaming_budget,
+                    selecting_budget=selecting_budget,
+                    recent_budget=recent_budget,
+                    forgetting_factor=self.forgetting_factor,
+                )
 
-        attn_weights[~mask_bottom] = torch.min(attention_mask)
+            attn_weights[~mask_bottom] = torch.min(attention_mask)
 
         ################################################################################################ end
 
@@ -175,13 +241,11 @@ class LlamaAttention_heavy_hitter(nn.Module):
         return attn_output, attn_weights, past_key_value
 
 def convert_kvcache_llama_heavy_recent(model, config):
-    from .ideal_llama import LlamaAttention_heavy_hitter_ideal
-    
-    for name, module in model._modules.items():
+    for name, module in model._modules.items():        
         if len(list(module.children())) > 0:
             model._modules[name] = convert_kvcache_llama_heavy_recent(module, config)
         
-        if isinstance(module, LlamaAttention) or isinstance(module, LlamaAttention_heavy_hitter) or isinstance(module, LlamaAttention_heavy_hitter_ideal):
+        if isinstance(module, LlamaAttention) or isinstance(module, LlamaAttention_heavy_hitter):
             model._modules[name] = LlamaAttention_heavy_hitter(config)
 
     return model

@@ -6,14 +6,12 @@ from typing import Union
 from transformers import AutoModelForCausalLM, AutoConfig
 
 from utils_lm_eval.modify_llama import convert_kvcache_llama_heavy_recent
-from utils_lm_eval.ideal_llama import convert_kvcache_llama_heavy_recent_ideal
 from utils_lm_eval.modify_opt import convert_kvcache_opt_heavy_recent
 from lm_eval.models.huggingface import HFLM
 
 ENABLE_Heavy_Hitter_FUNCTIONS = {
     "OPTForCausalLM": convert_kvcache_opt_heavy_recent,
     "LlamaForCausalLM": convert_kvcache_llama_heavy_recent,
-    "IdealLlamaForCausalLM": convert_kvcache_llama_heavy_recent_ideal
 }
 
 def lm_model(model_name: str,
