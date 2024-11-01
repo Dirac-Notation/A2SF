@@ -51,7 +51,7 @@ def evaluate_model(model, prompts, input_idses):
             generate_ids = model.generate(input_ids, max_new_tokens=args.length, do_sample=False, temperature=1.0, top_p=1.0)
             result = tokenizer.batch_decode(generate_ids)[0]
             result = result.replace(prompt, "")
-            result = result[:result.find("###")].strip()
+            # result = result[:result.find("###")].strip()
             results.append(result)
             
             for layer_idx in range(len(model.model.layers)):
