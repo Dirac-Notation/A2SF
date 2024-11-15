@@ -12,7 +12,7 @@ from rouge import Rouge
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 
 from utils_real_drop.modify_llama import H2OLlamaAttention
-
+tm
 def prepare_inputs_for_generation(
     self, input_ids, past_key_values=None, attention_mask=None, inputs_embeds=None, **kwargs
 ):
