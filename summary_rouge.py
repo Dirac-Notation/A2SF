@@ -19,7 +19,7 @@ def load_json(file_path, key):
 
 rouge = Rouge()
 
-answer_path = "data/xsum-5shot.jsonl"
+answer_path = "data/xsum-3shot.jsonl"
 data_folder_path = "results/original_5shot_150"
 
 tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-hf")
