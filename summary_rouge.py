@@ -3,7 +3,6 @@ from tqdm import tqdm
 import copy
 import torch
 import os
-import numpy
 
 from rouge import Rouge
 
