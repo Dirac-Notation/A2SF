@@ -1,3 +1,3 @@
 # A2SF
 
-Accumulative Attention Score with Forgetting Factor / Forgetting Gate
+Accumulated Attention Score with Forgetting Factor / Forgetting Gate
