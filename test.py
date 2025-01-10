@@ -1,58 +1,76 @@
-import numpy as np
-import torch
 import os
+import torch
+import torch.nn.functional as F
 import matplotlib.pyplot as plt
-
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import load_dataset
-from scipy.optimize import curve_fit
 from tqdm import tqdm
 
-def fitting(x, a, b):
-    return a*x + b
-
-def wiki_preprocess(ds):
-    combined_texts = []
-    i = 0
-    while i < len(ds):
-        if ds[i] == '':
-            i += 1
-            continue
-        
-        title = ds[i]
-        i += 2
-        
-        content = []
-        while i < len(ds) and ds[i] != '':
-            content.append(ds[i])
-            i += 1
-        
-        if len(content) == 0:
-            continue
-            
-        combined_texts.append({"text": title + "".join(content)})
-    return combined_texts
-
-device = "cuda:1"
-
+device = "cuda:2"
 model_name = "meta-llama/Llama-2-7b-hf"
-# model_name = "facebook/opt-2.7b"
-
 model = AutoModelForCausalLM.from_pretrained(model_name).half().to(device)
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-ds = load_dataset("Salesforce/wikitext", "wikitext-103-raw-v1")
+ds = load_dataset("abisee/cnn_dailymail", "2.0.0")
+ds_test = ds["test"]
 
-ds_test = ds["test"]["text"]
+special_tokens = list(tokenizer.special_tokens_map.values())
+punctuation_tokens = [".", ",", "!", "?", ":", ";", "\"", "\'", "(", ")", "[", "]", "{", "}", "-", "_", "~", "*", "&"]
+unicode = "0x"
 
-ds_test = wiki_preprocess(ds_test)
+def make_vector(x):
+    if len(x) == 0:
+        return None
+    
+    result = torch.zeros_like(x[0])
+    divider = torch.zeros_like(x[0])
+    
+    for tensor in x:
+        result += tensor
+        divider += (tensor != 0.0).to(torch.float)
+    
+    return (result / divider).nan_to_num(nan=0.0)
 
-for idx in range(4):
-    text = ""
-    for shot in range(3):
-        text += ds_test[3*idx + shot]["text"] + "\n"
-    texts = tokenizer.tokenize(text)
-    inputs = tokenizer(text, return_tensors="pt", add_special_tokens=False)
+def check_token(token, a):
+    if isinstance(a, str):
+        return a in token
+    elif isinstance(a, list):
+        return any(tmp in token for tmp in a)
+    return False
+
+def plot_attention(attentions, group_1, group_2, group_3, group_4, idx, layer, head):
+    os.makedirs(f"tmp/prompt_{idx}/{layer}", exist_ok=True)
+    plt.figure(figsize=(18, 6))
+
+    plt.subplot(1, 3, 1)
+    plt.imshow(attentions_list[0][layer, head].abs().pow(1/3), cmap="Blues")
+    plt.xticks([]); plt.yticks([])
+
+    def plot_group(group, subplot_idx, title):
+        if group:
+            tmp_group = make_vector(group)
+            if tmp_group is not None:
+                plt.subplot(1, 3, subplot_idx)
+                plt.title(f"{title} / Num: {len(group)}")
+                for vector in group:
+                    plt.plot(torch.log(vector[layer, head]), color="darkred", alpha=0.01)
+                plt.plot(torch.log(tmp_group[layer, head]))
+
+    # plot_group(group_1, 2, "Special Tokens")
+    plot_group(group_2, 2, "Punctuation Tokens")
+    # plot_group(group_3, 4, "Unicode Tokens")
+    plot_group(group_4, 3, "Normal Tokens")
+
+    plt.tight_layout()
+    plt.savefig(f"tmp/prompt_{idx}/{layer}/{head}.png")
+    plt.close()
+
+attentions_list = []
+
+for idx in range(2,3,1):
+    texts = ds_test[idx]["article"]
+    inputs = tokenizer(texts, return_tensors="pt", add_special_tokens=False)
+    tokenized_inputs = tokenizer.tokenize(texts)
 
     with torch.no_grad():
         outputs = model(
@@ -61,34 +79,34 @@ for idx in range(4):
             output_attentions=True
         )
 
-    attentions = [attention.cpu() for attention in outputs.attentions]
+    attentions = torch.stack([attention.squeeze(0).cpu().to(torch.float) for attention in outputs.attentions])
+    attentions_list.append(attentions)
 
-    for layer in tqdm(range(32)):
-        for head in range(32):
-            data = attentions[layer][0,head].to(torch.float)
-            num_tokens = int(data.size(-1)*0.95)
-            y = torch.empty(num_tokens)
-            for i in range(int(num_tokens)):
-                tmp = data.diagonal(offset=-i).sort()[0]
-                y[i] = tmp[:int(tmp.size(0)*0.95)].mean()
-            y = np.log(y.numpy() + 1e-10)
-            x = np.arange(0, y.size)
-            params, covariance = curve_fit(fitting, x, y, p0=[0.0, 0.0])
-            a_est, b_est = params
-            os.makedirs(f"tmp/prompt_{idx}/{layer}", exist_ok=True)
-            
-            plt.figure(figsize=(12,6))
-            
-            plt.subplot(1,2,1)
-            plt.imshow(data.abs().pow(1/3), cmap="Blues")
-            plt.xticks([])
-            plt.yticks([])
-            
-            plt.subplot(1,2,2)
-            plt.title(f"{a_est:.3f} / {b_est:.3f}")
-            plt.plot(x, y)
-            plt.plot(x, fitting(x, a_est, b_est))
-            plt.savefig(f"tmp/prompt_{idx}/{layer}/{head}.png")
-            plt.close()
-            
-            plt.tight_layout()
+max_seq_length = max(attention.size(-1) for attention in attentions_list)
+
+for idx, attentions in enumerate(attentions_list):
+    num_pad = max_seq_length - attentions.size(-1)
+    attentions_list[idx] = F.pad(attentions, (0, num_pad, 0, num_pad))
+
+group_1, group_2, group_3, group_4 = [], [], [], []
+
+for attentions in attentions_list:
+    for token_id, token in enumerate(tokenized_inputs):
+        tmp_attentions = attentions[:, :, :, token_id].roll(-token_id, -1)
+        
+        # Sink Token 
+        if tmp_attentions[tmp_attentions!=0].mean() > 0.1:
+            continue
+        
+        if check_token(token, special_tokens):
+            group_1.append(tmp_attentions)
+        elif check_token(token, punctuation_tokens):
+            group_2.append(tmp_attentions)
+        elif check_token(token, unicode):
+            group_3.append(tmp_attentions)
+        else:
+            group_4.append(tmp_attentions)
+
+for layer in tqdm(range(32)):
+    for head in range(32):
+        plot_attention(attentions, group_1, group_2, group_3, group_4, idx, layer, head)
