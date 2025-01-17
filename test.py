@@ -6,7 +6,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import load_dataset
 from tqdm import tqdm
 
-device = "cuda:2"
+device = "cuda:3"
 model_name = "meta-llama/Llama-2-7b-hf"
 model = AutoModelForCausalLM.from_pretrained(model_name).half().to(device)
 tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -26,8 +26,10 @@ def make_vector(x):
     divider = torch.zeros_like(x[0])
     
     for tensor in x:
-        result += tensor
-        divider += (tensor != 0.0).to(torch.float)
+        tmp_tensor = tensor.clone()
+        tmp_tensor[tmp_tensor == -torch.inf] = 0
+        result += tmp_tensor
+        divider += (tmp_tensor != 0.0).to(torch.float)
     
     return (result / divider).nan_to_num(nan=0.0)
 
@@ -53,8 +55,8 @@ def plot_attention(attentions, group_1, group_2, group_3, group_4, idx, layer, h
                 plt.subplot(1, 3, subplot_idx)
                 plt.title(f"{title} / Num: {len(group)}")
                 for vector in group:
-                    plt.plot(torch.log(vector[layer, head]), color="darkred", alpha=0.01)
-                plt.plot(torch.log(tmp_group[layer, head]))
+                    plt.plot(vector[layer, head], color="darkred", alpha=0.01)
+                plt.plot(tmp_group[layer, head])
 
     # plot_group(group_1, 2, "Special Tokens")
     plot_group(group_2, 2, "Punctuation Tokens")
@@ -97,6 +99,8 @@ for attentions in attentions_list:
         # Sink Token 
         if tmp_attentions[tmp_attentions!=0].mean() > 0.1:
             continue
+        
+        tmp_attentions = torch.log(tmp_attentions)
         
         if check_token(token, special_tokens):
             group_1.append(tmp_attentions)

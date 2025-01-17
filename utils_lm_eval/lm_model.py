@@ -33,6 +33,7 @@ def lm_model(model_name: str,
     config.forgetting_factor = forgetting_factor
     config.layerwise_ratio = layerwise_ratio
     config.tmp = tmp
+    config.masking_mode = "fas"
 
     lm.model.cpu()
 
