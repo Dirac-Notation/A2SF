@@ -37,8 +37,9 @@ def optimal_mask(attn_weights, streaming_budget, selecting_budget, recent_budget
     
     return attn_mask
 
-def factoring_average_mask(attn_weights, streaming_budget, selecting_budget, recent_budget):
-
+def factoring_average_mask(input_attn_weights, streaming_budget, selecting_budget, recent_budget):
+    # attn_weights = input_attn_weights.tril(0)
+    attn_weights = torch.softmax(input_attn_weights, dim=-1, dtype=torch.float32).to(input_attn_weights.dtype)
     # attn_weights (BS, head, query, keys)
     dtype_attn_weights = attn_weights.dtype
     device_attn_weights = attn_weights.device
@@ -50,20 +51,22 @@ def factoring_average_mask(attn_weights, streaming_budget, selecting_budget, rec
     select_score = torch.zeros(score_shape, dtype=torch.float, device=device_attn_weights)
     
     attn_mask = torch.ones_like(attn_weights, dtype=torch.bool, device=device_attn_weights)
-    attn_scores = torch.softmax(attn_weights, dim=-1, dtype=torch.float32).to(dtype_attn_weights)
     
-    for token_index in range(cache_budget):
-        select_score += (token_index + 1)*attn_scores[:,:,token_index,:]
+    # for token_index in range(cache_budget):
+        # select_score += (token_index + 1)*attn_scores[:,:,token_index,:]
+    select_score = attn_weights[:,:,cache_budget:,:].sum(dim=-2)
 
     for token_index in range(cache_budget, seq_length-1):
         # Current Step Calculate
-        current_score = attn_scores[:,:,token_index,:]
+        # current_score = attn_scores[:,:,token_index,:]
+        current_score = attn_weights[:,:,token_index,:]
         current_mask = attn_mask[:,:,token_index,:]
         
         current_score *= current_mask
         current_score /= current_score.sum(dim=-1).unsqueeze(dim=-1)
         
-        select_score += (cache_budget + 1) * current_score
+        # select_score += (cache_budget + 1) * current_score
+        select_score += current_score
         
         tmp_select_score = select_score[:,:,:token_index+1] / torch.arange(token_index + 1, 0, -1, device=device_attn_weights)
 
@@ -201,7 +204,7 @@ class LlamaAttention_heavy_hitter(nn.Module):
         if self.masking_mode != "full":
             if self.masking_mode == "fas":
                 mask_bottom = factoring_average_mask(
-                    attn_weights=attn_weights,
+                    input_attn_weights=attn_weights,
                     streaming_budget=streaming_budget,
                     selecting_budget=selecting_budget,
                     recent_budget=recent_budget,
