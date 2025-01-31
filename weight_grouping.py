@@ -1,6 +1,5 @@
 import os
 import torch
-import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from transformers import AutoTokenizer
 from datasets import load_dataset
