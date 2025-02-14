@@ -7,7 +7,7 @@ from tqdm import tqdm
 
 from utils.original_llama import LlamaForCausalLM
 
-model_name = "meta-llama/Llama-2-7b-hf"
+model_name = "meta-llama/Llama-2-7b-chat-hf"
 
 model = LlamaForCausalLM.from_pretrained(model_name)
 tokenizer = AutoTokenizer.from_pretrained(model_name)
