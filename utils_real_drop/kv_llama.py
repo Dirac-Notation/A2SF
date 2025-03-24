@@ -174,15 +174,14 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
 class LlamaKVCache():
     def __init__(
         self,
-        seq_dim: int = 2,
-        use_compression: bool = False
+        seq_dim: int = 2
         ):
         self.key_data = torch.tensor([])
         self.value_data = torch.tensor([])
         self.seq_dim = seq_dim
         self.seq_length = 0
         
-        self.use_compression = use_compression
+        self.init_cache()
     
     def len(self):
         return self.seq_length
@@ -203,9 +202,9 @@ class LlamaKVCache():
 
     def update(self, attn_scores):
         if self.use_compression and self.seq_length > self.all_budget:
-            current_score = attn_scores.sum(dim=self.seq_dim)
-            if isinstance(self.score, torch.Tensor):
-                current_score[:,:,:self.score.size(-1)] += self.score
+            forgetting = (self.forgetting_factor**(torch.arange(attn_scores.size(self.seq_dim), 0, -1, device=attn_scores.device) - 1)).view(1,1,-1,1)
+            current_score = (forgetting*attn_scores).sum(dim=self.seq_dim)
+            current_score[:,:,:-1] += self.forgetting_factor * self.score
             self.score = current_score
             selected_indices = self.score[:,:,self.streaming_budget:-self.recent_budget].topk(self.select_budget, dim=-1).indices.sort().values
             
@@ -231,23 +230,26 @@ class LlamaKVCache():
 
     def init_cache(
         self,
-        use_compression,
-        streaming_budget,
-        select_budget,
-        recent_budget,
-        device,
-        dtype
+        use_compression: bool = False,
+        streaming_budget: int = 0,
+        select_budget: int = 64,
+        recent_budget: int = 64,
+        forgetting_factor: float = 1.0,
+        device = torch.device("cpu"),
+        dtype = torch.float32
     ):
         self.key_data = torch.tensor([], device=device, dtype=dtype)
         self.value_data = torch.tensor([], device=device, dtype=dtype)
         self.seq_length = 0
 
         self.use_compression = use_compression
-        self.score = 0
-        self.streaming_budget = streaming_budget
-        self.select_budget = select_budget
-        self.recent_budget = recent_budget
-        self.all_budget = streaming_budget + select_budget + recent_budget
+        if use_compression:
+            self.score = 0
+            self.streaming_budget = streaming_budget
+            self.select_budget = select_budget
+            self.recent_budget = recent_budget
+            self.all_budget = streaming_budget + select_budget + recent_budget
+            self.forgetting_factor = forgetting_factor
         
 
 class LlamaAttention(nn.Module):
@@ -284,8 +286,9 @@ class LlamaAttention(nn.Module):
         streaming_budget,
         select_budget,
         recent_budget,
+        forgetting_factor
     ):
-        self.past_key_value.init_cache(use_compression, streaming_budget, select_budget, recent_budget, self.k_proj.weight.device, self.k_proj.weight.dtype)
+        self.past_key_value.init_cache(use_compression, streaming_budget, select_budget, recent_budget, forgetting_factor, self.k_proj.weight.device, self.k_proj.weight.dtype)
 
     def _init_rope(self):
         self.rotary_emb = LlamaRotaryEmbedding(
@@ -387,8 +390,9 @@ class LlamaDecoderLayer(nn.Module):
         streaming_budget,
         select_budget,
         recent_budget,
+        forgetting_factor
     ):
-        self.self_attn.init_cache(use_compression, streaming_budget, select_budget, recent_budget)
+        self.self_attn.init_cache(use_compression, streaming_budget, select_budget, recent_budget, forgetting_factor)
 
     def forward(
         self,
@@ -588,9 +592,10 @@ class LlamaModel(LlamaPreTrainedModel):
         streaming_budget,
         select_budget,
         recent_budget,
+        forgetting_factor
     ):
         for layer in self.layers:
-            layer.init_cache(use_compression, streaming_budget, select_budget, recent_budget)
+            layer.init_cache(use_compression, streaming_budget, select_budget, recent_budget, forgetting_factor)
 
     def get_input_embeddings(self):
         return self.embed_tokens
@@ -736,8 +741,9 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         streaming_budget: int = 0,
         select_budget: int = 64,
         recent_budget: int = 64,
+        forgetting_factor: float = 1.0
     ):
-        self.model.init_cache(use_compression, streaming_budget, select_budget, recent_budget)
+        self.model.init_cache(use_compression, streaming_budget, select_budget, recent_budget, forgetting_factor)
 
     def get_input_embeddings(self):
         return self.model.embed_tokens

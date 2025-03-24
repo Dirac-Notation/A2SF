@@ -8,25 +8,34 @@ def load_datasets(
     tokenizer
 ):
     with open(dataset_path, "r") as f:
-        prompts = []
-        answers = []
-        
         datalines = f.readlines()
         articles = []
         
         for dataline in datalines:
             articles.append(json.loads(dataline))
-        
+
+    prompts = []
+    answers = []
+    output_indices = []
+
     for data in tqdm(articles, desc="Tokenizing"):
         input = data["article"]
         answer = data["summary_gt"]
         
         input_ids = tokenizer(input, return_tensors="pt").input_ids
+        output_ids = tokenizer(answer, return_tensors="pt").input_ids
 
         prompts.append(input_ids)
         answers.append(answer)
+        output_indices.append(output_ids)
     
-    return prompts, answers
+    num_input_ids = sum([prompt.numel() for prompt in prompts])/len(prompts)
+    num_output_ids = sum([output_ids.numel() for output_ids in output_indices])/len(output_indices)
+    
+    print(f"Average input ids length : {num_input_ids:.2f}")
+    print(f"Average output ids length : {num_output_ids:.2f}")
+    
+    return prompts, answers, output_indices
 
 def sim(
     vec_1: torch.Tensor,
