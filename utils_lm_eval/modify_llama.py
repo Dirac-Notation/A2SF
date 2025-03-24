@@ -37,46 +37,6 @@ def optimal_mask(attn_weights, streaming_budget, selecting_budget, recent_budget
     
     return attn_mask
 
-def factoring_average_mask(input_attn_weights, streaming_budget, selecting_budget, recent_budget):
-    # attn_weights = input_attn_weights.tril(0)
-    attn_weights = torch.softmax(input_attn_weights, dim=-1, dtype=torch.float32).to(input_attn_weights.dtype)
-    # attn_weights (BS, head, query, keys)
-    dtype_attn_weights = attn_weights.dtype
-    device_attn_weights = attn_weights.device
-    seq_length = attn_weights.shape[-1]
-    
-    cache_budget = streaming_budget + selecting_budget + recent_budget
-    score_shape = attn_weights[:,:,0,:].shape
-
-    select_score = torch.zeros(score_shape, dtype=torch.float, device=device_attn_weights)
-    
-    attn_mask = torch.ones_like(attn_weights, dtype=torch.bool, device=device_attn_weights)
-    
-    # for token_index in range(cache_budget):
-        # select_score += (token_index + 1)*attn_scores[:,:,token_index,:]
-    select_score = attn_weights[:,:,cache_budget:,:].sum(dim=-2)
-
-    for token_index in range(cache_budget, seq_length-1):
-        # Current Step Calculate
-        # current_score = attn_scores[:,:,token_index,:]
-        current_score = attn_weights[:,:,token_index,:]
-        current_mask = attn_mask[:,:,token_index,:]
-        
-        current_score *= current_mask
-        current_score /= current_score.sum(dim=-1).unsqueeze(dim=-1)
-        
-        # select_score += (cache_budget + 1) * current_score
-        select_score += current_score
-        
-        tmp_select_score = select_score[:,:,:token_index+1] / torch.arange(token_index + 1, 0, -1, device=device_attn_weights)
-
-        # Next Mask Make
-        min_index = torch.argmin(tmp_select_score[:,:,streaming_budget:-recent_budget], dim=-1).unsqueeze(dim=-1) + streaming_budget
-        select_score.scatter_(-1, min_index, torch.inf)
-        attn_mask[:,:,token_index+1,:] = current_mask.scatter(-1, min_index, False)
-    
-    return attn_mask
-
 def a2s_base_mask(attn_weights, streaming_budget, selecting_budget, recent_budget, forgetting_factor):
 
     # attn_weights (BS, head, query, keys)
@@ -202,21 +162,13 @@ class LlamaAttention_heavy_hitter(nn.Module):
         ################################################################################################ start
         
         if self.masking_mode != "full":
-            if self.masking_mode == "fas":
-                mask_bottom = factoring_average_mask(
-                    input_attn_weights=attn_weights,
-                    streaming_budget=streaming_budget,
-                    selecting_budget=selecting_budget,
-                    recent_budget=recent_budget,
-                )
-            else:
-                mask_bottom = a2s_base_mask(
-                    attn_weights=attn_weights,
-                    streaming_budget=streaming_budget,
-                    selecting_budget=selecting_budget,
-                    recent_budget=recent_budget,
-                    forgetting_factor=self.forgetting_factor,
-                )
+            mask_bottom = a2s_base_mask(
+                attn_weights=attn_weights,
+                streaming_budget=streaming_budget,
+                selecting_budget=selecting_budget,
+                recent_budget=recent_budget,
+                forgetting_factor=self.forgetting_factor,
+            )
 
             attn_weights[~mask_bottom] = torch.min(attention_mask)
 

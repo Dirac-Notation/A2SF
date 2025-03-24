@@ -19,3 +19,30 @@ A key-value (KV) cache compression technique utilizing accumulative attention sc
    conda activate A2SF
    pip install -r pip.txt
    ```
+
+## Example
+
+   ```python
+   import torch
+
+   from transformers import AutoTokenizer
+
+   from utils import load_datasets
+   from utils_real_drop.kv_llama import LlamaForCausalLM
+
+   model_name = "meta-llama/Llama-2-7b-hf"
+   tokenizer = AutoTokenizer.from_pretrained(model_name)
+   model = LlamaForCausalLM.from_pretrained(model_name).half().to("cuda")
+
+   model.init_cache(
+      use_compression=True,
+      select_budget=128, # Cache selection budget
+      recent_budget=128, # Recent cache budget
+   )
+
+   prompts, answers = load_datasets(dataset_path="fewshot_data/cnn_dailymail-3shot.jsonl", tokenizer=tokenizer)
+
+   input_ids = prompts[0].to(model.device)
+
+   print(tokenizer.decode(model.generate(input_ids, max_new_tokens=64).flatten()[input_ids.numel():].tolist()))
+   ```
