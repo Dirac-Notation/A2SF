@@ -238,7 +238,8 @@ class LlamaKVCache():
         forgetting = (self.forgetting_factor ** exponents).view(1, 1, seq_len, 1)
         
         current_score = (forgetting*attn_scores).sum(dim=self.seq_dim)
-        current_score[:,:,:-1] += self.forgetting_factor * self.score
+        if self.score is not None:
+            current_score[:,:,:-1] += self.forgetting_factor * self.score
         self.score = current_score
         selected_indices = self.score[:,:,self.streaming_budget:-self.recent_budget].topk(self.select_budget, dim=-1).indices.sort().values
         

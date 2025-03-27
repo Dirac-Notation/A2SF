@@ -24,7 +24,7 @@ for idx, prompt in enumerate(tqdm(prompts[:10])):
         use_compression=True,
         select_budget=100,
         recent_budget=100,
-        forgetting_factor=0.0
+        forgetting_factor=0.3
     )
 
     input_ids = prompt.to(model.device)
