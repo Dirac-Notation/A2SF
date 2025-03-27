@@ -182,51 +182,6 @@ class LlamaKVCache():
         self.seq_length = 0
         
         self.init_cache()
-    
-    def len(self):
-        return self.seq_length
-
-    def cat(self,
-            key_tensor: torch.Tensor,
-            value_tensor: torch.Tensor
-        ):
-        if key_tensor.shape != value_tensor.shape:
-            assert "Key Tensor and Value Tensor must have same shape"
-        
-        self.key_data = torch.cat((self.key_data, key_tensor), dim=self.seq_dim)
-        self.value_data = torch.cat((self.value_data, value_tensor), dim=self.seq_dim)
-        
-        self.seq_length += key_tensor.size(self.seq_dim)
-        
-        return self.key_data, self.value_data
-
-    def update(self, attn_scores):
-        if self.use_compression and self.seq_length > self.all_budget:
-            forgetting = (self.forgetting_factor**(torch.arange(attn_scores.size(self.seq_dim), 0, -1, device=attn_scores.device) - 1)).view(1,1,-1,1)
-            current_score = (forgetting*attn_scores).sum(dim=self.seq_dim)
-            current_score[:,:,:-1] += self.forgetting_factor * self.score
-            self.score = current_score
-            selected_indices = self.score[:,:,self.streaming_budget:-self.recent_budget].topk(self.select_budget, dim=-1).indices.sort().values
-            
-            self.score = torch.cat((
-                self.score[:,:,:self.streaming_budget],
-                self.score.gather(self.seq_dim, selected_indices),
-                self.score[:,:,-self.recent_budget:]
-            ), dim=-1)
-            
-            selected_indices = selected_indices.unsqueeze(-1).expand(-1,-1,-1,self.key_data.size(-1))
-            
-            self.key_data = torch.cat((
-                self.key_data[:,:,:self.streaming_budget],
-                self.key_data.gather(self.seq_dim, selected_indices),
-                self.key_data[:,:,-self.recent_budget:]
-            ), dim=self.seq_dim)
-            
-            self.value_data = torch.cat((
-                self.value_data[:,:,:self.streaming_budget],
-                self.value_data.gather(self.seq_dim, selected_indices),
-                self.value_data[:,:,-self.recent_budget:]
-            ), dim=self.seq_dim)
 
     def init_cache(
         self,
@@ -238,18 +193,74 @@ class LlamaKVCache():
         device = torch.device("cpu"),
         dtype = torch.float32
     ):
-        self.key_data = torch.tensor([], device=device, dtype=dtype)
-        self.value_data = torch.tensor([], device=device, dtype=dtype)
+        self.key_data = torch.empty((0,), device=device, dtype=dtype)
+        self.value_data = torch.empty((0,), device=device, dtype=dtype)
         self.seq_length = 0
 
         self.use_compression = use_compression
         if use_compression:
-            self.score = 0
+            self.score = None
             self.streaming_budget = streaming_budget
             self.select_budget = select_budget
             self.recent_budget = recent_budget
             self.all_budget = streaming_budget + select_budget + recent_budget
             self.forgetting_factor = forgetting_factor
+    
+    def len(self):
+        return self.seq_length
+
+    def cat(self,
+            key_tensor: torch.Tensor,
+            value_tensor: torch.Tensor
+        ):
+        if key_tensor.shape != value_tensor.shape:
+            raise ValueError("Key Tensor와 Value Tensor의 shape은 동일해야 합니다.")
+        
+        if self.seq_length == 0:
+            self.key_data = key_tensor
+            self.value_data = value_tensor
+        else:
+            self.key_data = torch.cat((self.key_data, key_tensor), dim=self.seq_dim)
+            self.value_data = torch.cat((self.value_data, value_tensor), dim=self.seq_dim)
+        
+        self.seq_length += key_tensor.size(self.seq_dim)
+        
+        return self.key_data, self.value_data
+
+    def update(self, attn_scores):
+        if not (self.use_compression and self.seq_length > self.all_budget):
+            return
+            
+        seq_len = attn_scores.size(2)
+        device = attn_scores.device
+        exponents = torch.arange(seq_len, 0, -1, device=device, dtype=attn_scores.dtype) - 1
+        # forgetting: shape = [1, 1, seq_len, 1]
+        forgetting = (self.forgetting_factor ** exponents).view(1, 1, seq_len, 1)
+        
+        current_score = (forgetting*attn_scores).sum(dim=self.seq_dim)
+        current_score[:,:,:-1] += self.forgetting_factor * self.score
+        self.score = current_score
+        selected_indices = self.score[:,:,self.streaming_budget:-self.recent_budget].topk(self.select_budget, dim=-1).indices.sort().values
+        
+        self.score = torch.cat((
+            self.score[:,:,:self.streaming_budget],
+            self.score.gather(self.seq_dim, selected_indices),
+            self.score[:,:,-self.recent_budget:]
+        ), dim=-1)
+        
+        selected_indices = selected_indices.unsqueeze(-1).expand(-1,-1,-1,self.key_data.size(-1))
+        
+        self.key_data = torch.cat((
+            self.key_data[:,:,:self.streaming_budget],
+            self.key_data.gather(self.seq_dim, selected_indices),
+            self.key_data[:,:,-self.recent_budget:]
+        ), dim=self.seq_dim)
+        
+        self.value_data = torch.cat((
+            self.value_data[:,:,:self.streaming_budget],
+            self.value_data.gather(self.seq_dim, selected_indices),
+            self.value_data[:,:,-self.recent_budget:]
+        ), dim=self.seq_dim)
         
 
 class LlamaAttention(nn.Module):
