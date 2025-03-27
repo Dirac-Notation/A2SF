@@ -36,7 +36,7 @@ for line in dataset:
     prompts.append(text_dict)
 
 prompts = sorted(prompts, key=lambda x: len(x["a"]))
-prompts = prompts[200:]
+prompts = prompts[1000:]
 
 dataset_name = dataset_path.split("/")[1]
 

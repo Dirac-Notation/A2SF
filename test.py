@@ -1,7 +1,7 @@
 import torch
 import json
 
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, AutoModelForCausalLM
 from rouge_score import rouge_scorer
 from tqdm import tqdm
 
@@ -10,7 +10,8 @@ from utils_real_drop.kv_llama import LlamaForCausalLM
 
 model_name = "meta-llama/Llama-2-7b-chat-hf"
 tokenizer = AutoTokenizer.from_pretrained(model_name)
-model = LlamaForCausalLM.from_pretrained(model_name).half().to("cuda:2")
+model = LlamaForCausalLM.from_pretrained(model_name).to(torch.bfloat16).to("cuda:2")
+# model = AutoModelForCausalLM.from_pretrained(model_name).half().to("cuda:2")
 
 prompts, answers, output_indices = load_datasets(dataset_path="fewshot_data/cnn_dailymail-3shot.jsonl", tokenizer=tokenizer)
 predictions = []
@@ -18,7 +19,7 @@ predictions = []
 scorer = rouge_scorer.RougeScorer(['rouge1', 'rouge2', 'rougeL'], use_stemmer=True)
 eos_token_id = tokenizer.eos_token_id
 
-for idx, prompt in enumerate(tqdm(prompts)):
+for idx, prompt in enumerate(tqdm(prompts[:10])):
     model.init_cache(
         use_compression=True,
         select_budget=100,
