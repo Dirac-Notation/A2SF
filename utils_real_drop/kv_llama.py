@@ -197,14 +197,18 @@ class LlamaKVCache():
         self.value_data = torch.empty((0,), device=device, dtype=dtype)
         self.seq_length = 0
 
+        self.all_key_data = torch.zeros((1, 32, 4096, 128), device=device, dtype=dtype)
+        self.all_value_data = torch.zeros((1, 32, 4096, 128), device=device, dtype=dtype)
+
         self.use_compression = use_compression
         if use_compression:
             self.score = None
-            self.streaming_budget = streaming_budget
             self.select_budget = select_budget
             self.recent_budget = recent_budget
-            self.all_budget = streaming_budget + select_budget + recent_budget
+            self.all_budget = select_budget + recent_budget
             self.forgetting_factor = forgetting_factor
+            self.random_budget = 0
+            self.token_indices = None
     
     def len(self):
         return self.seq_length
@@ -220,8 +224,20 @@ class LlamaKVCache():
             self.key_data = key_tensor
             self.value_data = value_tensor
         else:
-            self.key_data = torch.cat((self.key_data, key_tensor), dim=self.seq_dim)
-            self.value_data = torch.cat((self.value_data, value_tensor), dim=self.seq_dim)
+            device = self.key_data.device
+            self.key_data = torch.cat((
+                self.all_key_data.index_select(dim=2, index=self.random_missing).to(device),
+                self.key_data,
+                key_tensor
+            ), dim=self.seq_dim)
+            self.value_data = torch.cat((
+                self.all_value_data.index_select(dim=2, index=self.random_missing).to(device),
+                self.value_data,
+                value_tensor
+            ),dim=self.seq_dim)
+        
+        self.all_key_data[:,:,self.seq_length:self.seq_length+key_tensor.size(self.seq_dim)].copy_(key_tensor, non_blocking=True)
+        self.all_value_data[:,:,self.seq_length:self.seq_length+key_tensor.size(self.seq_dim)].copy_(value_tensor, non_blocking=True)
         
         self.seq_length += key_tensor.size(self.seq_dim)
         
@@ -230,9 +246,11 @@ class LlamaKVCache():
     def update(self, attn_scores):
         if not (self.use_compression and self.seq_length > self.all_budget):
             return
-            
+
+        torch.cuda.synchronize()
+        
         seq_len = attn_scores.size(2)
-        device = attn_scores.device
+        device, dtype = attn_scores.device, attn_scores.dtype
         exponents = torch.arange(seq_len, 0, -1, device=device, dtype=attn_scores.dtype) - 1
         # forgetting: shape = [1, 1, seq_len, 1]
         forgetting = (self.forgetting_factor ** exponents).view(1, 1, seq_len, 1)
@@ -241,10 +259,28 @@ class LlamaKVCache():
         if self.score is not None:
             current_score[:,:,:-1] += self.forgetting_factor * self.score
         self.score = current_score
-        selected_indices = self.score[:,:,self.streaming_budget:-self.recent_budget].topk(self.select_budget, dim=-1).indices.sort().values
+        
+        selected_indices = self.score[:,:,:-self.recent_budget].topk(self.select_budget, dim=-1).indices.sort().values
+
+        if self.token_indices is None:
+            self.token_indices = torch.cat((
+                selected_indices,
+                torch.arange(self.seq_length-self.recent_budget, self.seq_length, device=device, dtype=selected_indices.dtype).view(1,1,self.recent_budget).expand(1,32,self.recent_budget)
+            ), dim=2)
+        else:
+            self.token_indices = torch.cat((self.random_missing.view(1,1,self.random_budget).expand(1,32,self.random_budget), self.token_indices), dim=2)
+            self.token_indices = torch.cat((
+                self.token_indices.gather(dim=2, index=selected_indices),
+                torch.arange(self.seq_length-self.recent_budget, self.seq_length, device=device, dtype=selected_indices.dtype).view(1,1,self.recent_budget).expand(1,32,self.recent_budget)
+            ), dim=2)
+
+        full_range = torch.arange(self.seq_length-self.recent_budget, device=device)
+        missing = full_range[~torch.isin(full_range, self.token_indices)]
+        perm = torch.randperm(missing.numel(), device=device)[:self.random_budget]
+        self.random_missing = missing[perm]#.to("cpu")
         
         self.score = torch.cat((
-            self.score[:,:,:self.streaming_budget],
+            torch.zeros((1,32,self.random_budget), device=device, dtype=dtype),
             self.score.gather(self.seq_dim, selected_indices),
             self.score[:,:,-self.recent_budget:]
         ), dim=-1)
@@ -252,13 +288,11 @@ class LlamaKVCache():
         selected_indices = selected_indices.unsqueeze(-1).expand(-1,-1,-1,self.key_data.size(-1))
         
         self.key_data = torch.cat((
-            self.key_data[:,:,:self.streaming_budget],
             self.key_data.gather(self.seq_dim, selected_indices),
             self.key_data[:,:,-self.recent_budget:]
         ), dim=self.seq_dim)
         
         self.value_data = torch.cat((
-            self.value_data[:,:,:self.streaming_budget],
             self.value_data.gather(self.seq_dim, selected_indices),
             self.value_data[:,:,-self.recent_budget:]
         ), dim=self.seq_dim)
