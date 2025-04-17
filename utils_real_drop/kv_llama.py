@@ -172,26 +172,23 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
 
 
 class LlamaKVCache():
-    def __init__(
-        self,
-        seq_dim: int = 2
-        ):
-        self.key_data = torch.tensor([])
-        self.value_data = torch.tensor([])
+    def __init__(self, seq_dim: int = 2):
         self.seq_dim = seq_dim
         self.seq_length = 0
-        
+        self.key_data = torch.empty((0,), dtype=torch.float32)
+        self.value_data = torch.empty((0,), dtype=torch.float32)
         self.init_cache()
 
     def init_cache(
         self,
         use_compression: bool = False,
-        streaming_budget: int = 0,
         select_budget: int = 64,
         recent_budget: int = 64,
+        random_budget: int = 0,
         forgetting_factor: float = 1.0,
-        device = torch.device("cpu"),
-        dtype = torch.float32
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+        random_method: Optional[str] = None
     ):
         self.key_data = torch.empty((0,), device=device, dtype=dtype)
         self.value_data = torch.empty((0,), device=device, dtype=dtype)
@@ -207,40 +204,43 @@ class LlamaKVCache():
             self.recent_budget = recent_budget
             self.all_budget = select_budget + recent_budget
             self.forgetting_factor = forgetting_factor
-            self.random_budget = 0
+            self.random_budget = random_budget
             self.token_indices = None
+            if random_method is not None:
+                self.random_method = random_method # "att" "random"
     
     def len(self):
         return self.seq_length
 
-    def cat(self,
-            key_tensor: torch.Tensor,
-            value_tensor: torch.Tensor
-        ):
-        if key_tensor.shape != value_tensor.shape:
-            raise ValueError("Key Tensor와 Value Tensor의 shape은 동일해야 합니다.")
-        
+    def cat(self, key_tensor: torch.Tensor, value_tensor: torch.Tensor):
+        L = key_tensor.size(self.seq_dim)
+
+        # 1) 첫 토큰인 경우
         if self.seq_length == 0:
             self.key_data = key_tensor
             self.value_data = value_tensor
+
+        # 2) 압축 미사용 또는 아직 버짓 미만인 경우: 단순 append
+        elif not self.use_compression or self.seq_length <= self.all_budget:
+            self.key_data = torch.cat((self.key_data, key_tensor), dim=self.seq_dim)
+            self.value_data = torch.cat((self.value_data, value_tensor), dim=self.seq_dim)
+
+        # 3) 압축 사용 중이고 limit 초과인 경우: prune & append
         else:
-            device = self.key_data.device
-            self.key_data = torch.cat((
-                self.all_key_data.index_select(dim=2, index=self.random_missing).to(device),
-                self.key_data,
-                key_tensor
-            ), dim=self.seq_dim)
-            self.value_data = torch.cat((
-                self.all_value_data.index_select(dim=2, index=self.random_missing).to(device),
-                self.value_data,
-                value_tensor
-            ),dim=self.seq_dim)
-        
-        self.all_key_data[:,:,self.seq_length:self.seq_length+key_tensor.size(self.seq_dim)].copy_(key_tensor, non_blocking=True)
-        self.all_value_data[:,:,self.seq_length:self.seq_length+key_tensor.size(self.seq_dim)].copy_(value_tensor, non_blocking=True)
-        
-        self.seq_length += key_tensor.size(self.seq_dim)
-        
+            # keep only selected indices
+            idx = self.token_indices[:,:,:self.random_budget].unsqueeze(-1).expand(-1, -1, -1, self.key_data.size(-1))
+            random_keys   = self.all_key_data.gather(dim=2, index=idx).to(self.key_data.device)
+            random_values = self.all_value_data.gather(dim=2, index=idx).to(self.value_data.device)
+
+            self.key_data   = torch.cat((random_keys, self.key_data, key_tensor), dim=self.seq_dim)
+            self.value_data = torch.cat((random_values, self.value_data, value_tensor), dim=self.seq_dim)
+
+        # 전체 버퍼 갱신
+        end = self.seq_length + L
+        self.all_key_data[:, :, self.seq_length:end].copy_(key_tensor, non_blocking=True)
+        self.all_value_data[:, :, self.seq_length:end].copy_(value_tensor, non_blocking=True)
+        self.seq_length += L
+
         return self.key_data, self.value_data
 
     def update(self, attn_scores):
@@ -251,36 +251,56 @@ class LlamaKVCache():
         
         seq_len = attn_scores.size(2)
         device, dtype = attn_scores.device, attn_scores.dtype
+        
+        # 스코어 최신화 및 토큰 추출
         exponents = torch.arange(seq_len, 0, -1, device=device, dtype=attn_scores.dtype) - 1
-        # forgetting: shape = [1, 1, seq_len, 1]
         forgetting = (self.forgetting_factor ** exponents).view(1, 1, seq_len, 1)
         
         current_score = (forgetting*attn_scores).sum(dim=self.seq_dim)
+        
         if self.score is not None:
             current_score[:,:,:-1] += self.forgetting_factor * self.score
         self.score = current_score
         
         selected_indices = self.score[:,:,:-self.recent_budget].topk(self.select_budget, dim=-1).indices.sort().values
+        
+        flag = self.token_indices.gather(dim=2, index=selected_indices) if self.token_indices is not None else selected_indices
 
-        if self.token_indices is None:
-            self.token_indices = torch.cat((
-                selected_indices,
-                torch.arange(self.seq_length-self.recent_budget, self.seq_length, device=device, dtype=selected_indices.dtype).view(1,1,self.recent_budget).expand(1,32,self.recent_budget)
-            ), dim=2)
+        # 랜덤 토큰 되살리기 추출
+        if self.random_budget != 0:
+            if self.random_method == "att":
+                if self.token_indices is None:
+                    self.all_score = attn_scores.sum(dim=self.seq_dim)
+                    self.all_round = torch.ones_like(self.all_score, device=device, dtype=dtype)
+                else:
+                    new_indices = torch.full((*self.token_indices.shape[:-1], 1), self.seq_length - 1, device=device, dtype=torch.int64)
+                    tmp_token_indices = torch.cat((self.token_indices, new_indices), dim=2)
+                    tmp_all_score = torch.zeros((*self.all_score.shape[:-1], self.seq_length), device=device, dtype=dtype)
+                    tmp_all_score = tmp_all_score.scatter(dim=2, index=tmp_token_indices, src=attn_scores.squeeze(2))
+                    tmp_all_round = (tmp_all_score > 0).to(dtype=dtype)
+                    tmp_all_score[:, :, :-1] += self.all_score
+                    tmp_all_round[:, :, :-1] += self.all_round
+                    self.all_score = tmp_all_score
+                    self.all_round = tmp_all_round                
+                tmp_score = (self.all_score/self.all_round)[:,:,:-self.recent_budget]
+            else:
+                tmp_score = torch.ones((1, 32, self.seq_length), device=device, dtype=dtype)
+
+            tmp_score.scatter_(2, flag, 0)
+            tmp_score /= tmp_score.sum(dim=2, keepdim=True)
+            random_missing = torch.multinomial(tmp_score.squeeze(dim=0), num_samples=self.random_budget, replacement=False).view(*tmp_score.shape[:-1], -1)
         else:
-            self.token_indices = torch.cat((self.random_missing.view(1,1,self.random_budget).expand(1,32,self.random_budget), self.token_indices), dim=2)
-            self.token_indices = torch.cat((
-                self.token_indices.gather(dim=2, index=selected_indices),
-                torch.arange(self.seq_length-self.recent_budget, self.seq_length, device=device, dtype=selected_indices.dtype).view(1,1,self.recent_budget).expand(1,32,self.recent_budget)
-            ), dim=2)
+            random_missing = torch.empty((1,32,0), device=device, dtype=torch.int64)
 
-        full_range = torch.arange(self.seq_length-self.recent_budget, device=device)
-        missing = full_range[~torch.isin(full_range, self.token_indices)]
-        perm = torch.randperm(missing.numel(), device=device)[:self.random_budget]
-        self.random_missing = missing[perm]#.to("cpu")
+        # print((selected_indices<self.random_budget).sum(dim=2).squeeze(dim=0).tolist())
+        self.token_indices = torch.cat((
+            random_missing,
+            selected_indices if self.token_indices is None else flag,
+            torch.arange(self.seq_length-self.recent_budget, self.seq_length, device=device, dtype=selected_indices.dtype).view(1,1,self.recent_budget).expand(1,32,self.recent_budget)
+        ), dim=2)
         
         self.score = torch.cat((
-            torch.zeros((1,32,self.random_budget), device=device, dtype=dtype),
+            torch.zeros((1, 32, self.random_budget), device=device, dtype=dtype),
             self.score.gather(self.seq_dim, selected_indices),
             self.score[:,:,-self.recent_budget:]
         ), dim=-1)
@@ -296,7 +316,7 @@ class LlamaKVCache():
             self.value_data.gather(self.seq_dim, selected_indices),
             self.value_data[:,:,-self.recent_budget:]
         ), dim=self.seq_dim)
-        
+
 
 class LlamaAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
@@ -329,12 +349,22 @@ class LlamaAttention(nn.Module):
     def init_cache(
         self,
         use_compression,
-        streaming_budget,
         select_budget,
         recent_budget,
-        forgetting_factor
+        random_budget,
+        forgetting_factor,
+        random_method: Optional[str] = None
     ):
-        self.past_key_value.init_cache(use_compression, streaming_budget, select_budget, recent_budget, forgetting_factor, self.k_proj.weight.device, self.k_proj.weight.dtype)
+        self.past_key_value.init_cache(
+            use_compression,
+            select_budget,
+            recent_budget,
+            random_budget,
+            forgetting_factor,
+            self.k_proj.weight.device,
+            self.k_proj.weight.dtype,
+            random_method
+        )
 
     def _init_rope(self):
         self.rotary_emb = LlamaRotaryEmbedding(
@@ -433,12 +463,20 @@ class LlamaDecoderLayer(nn.Module):
     def init_cache(
         self,
         use_compression,
-        streaming_budget,
         select_budget,
         recent_budget,
-        forgetting_factor
+        random_budget,
+        forgetting_factor,
+        random_method: Optional[str] = None
     ):
-        self.self_attn.init_cache(use_compression, streaming_budget, select_budget, recent_budget, forgetting_factor)
+        self.self_attn.init_cache(
+            use_compression,
+            select_budget,
+            recent_budget,
+            random_budget,
+            forgetting_factor,
+            random_method
+        )
 
     def forward(
         self,
@@ -634,14 +672,15 @@ class LlamaModel(LlamaPreTrainedModel):
     
     def init_cache(
         self,
-        use_compression,
-        streaming_budget,
-        select_budget,
-        recent_budget,
-        forgetting_factor
+        use_compression: bool = False,
+        select_budget: int = 64,
+        recent_budget: int = 64,
+        random_budget: int = 0,
+        forgetting_factor: float = 1.0,
+        random_method: Optional[str] = None
     ):
         for layer in self.layers:
-            layer.init_cache(use_compression, streaming_budget, select_budget, recent_budget, forgetting_factor)
+            layer.init_cache(use_compression, select_budget, recent_budget, random_budget, forgetting_factor, random_method)
 
     def get_input_embeddings(self):
         return self.embed_tokens
@@ -784,12 +823,13 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
     def init_cache(
         self,
         use_compression: bool = False,
-        streaming_budget: int = 0,
         select_budget: int = 64,
         recent_budget: int = 64,
-        forgetting_factor: float = 1.0
+        random_budget: int = 0,
+        forgetting_factor: float = 1.0,
+        random_method: Optional[str] = None
     ):
-        self.model.init_cache(use_compression, streaming_budget, select_budget, recent_budget, forgetting_factor)
+        self.model.init_cache(use_compression, select_budget, recent_budget, random_budget, forgetting_factor, random_method)
 
     def get_input_embeddings(self):
         return self.model.embed_tokens
