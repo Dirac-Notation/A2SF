@@ -184,6 +184,7 @@ class LlamaKVCache():
         use_compression: bool = False,
         select_budget: int = 64,
         recent_budget: int = 64,
+        streaming_budget: int = 5,
         random_budget: int = 0,
         forgetting_factor: float = 1.0,
         device=torch.device("cpu"),
@@ -202,6 +203,7 @@ class LlamaKVCache():
             self.score = None
             self.select_budget = select_budget
             self.recent_budget = recent_budget
+            self.streaming_budget = streaming_budget
             self.all_budget = select_budget + recent_budget
             self.forgetting_factor = forgetting_factor
             self.random_budget = random_budget
@@ -219,21 +221,10 @@ class LlamaKVCache():
         if self.seq_length == 0:
             self.key_data = key_tensor
             self.value_data = value_tensor
-
-        # 2) 압축 미사용 또는 아직 버짓 미만인 경우: 단순 append
-        elif not self.use_compression or self.seq_length <= self.all_budget:
+        # 2) 이후
+        else:
             self.key_data = torch.cat((self.key_data, key_tensor), dim=self.seq_dim)
             self.value_data = torch.cat((self.value_data, value_tensor), dim=self.seq_dim)
-
-        # 3) 압축 사용 중이고 limit 초과인 경우: prune & append
-        else:
-            # keep only selected indices
-            idx = self.token_indices[:,:,:self.random_budget].unsqueeze(-1).expand(-1, -1, -1, self.key_data.size(-1))
-            random_keys   = self.all_key_data.gather(dim=2, index=idx).to(self.key_data.device)
-            random_values = self.all_value_data.gather(dim=2, index=idx).to(self.value_data.device)
-
-            self.key_data   = torch.cat((random_keys, self.key_data, key_tensor), dim=self.seq_dim)
-            self.value_data = torch.cat((random_values, self.value_data, value_tensor), dim=self.seq_dim)
 
         # 전체 버퍼 갱신
         end = self.seq_length + L
@@ -262,7 +253,8 @@ class LlamaKVCache():
             current_score[:,:,:-1] += self.forgetting_factor * self.score
         self.score = current_score
         
-        selected_indices = self.score[:,:,:-self.recent_budget].topk(self.select_budget, dim=-1).indices.sort().values
+        selected_indices = self.score[:,:,self.streaming_budget:-self.recent_budget].topk(self.select_budget, dim=-1).indices.sort().values + self.streaming_budget
+        # print((selected_indices<self.random_budget).sum(dim=2).squeeze(dim=0).tolist())
         
         flag = self.token_indices.gather(dim=2, index=selected_indices) if self.token_indices is not None else selected_indices
 
@@ -273,6 +265,7 @@ class LlamaKVCache():
                     self.all_score = attn_scores.sum(dim=self.seq_dim)
                     self.all_round = torch.ones_like(self.all_score, device=device, dtype=dtype)
                 else:
+                    # print(attn_scores[0,:,0,:self.random_budget].tolist()) 
                     new_indices = torch.full((*self.token_indices.shape[:-1], 1), self.seq_length - 1, device=device, dtype=torch.int64)
                     tmp_token_indices = torch.cat((self.token_indices, new_indices), dim=2)
                     tmp_all_score = torch.zeros((*self.all_score.shape[:-1], self.seq_length), device=device, dtype=dtype)
@@ -284,7 +277,9 @@ class LlamaKVCache():
                     self.all_round = tmp_all_round                
                 tmp_score = (self.all_score/self.all_round)[:,:,:-self.recent_budget]
             else:
-                tmp_score = torch.ones((1, 32, self.seq_length), device=device, dtype=dtype)
+                # if self.token_indices is not None:
+                #     print(attn_scores[0,:,0,:self.random_budget].tolist())
+                tmp_score = torch.ones((1, 32, self.seq_length-self.recent_budget), device=device, dtype=dtype)
 
             tmp_score.scatter_(2, flag, 0)
             tmp_score /= tmp_score.sum(dim=2, keepdim=True)
@@ -292,27 +287,33 @@ class LlamaKVCache():
         else:
             random_missing = torch.empty((1,32,0), device=device, dtype=torch.int64)
 
-        # print((selected_indices<self.random_budget).sum(dim=2).squeeze(dim=0).tolist())
         self.token_indices = torch.cat((
+            torch.arange(0, self.streaming_budget, device=device, dtype=selected_indices.dtype).view(1,1,self.streaming_budget).expand(1,32,self.streaming_budget),
             random_missing,
             selected_indices if self.token_indices is None else flag,
             torch.arange(self.seq_length-self.recent_budget, self.seq_length, device=device, dtype=selected_indices.dtype).view(1,1,self.recent_budget).expand(1,32,self.recent_budget)
         ), dim=2)
         
         self.score = torch.cat((
+            self.score[:,:,:self.streaming_budget],
             torch.zeros((1, 32, self.random_budget), device=device, dtype=dtype),
             self.score.gather(self.seq_dim, selected_indices),
             self.score[:,:,-self.recent_budget:]
         ), dim=-1)
         
+        random_missing = random_missing.unsqueeze(-1).expand(-1,-1,-1,self.key_data.size(-1))
         selected_indices = selected_indices.unsqueeze(-1).expand(-1,-1,-1,self.key_data.size(-1))
         
         self.key_data = torch.cat((
+            self.key_data[:,:,:self.streaming_budget],
+            self.all_key_data.gather(self.seq_dim, random_missing),
             self.key_data.gather(self.seq_dim, selected_indices),
             self.key_data[:,:,-self.recent_budget:]
         ), dim=self.seq_dim)
         
         self.value_data = torch.cat((
+            self.value_data[:,:,:self.streaming_budget],
+            self.all_value_data.gather(self.seq_dim, random_missing),
             self.value_data.gather(self.seq_dim, selected_indices),
             self.value_data[:,:,-self.recent_budget:]
         ), dim=self.seq_dim)
@@ -351,6 +352,7 @@ class LlamaAttention(nn.Module):
         use_compression,
         select_budget,
         recent_budget,
+        streaming_budget,
         random_budget,
         forgetting_factor,
         random_method: Optional[str] = None
@@ -359,6 +361,7 @@ class LlamaAttention(nn.Module):
             use_compression,
             select_budget,
             recent_budget,
+            streaming_budget,
             random_budget,
             forgetting_factor,
             self.k_proj.weight.device,
@@ -465,6 +468,7 @@ class LlamaDecoderLayer(nn.Module):
         use_compression,
         select_budget,
         recent_budget,
+        streaming_budget,
         random_budget,
         forgetting_factor,
         random_method: Optional[str] = None
@@ -473,6 +477,7 @@ class LlamaDecoderLayer(nn.Module):
             use_compression,
             select_budget,
             recent_budget,
+            streaming_budget,
             random_budget,
             forgetting_factor,
             random_method
@@ -675,12 +680,13 @@ class LlamaModel(LlamaPreTrainedModel):
         use_compression: bool = False,
         select_budget: int = 64,
         recent_budget: int = 64,
+        streaming_budget: int = 5,
         random_budget: int = 0,
         forgetting_factor: float = 1.0,
         random_method: Optional[str] = None
     ):
         for layer in self.layers:
-            layer.init_cache(use_compression, select_budget, recent_budget, random_budget, forgetting_factor, random_method)
+            layer.init_cache(use_compression, select_budget, recent_budget, streaming_budget, random_budget, forgetting_factor, random_method)
 
     def get_input_embeddings(self):
         return self.embed_tokens
@@ -825,11 +831,12 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         use_compression: bool = False,
         select_budget: int = 64,
         recent_budget: int = 64,
+        streaming_budget: int = 5,
         random_budget: int = 0,
         forgetting_factor: float = 1.0,
         random_method: Optional[str] = None
     ):
-        self.model.init_cache(use_compression, select_budget, recent_budget, random_budget, forgetting_factor, random_method)
+        self.model.init_cache(use_compression, select_budget, recent_budget, streaming_budget, random_budget, forgetting_factor, random_method)
 
     def get_input_embeddings(self):
         return self.model.embed_tokens
