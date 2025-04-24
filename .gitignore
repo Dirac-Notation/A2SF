@@ -1,7 +1,14 @@
-# Custom
+# Custom Files
 *.png
+*.txt
+!pip.txt
+*.jsonl
+
+# Custom Directories
 fewshot_data/
 tmp/
+output_text/
+plots/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
