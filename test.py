@@ -62,7 +62,7 @@ def main(args):
                 predictions        = []
                 throughput_samples = []
 
-                # === Warm-up (캐시 초기화 연습) ===
+                # === Warm-up ===
                 for p in prompts[:10]:
                     model.init_cache(
                         use_compression=True,
@@ -102,7 +102,7 @@ def main(args):
                         eos_token_id=eos_token_id,
                         do_sample=False
                     )
-
+                    
                     end_evt.record()
                     torch.cuda.synchronize()
                     elapsed = start_evt.elapsed_time(end_evt) / 1000.0

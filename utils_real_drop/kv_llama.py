@@ -237,8 +237,6 @@ class LlamaKVCache():
     def update(self, attn_scores):
         if not (self.use_compression and self.seq_length > self.all_budget):
             return
-
-        torch.cuda.synchronize()
         
         seq_len = attn_scores.size(2)
         device, dtype = attn_scores.device, attn_scores.dtype
@@ -417,10 +415,8 @@ class LlamaAttention(nn.Module):
                 raise ValueError(
                     f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
                 )
-            try:
-                attn_weights = attn_weights + attention_mask[:,:,:,:attn_weights.size(-1)]
-            except:
-                import pdb; pdb.set_trace()
+                
+            attn_weights = attn_weights + attention_mask[:,:,:,:attn_weights.size(-1)]
 
         # upcast attention to fp32
         attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
