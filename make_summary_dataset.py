@@ -22,7 +22,7 @@ A: '''
 # -----------------------------------------------------------------------------
 parser = argparse.ArgumentParser(description="Process dataset for few-shot learning.")
 parser.add_argument('--dataset', type=str, required=True,
-                    help="Name of the dataset (e.g., alexfabbri/multi_news, abisee/cnn_dailymail, EdinburghNLP/xsum)")
+                    help="Name of the dataset (e.g., abisee/cnn_dailymail, EdinburghNLP/xsum)")
 parser.add_argument('--shots', type=int, nargs='+', required=True,
                     help="Number of examples for few-shot learning.")
 args = parser.parse_args()
