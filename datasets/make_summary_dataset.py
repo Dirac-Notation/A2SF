@@ -52,14 +52,19 @@ prompts = sorted(prompts, key=lambda x: len(x['article']))[1000:]
 dataset_name = args.dataset.split('/')[-1]
 
 # Create output directory
-os.makedirs('fewshot_data', exist_ok=True)
+os.makedirs('datasets', exist_ok=True)
 
 # Generate few-shot files
 for shot in shots:
-    output_path = f'fewshot_data/{dataset_name}-{shot}shot.jsonl'
+    output_path = f'datasets/{dataset_name}-{shot}shot.jsonl'
     with open(output_path, 'w', encoding='utf-8') as fout:
-        # For each target example after the initial skip
-        for target in tqdm(prompts[shot:shot+100], desc=f"Processing shot={shot}"):
+        # Select 100 examples with 5-example gaps between each one
+        target_indices = range(shot, shot + 100 * 5, 5)
+        for target_idx in tqdm(target_indices, desc=f"Processing shot={shot}"):
+            if target_idx >= len(prompts):
+                break
+            target = prompts[target_idx]
+            
             # Build few-shot examples from the first 'shot' items
             fewshot_examples = ''
             for example in prompts[:shot]:

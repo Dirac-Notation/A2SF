@@ -57,6 +57,6 @@ if __name__ == "__main__":
                         default="meta-llama/Llama-2-7b-chat-hf")
     parser.add_argument("--gpu",        type=int, default=0)
     parser.add_argument("--datasets",   type=str,
-                        default="fewshot_data/cnn_dailymail-3shot.jsonl")
+                        default="datasets/cnn_dailymail-3shot.jsonl")
     args = parser.parse_args()
     main(args)

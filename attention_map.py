@@ -195,14 +195,21 @@ def plot_layer_similarities_over_steps(h2o_similarity, a2sf_similarity, optimal_
         ax.set_ylabel('Average Cosine Similarity', fontsize=10)
         ax.grid(True, alpha=0.3)
         ax.legend(loc='upper right', fontsize=8)
-        ax.set_ylim(0.65, 1.02)
+        # Dynamically adjust y-axis limits to the data range for this layer
+        combined = np.concatenate([
+            h2o_similarity[layer_idx],
+            a2sf_similarity[layer_idx],
+            optimal_similarity[layer_idx]
+        ])
+        y_min, y_max = combined.min(), combined.max()
+        margin = (y_max - y_min) * 0.1 if (y_max > y_min) else 0.05
+        ax.set_ylim(y_min - margin, y_max + margin)
         ax.tick_params(axis='both', which='major', labelsize=8)
     
     # Hide empty subplots
     for idx in range(num_layers, len(axes)):
         axes[idx].set_visible(False)
     
-    plt.suptitle('Layer-wise Similarity Over Generation Steps', fontsize=16, y=0.95)
     plt.tight_layout()
     plt.savefig(f'{save_dir}/layer_similarities_over_steps.png', bbox_inches='tight', dpi=300)
     plt.close()
