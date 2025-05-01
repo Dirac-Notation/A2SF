@@ -6,6 +6,7 @@ from tqdm import tqdm
 import numpy as np
 import os
 from mpl_toolkits.axes_grid1 import make_axes_locatable
+from utils import get_prompt, make_optimal_mask, make_a2sf_mask
 
 GENERATION_LENGTH = 800
 LOCAL_WINDOW_SIZE = 100
@@ -217,27 +218,7 @@ def plot_layer_similarities_over_steps(h2o_similarity, a2sf_similarity, optimal_
 def process_model(model_config):
     print(f"Processing model: {model_config['name']}")
     
-    prompt_list = [
-        "The Schrödinger equation is a partial differential equation that governs the wave function of a non-relativistic quantum-mechanical system.",
-        "Its discovery was a significant landmark in the development of quantum mechanics.",
-        "It is named after Erwin Schrödinger, an Austrian physicist, who postulated the equation in 1925 and published it in 1926, forming the basis for the work that resulted in his Nobel Prize in Physics in 1933.",
-        "Conceptually, the Schrödinger equation is the quantum counterpart of Newton's second law in classical mechanics.",
-        "Given a set of known initial conditions, Newton's second law makes a mathematical prediction as to what path a given physical system will take over time.",
-        "The Schrödinger equation gives the evolution over time of the wave function, the quantum-mechanical characterization of an isolated physical system.",
-        "The equation was postulated by Schrödinger based on a postulate of Louis de Broglie that all matter has an associated matter wave.",
-        "The equation predicted bound states of the atom in agreement with experimental observations.",
-        "The Schrödinger equation is not the only way to study quantum mechanical systems and make predictions.",
-        "Other formulations of quantum mechanics include matrix mechanics, introduced by Werner Heisenberg, and the path integral formulation, developed chiefly by Richard Feynman.",
-        "When these approaches are compared, the use of the Schrödinger equation is sometimes called \"wave mechanics\".",
-        "The equation given by Schrödinger is nonrelativistic because it contains a first derivative in time and a second derivative in space, and therefore space and time are not on equal footing.",
-        "Paul Dirac incorporated special relativity and quantum mechanics into a single formulation that simplifies to the Schrödinger equation in the non-relativistic limit.",
-        "This is the Dirac equation, which contains a single derivative in both space and time.",
-        "Another partial differential equation, the Klein–Gordon equation, led to a problem with probability density even though it was a relativistic wave equation.",
-        "The probability density could be negative, which is physically unviable.",
-        "This was fixed by Dirac by taking the so-called square root of the Klein–Gordon operator and in turn introducing Dirac matrices.",
-        "In a modern context, the Klein–Gordon equation describes spin-less particles, while the Dirac equation describes spin-1/2 particles."
-    ]
-    prompt = " ".join(prompt_list)
+    prompt = get_prompt()
     
     tokenizer = AutoTokenizer.from_pretrained(model_config['path'])
     model = AutoModelForCausalLM.from_pretrained(model_config['path']).to(torch.float16).to(device)
@@ -265,51 +246,12 @@ def process_model(model_config):
     del model, tokenizer, outputs, past_key_values
     torch.cuda.empty_cache()
     
-    optimal_attention_maps = attention_maps.clone()
-    h2o_attention_maps = attention_maps.clone()
-    a2sf_attention_maps = attention_maps.clone()
     prompt_length = input_ids.size(1) - GENERATION_LENGTH
-    
-    scores_h2o = h2o_attention_maps[:,:,:prompt_length+1,:].sum(dim=2, keepdim=True)
-    exponent = (0.99**torch.arange(prompt_length-1,-1,-1, device=device)).view(1,1,-1,1)
-    scores_a2sf = (a2sf_attention_maps[:,:,:prompt_length,:]*exponent).sum(dim=2, keepdim=True)
-    
-    for i in tqdm(range(GENERATION_LENGTH), desc="Processing attention maps"):
-        selected_scores = optimal_attention_maps[:,:,[prompt_length+i],:].topk(k=2*NUM_SELECTED_TOKENS, dim=3).indices
-        mask = torch.zeros_like(optimal_attention_maps[:,:,[prompt_length+i],:], device=device)
-        mask[:,:,:,prompt_length+i:] = 1
-        mask.scatter_(3, selected_scores, 1)
-        
-        optimal_attention_maps[:,:,[prompt_length+i],:] = optimal_attention_maps[:,:,[prompt_length+i],:] * mask
-        divider = optimal_attention_maps[:,:,prompt_length+i,:].sum(dim=2, keepdim=True)
-        optimal_attention_maps[:,:,prompt_length+i,:] = optimal_attention_maps[:,:,prompt_length+i,:] / divider
-        
-        selected_scores = scores_h2o[:,:,:,:prompt_length+i-LOCAL_WINDOW_SIZE].topk(k=NUM_SELECTED_TOKENS, dim=3).indices
-        mask = torch.zeros_like(scores_h2o, device=device)
-        mask[:,:,:,prompt_length+i-LOCAL_WINDOW_SIZE:] = 1
-        mask.scatter_(3, selected_scores, 1)
-        
-        h2o_attention_maps[:,:,prompt_length+i:,:] = h2o_attention_maps[:,:,prompt_length+i:,:] * mask
-        divider = h2o_attention_maps[:,:,prompt_length+i,:].sum(dim=2, keepdim=True)
-        h2o_attention_maps[:,:,prompt_length+i,:] = h2o_attention_maps[:,:,prompt_length+i,:] / divider
-        
-        selected_scores = scores_a2sf[:,:,:,:prompt_length+i-LOCAL_WINDOW_SIZE].topk(k=NUM_SELECTED_TOKENS, dim=3).indices
-        mask = torch.zeros_like(scores_h2o, device=device)
-        mask[:,:,:,prompt_length+i-LOCAL_WINDOW_SIZE:] = 1
-        mask.scatter_(3, selected_scores, 1)
-        
-        a2sf_attention_maps[:,:,prompt_length+i:,:] = a2sf_attention_maps[:,:,prompt_length+i:,:] * mask
-        divider = a2sf_attention_maps[:,:,prompt_length+i,:].sum(dim=2, keepdim=True)
-        a2sf_attention_maps[:,:,prompt_length+i,:] = a2sf_attention_maps[:,:,prompt_length+i,:] / divider
+    optimal_attention_maps = make_optimal_mask(attention_maps, prompt_length, NUM_SELECTED_TOKENS)
+    h2o_attention_maps = make_a2sf_mask(attention_maps, prompt_length, LOCAL_WINDOW_SIZE, NUM_SELECTED_TOKENS, forgetting_factor=1.00)
+    a2sf_attention_maps = make_a2sf_mask(attention_maps, prompt_length, LOCAL_WINDOW_SIZE, NUM_SELECTED_TOKENS, forgetting_factor=0.99)
 
-        if i == 0:
-            plot_first_token_attention(attention_maps, scores_h2o, scores_a2sf, prompt_length, model_config['plot_dir'])
-
-        scores_h2o *= mask
-        scores_h2o += h2o_attention_maps[:,:,prompt_length+i,:].unsqueeze(2)
-        
-        scores_a2sf *= mask*0.99
-        scores_a2sf += a2sf_attention_maps[:,:,prompt_length+i,:].unsqueeze(2)
+    # plot_first_token_attention(attention_maps, h2o_attention_maps, a2sf_attention_maps, prompt_length, model_config['plot_dir'])
     
     answer = attention_maps[:,:,-GENERATION_LENGTH:,:]
     optimal = optimal_attention_maps[:,:,-GENERATION_LENGTH:,:]
@@ -345,10 +287,7 @@ def process_model(model_config):
     
     plot_layer_similarities(h2o_similarity, a2sf_similarity, optimal_similarity, len(h2o_similarity), model_config['plot_dir'])
 
-def main():
-    for model_config in MODEL_CONFIGS:
-        os.makedirs(model_config['plot_dir'], exist_ok=True)
-        process_model(model_config)
-
-if __name__ == "__main__":
-    main()
+# Execute the code sequentially
+for model_config in MODEL_CONFIGS:
+    os.makedirs(model_config['plot_dir'], exist_ok=True)
+    process_model(model_config)

@@ -25,7 +25,7 @@ def evaluate_model(model, tokenizer, dataset, device):
         prompt = sample["prompt"]
         expected_answer = sample["answer"]
         needle_position = sample["needle_position"]
-        max_tokens = sample["max_tokens"]
+        total_tokens = sample["total_tokens"]
         
         # Tokenize the input
         inputs = tokenizer(prompt, return_tensors="pt").to(device)
@@ -49,7 +49,7 @@ def evaluate_model(model, tokenizer, dataset, device):
         is_correct = expected_answer in model_answer
         
         # Record the result
-        results[(max_tokens, needle_position)].append({
+        results[(total_tokens, needle_position)].append({
             "expected": expected_answer,
             "model_answer": model_answer,
             "is_correct": is_correct
@@ -61,12 +61,12 @@ def calculate_metrics(results):
     """Calculate accuracy metrics for each needle position and context length."""
     metrics = {}
     
-    for (max_tokens, position), samples in results.items():
+    for (total_tokens, position), samples in results.items():
         correct_count = sum(1 for sample in samples if sample["is_correct"])
         total_count = len(samples)
         accuracy = correct_count / total_count if total_count > 0 else 0
         
-        metrics[(max_tokens, position)] = {
+        metrics[(total_tokens, position)] = {
             "accuracy": accuracy,
             "correct_count": correct_count,
             "total_count": total_count
@@ -125,7 +125,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name", type=str, default="meta-llama/Llama-2-7b-chat-hf", 
                         help="Name of the model to use")
-    parser.add_argument("--dataset_path", type=str, default="fewshot_data/needle_test_Llama-2-7b-hf.jsonl",
+    parser.add_argument("--dataset_path", type=str, default="datasets/needle_dataset_Llama-2-7b-hf.jsonl",
                         help="Path to the dataset file")
     parser.add_argument("--gpu", type=int, default=0,
                         help="GPU number to use (default: 0)")
@@ -172,7 +172,7 @@ def main():
         total_correct = sum(sample[1]["correct_count"] for sample in position_samples)
         total_samples = sum(sample[1]["total_count"] for sample in position_samples)
         avg_accuracy = total_correct / total_samples if total_samples > 0 else 0
-        print(f"{position:8d} | {avg_accuracy:.2%} | {total_correct}/{total_samples}")
+        print(f"{position:3.2f} | {avg_accuracy:.2%} | {total_correct}/{total_samples}")
 
 if __name__ == "__main__":
     main()

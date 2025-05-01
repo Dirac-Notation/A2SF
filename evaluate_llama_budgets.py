@@ -20,7 +20,6 @@ def main(args):
     # Check and extend list lengths
     lengths = [len(sb_list), len(rb_list), len(randb_list), len(sbud_list)]
     max_len = max(lengths)
-    cfg_len = max_len * len(ff_list) * len(rm_list)
     for l in lengths:
         if l != 1 and l != max_len:
             raise ValueError("All budget lists (including streaming) must have the same length or contain only one element.")
@@ -28,6 +27,10 @@ def main(args):
     if len(rb_list) == 1: rb_list *= max_len
     if len(randb_list) == 1: randb_list *= max_len
     if len(sbud_list) == 1: sbud_list *= max_len
+
+    # Calculate total number of configurations
+    total_configs = len(ff_list) * len(rm_list) * max_len
+    current_config = 0
 
     # Prepare device, model, and tokenizer
     device = f"cuda:{args.gpu}"
@@ -47,15 +50,11 @@ def main(args):
         tokenizer=tokenizer
     )
 
-    # Prepare output directory
-    dataset_name = os.path.splitext(os.path.basename(args.datasets))[0]
-    output_dir = "output_text"
-    os.makedirs(output_dir, exist_ok=True)
-
     # Nested loops: forgetting_factor → random_method → budget configs
     for ff in ff_list:
         for rm in rm_list:
             for idx in range(max_len):
+                current_config += 1
                 cur_sb = sb_list[idx]
                 cur_rb = rb_list[idx]
                 cur_rand = randb_list[idx]
@@ -87,7 +86,7 @@ def main(args):
                     answers=answers,
                     output_indices=output_indices,
                     device=device,
-                    desc=f"sel={cur_sb},rec={cur_rb},ran={cur_rand},str={cur_sbud},ff={ff},rm={rm},cfg{idx+1}/{cfg_len}",
+                    desc=f"sel={cur_sb},rec={cur_rb},ran={cur_rand},str={cur_sbud},ff={ff},rm={rm},cfg{current_config}/{total_configs}",
                     init_cache_fn=model.init_cache,
                     cache_params={
                         'use_compression': True,
@@ -102,7 +101,7 @@ def main(args):
 
                 # Print results
                 print(
-                    f"Config {idx+1}/{max_len} | "
+                    f"Config {current_config}/{total_configs} | "
                     f"select={cur_sb}, recent={cur_rb}, random={cur_rand}, "
                     f"streaming={cur_sbud}, ff={ff}, rm={rm}"
                 )
@@ -117,7 +116,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate Llama predictions with various budgets.")
     parser.add_argument("--model_name", type=str, default="meta-llama/Llama-2-7b-chat-hf")
     parser.add_argument("--gpu", type=int, default=0)
-    parser.add_argument("--datasets", type=str, default="fewshot_data/cnn_dailymail-3shot.jsonl")
+    parser.add_argument("--datasets", type=str, default="datasets/cnn_dailymail-3shot.jsonl")
     parser.add_argument("--select_budget", type=int, nargs='+', default=[100])
     parser.add_argument("--recent_budget", type=int, nargs='+', default=[100])
     parser.add_argument("--random_budget", type=int, nargs='+', default=[0])

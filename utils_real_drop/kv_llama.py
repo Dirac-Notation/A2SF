@@ -704,6 +704,12 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         forgetting_factor: float = 1.0,
         random_method: Optional[str] = None
     ):
+        # forgetting_factor = 1.000
+        # while True:
+        #     if forgetting_factor**recent_budget < 1e-2:
+        #         break
+        #     else:
+        #         forgetting_factor -= 0.001
         self.model.init_cache(use_compression, select_budget, recent_budget, streaming_budget, random_budget, forgetting_factor, random_method)
 
     def get_input_embeddings(self):
