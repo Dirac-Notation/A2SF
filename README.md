@@ -40,7 +40,7 @@ A key-value (KV) cache compression technique utilizing accumulative attention sc
       recent_budget=128, # Recent cache budget
    )
 
-   prompts, answers = load_datasets(dataset_path="fewshot_data/cnn_dailymail-3shot.jsonl", tokenizer=tokenizer)
+   prompts, answers = load_datasets(dataset_path="datasets/cnn_dailymail-3shot.jsonl", tokenizer=tokenizer)
 
    input_ids = prompts[0].to(model.device)
 

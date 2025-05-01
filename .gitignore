@@ -5,8 +5,6 @@
 *.jsonl
 
 # Custom Directories
-tmp/
-output_text/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

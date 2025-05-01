@@ -2,6 +2,7 @@ import torch
 import argparse
 from utils_real_drop.kv_llama import LlamaForCausalLM
 from transformers import AutoTokenizer
+from utils import get_prompt
 
 # CLI arguments (only cache settings and device)
 parser = argparse.ArgumentParser(description="Llama2 generation with RoPE cache settings via CLI")
@@ -20,27 +21,7 @@ device = f"cuda:{args.gpu}"
 
 # Hardcoded model name and example prompt (>200 tokens)
 model_name = "meta-llama/Llama-2-7b-chat-hf"
-prompt_list = [
-    "The Schrödinger equation is a partial differential equation that governs the wave function of a non-relativistic quantum-mechanical system.",
-    "Its discovery was a significant landmark in the development of quantum mechanics.",
-    "It is named after Erwin Schrödinger, an Austrian physicist, who postulated the equation in 1925 and published it in 1926, forming the basis for the work that resulted in his Nobel Prize in Physics in 1933.",
-    "Conceptually, the Schrödinger equation is the quantum counterpart of Newton's second law in classical mechanics.",
-    "Given a set of known initial conditions, Newton's second law makes a mathematical prediction as to what path a given physical system will take over time.",
-    "The Schrödinger equation gives the evolution over time of the wave function, the quantum-mechanical characterization of an isolated physical system.",
-    "The equation was postulated by Schrödinger based on a postulate of Louis de Broglie that all matter has an associated matter wave.",
-    "The equation predicted bound states of the atom in agreement with experimental observations.",
-    "The Schrödinger equation is not the only way to study quantum mechanical systems and make predictions.",
-    "Other formulations of quantum mechanics include matrix mechanics, introduced by Werner Heisenberg, and the path integral formulation, developed chiefly by Richard Feynman.",
-    "When these approaches are compared, the use of the Schrödinger equation is sometimes called \"wave mechanics\".",
-    "The equation given by Schrödinger is nonrelativistic because it contains a first derivative in time and a second derivative in space, and therefore space and time are not on equal footing.",
-    "Paul Dirac incorporated special relativity and quantum mechanics into a single formulation that simplifies to the Schrödinger equation in the non-relativistic limit.",
-    "This is the Dirac equation, which contains a single derivative in both space and time.",
-    "Another partial differential equation, the Klein–Gordon equation, led to a problem with probability density even though it was a relativistic wave equation.",
-    "The probability density could be negative, which is physically unviable.",
-    "This was fixed by Dirac by taking the so-called square root of the Klein–Gordon operator and in turn introducing Dirac matrices.",
-    "In a modern context, the Klein–Gordon equation describes spin-less particles, while the Dirac equation describes spin-1/2 particles."
-]
-prompt = " ".join(prompt_list)
+prompt = get_prompt()
 
 # 모델과 토크나이저 초기화
 tokenizer = AutoTokenizer.from_pretrained(model_name)
