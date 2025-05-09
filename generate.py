@@ -1,6 +1,6 @@
 import torch
 import argparse
-from utils_real_drop.kv_llama import LlamaForCausalLM
+from utils_real_drop.kv_llama import KVLlamaForCausalLM
 from transformers import AutoTokenizer
 from utils import get_prompt
 
@@ -25,7 +25,7 @@ prompt = get_prompt()
 
 # 모델과 토크나이저 초기화
 tokenizer = AutoTokenizer.from_pretrained(model_name)
-model = LlamaForCausalLM.from_pretrained(model_name).to(torch.bfloat16).to(device)
+model = KVLlamaForCausalLM.from_pretrained(model_name).to(torch.bfloat16).to(device)
 
 with torch.inference_mode():
     # 입력 프롬프트 준비

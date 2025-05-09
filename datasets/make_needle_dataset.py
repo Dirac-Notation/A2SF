@@ -19,7 +19,7 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     
     # Define user prompt
-    user_prompt = "Identify the password hidden in the text above.\nPassword: "
+    user_prompt = "Identify the password hidden in the text above."
 
     # Collect sentences by token length
     print("Loading dataset and collecting sentences...")

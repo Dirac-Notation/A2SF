@@ -8,8 +8,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 from collections import defaultdict
 
-from utils_real_drop.kv_llama import LlamaForCausalLM
-from utils_real_drop.kv_opt import OPTForCausalLM
+from utils_real_drop import KVLlamaForCausalLM, KVOPTForCausalLM, OptimalLlamaForCausalLM
+
+from utils import load_configs
 
 def load_dataset(file_path):
     """Load the needle-in-haystack dataset from a JSONL file."""
@@ -32,7 +33,7 @@ def evaluate_model(model, tokenizer, dataset, device, init_cache_fn=None, cache_
         
         # Initialize cache with budget settings if provided
         if init_cache_fn and cache_params:
-            init_cache_fn(**cache_params)
+            init_cache_fn(cache_params)
         
         # Tokenize the input
         inputs = tokenizer(prompt, return_tensors="pt").to(device)
@@ -128,94 +129,44 @@ def create_heatmap(metrics, output_file):
     plt.savefig(output_file, dpi=300, bbox_inches='tight')
     print(f"Heatmap saved to {output_file}")
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model_name", type=str, default="meta-llama/Llama-2-7b-chat-hf", 
-                        help="Name of the model to use")
-    parser.add_argument("--dataset_path", type=str, default="datasets/needle_dataset_Llama-2-7b-hf.jsonl",
-                        help="Path to the dataset file")
-    parser.add_argument("--gpu", type=int, default=0,
-                        help="GPU number to use (default: 0)")
-    parser.add_argument("--select_budget", type=int, nargs='+', default=[100],
-                        help="Select budget values")
-    parser.add_argument("--recent_budget", type=int, nargs='+', default=[100],
-                        help="Recent budget values")
-    parser.add_argument("--random_budget", type=int, nargs='+', default=[0],
-                        help="Random budget values")
-    parser.add_argument("--streaming_budget", type=int, nargs='+', default=[0],
-                        help="Streaming budget values")
-    parser.add_argument("--forgetting_factor", type=float, nargs='+', default=[1.0],
-                        help="Forgetting factor values")
-    parser.add_argument("--random_method", type=str, nargs='+', default=["att"],
-                        help="Random method values")
-    args = parser.parse_args()
-    
-    # Set device
-    device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
-    
+def main(args):
     # Initialize budget and hyperparameter lists
-    sb_list = args.select_budget
-    rb_list = args.recent_budget
-    randb_list = args.random_budget
-    sbud_list = args.streaming_budget
-    ff_list = args.forgetting_factor
-    rm_list = args.random_method
+    model_name = args.model.split("/")[1]
+    datasets = args.dataset
+    budget_list = args.budget
+    methods = args.method
 
     # Check and extend list lengths
-    lengths = [len(sb_list), len(rb_list), len(randb_list), len(sbud_list)]
-    max_len = max(lengths)
-    cfg_len = max_len * len(ff_list) * len(rm_list)
-    for l in lengths:
-        if l != 1 and l != max_len:
-            raise ValueError("All budget lists (including streaming) must have the same length or contain only one element.")
-    if len(sb_list) == 1: sb_list *= max_len
-    if len(rb_list) == 1: rb_list *= max_len
-    if len(randb_list) == 1: randb_list *= max_len
-    if len(sbud_list) == 1: sbud_list *= max_len
+    max_len = len(datasets) * len(budget_list) * len(methods)
     
-    # Load tokenizer
-    print(f"Loading tokenizer: {args.model_name}")
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+    # Prepare device, model, and tokenizer
+    device = f"cuda:{args.gpu}"
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
     
     # Load appropriate model based on model name
-    print(f"Loading model: {args.model_name}")
-    if "llama" in args.model_name.lower():
-        model = (LlamaForCausalLM.from_pretrained(args.model_name).to(torch.bfloat16).to(device))
-    elif "opt" in args.model_name.lower():
-        model = (OPTForCausalLM.from_pretrained(args.model_name).to(torch.bfloat16).to(device))
+    if "llama" in model_name.lower():
+        model = (KVLlamaForCausalLM.from_pretrained(args.model).to(torch.bfloat16).to(device))
+    elif "opt" in model_name.lower():
+        model = (KVOPTForCausalLM.from_pretrained(args.model).to(torch.bfloat16).to(device))
     else:
-        raise ValueError(f"Unsupported model: {args.model_name}. Only Llama and OPT models are supported.")
-    
-    # Load dataset
-    print(f"Loading dataset: {args.dataset_path}")
-    dataset = load_dataset(args.dataset_path)
-    print(f"Loaded {len(dataset)} samples")
-    
-    # Prepare output directory
-    os.makedirs("plots", exist_ok=True)
-    
-    # Nested loops: forgetting_factor → random_method → budget configs
-    for ff in ff_list:
-        for rm in rm_list:
-            for idx in range(max_len):
-                cur_sb = sb_list[idx]
-                cur_rb = rb_list[idx]
-                cur_rand = randb_list[idx]
-                cur_sbud = sbud_list[idx]
-                
+        raise ValueError(f"Unsupported model: {args.model}. Only Llama and OPT models are supported.")
+
+    cur_idx = 0
+    for dataset in datasets:
+        dataset_name = os.path.basename(dataset).split('.')[0]
+        
+        # Load dataset
+        dataset = load_dataset(dataset)
+
+        # Nested loops: budget → method
+        for cur_budget in budget_list:
+            for cur_method in methods:
+                cur_idx += 1
+                config = load_configs(model_name, cur_method, cur_budget)
+
                 # Warm-up
-                print(f"Warming up with config: sel={cur_sb}, rec={cur_rb}, ran={cur_rand}, str={cur_sbud}, ff={ff}, rm={rm}")
                 for sample in dataset[:10]:
-                    model.init_cache(
-                        use_compression=False,
-                        select_budget=cur_sb,
-                        recent_budget=cur_rb,
-                        random_budget=cur_rand,
-                        streaming_budget=cur_sbud,
-                        random_method=rm,
-                        forgetting_factor=ff
-                    )
+                    model.init_cache(config)
                     prompt = sample["prompt"]
                     inputs = tokenizer(prompt, return_tensors="pt").to(device)
                     with torch.no_grad():
@@ -225,36 +176,27 @@ def main():
                             temperature=0.0,
                             do_sample=False,
                         )
-                
+
                 # Evaluate with current configuration
-                print(f"Evaluating with config: sel={cur_sb}, rec={cur_rb}, ran={cur_rand}, str={cur_sbud}, ff={ff}, rm={rm}")
                 results = evaluate_model(
                     model=model,
                     tokenizer=tokenizer,
                     dataset=dataset,
                     device=device,
                     init_cache_fn=model.init_cache,
-                    cache_params={
-                        'use_compression': True,
-                        'select_budget': cur_sb,
-                        'recent_budget': cur_rb,
-                        'random_budget': cur_rand,
-                        'streaming_budget': cur_sbud,
-                        'random_method': rm,
-                        'forgetting_factor': ff
-                    }
+                    cache_params=config
                 )
-                
+
                 # Calculate metrics
                 metrics = calculate_metrics(results)
                 
                 # Create heatmap
-                output_file = f"plots/needle_heatmap_budget_s{cur_sb}_r{cur_rb}_ra{cur_rand}_st{cur_sbud}_ff{ff}_rm{rm}.png"
-                print(f"Creating heatmap visualization: {output_file}")
+                output_file = f"plots/needle/needle_heatmap_{dataset_name}_budget{cur_budget}_{cur_method}.png"
+                os.makedirs("plots/needle", exist_ok=True)
                 create_heatmap(metrics, output_file)
                 
                 # Print summary
-                print("\nSummary of results:")
+                print(f"\nConfig {cur_idx}/{max_len} | dataset={dataset_name}, method={cur_method}, budget={cur_budget}")
                 print("Position | Accuracy | Correct/Total")
                 print("-" * 40)
                 for position in sorted(set(k[1] for k in metrics.keys())):
@@ -266,4 +208,11 @@ def main():
                     print(f"{position:3.2f} | {avg_accuracy:.2%} | {total_correct}/{total_samples}")
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Evaluate Llama predictions with various budgets on needle-in-haystack task.")
+    parser.add_argument("--gpu", type=int, default=0)
+    parser.add_argument("--model", type=str, default="meta-llama/Llama-2-7b-chat-hf")
+    parser.add_argument("--dataset", type=str, nargs='+', default=["datasets/needle_dataset_Llama-2-7b-hf.jsonl"])
+    parser.add_argument("--budget", type=int, nargs='+', default=[100])
+    parser.add_argument("--method", type=str, nargs='+', default=["h2o"])
+    args = parser.parse_args()
+    main(args)
