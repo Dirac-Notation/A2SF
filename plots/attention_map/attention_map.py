@@ -1,3 +1,7 @@
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
 import torch
 import argparse
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -6,27 +10,27 @@ from tqdm import tqdm
 import numpy as np
 import os
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-from utils import get_prompt, make_optimal_mask, make_a2sf_mask
+from utils import get_prompt, make_optimal_mask, make_a2sf_mask, load_configs
 
-GENERATION_LENGTH = 800
-LOCAL_WINDOW_SIZE = 100
-NUM_SELECTED_TOKENS = 100
+PROMPT_LENGTH = 200
+GENERATION_LENGTH = 300
+TOTAL_BUDGET = 100
 MODEL_CONFIGS = [
     {
         "name": "llama2-chat",
         "path": "meta-llama/Llama-2-7b-chat-hf",
-        "plot_dir": "plots/llama2-chat"
+        "plot_dir": "plots/attention_map/llama2-chat"
     },
-    {
-        "name": "opt",
-        "path": "facebook/opt-6.7b",
-        "plot_dir": "plots/opt"
-    },
-    {
-        "name": "llama",
-        "path": "huggyllama/llama-7b",
-        "plot_dir": "plots/llama"
-    }
+    # {
+    #     "name": "opt",
+    #     "path": "facebook/opt-6.7b",
+    #     "plot_dir": "plots/attention_map/opt"
+    # },
+    # {
+    #     "name": "llama",
+    #     "path": "huggyllama/llama-7b",
+    #     "plot_dir": "plots/attention_map/llama"
+    # }
 ]
 
 parser = argparse.ArgumentParser(description="Model generation with RoPE cache settings via CLI")
@@ -34,34 +38,8 @@ parser.add_argument('--gpu', type=str, default="1", help="GPU device number to u
 args = parser.parse_args()
 device = f"cuda:{args.gpu}"
 
-def plot_first_token_attention(attention_maps, scores_h2o, scores_a2sf, prompt_length, save_dir):
-    num_tokens_to_show = 200
-    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(8, 6))
-    
-    ax1.bar(range(num_tokens_to_show), attention_maps[0,0,prompt_length,:num_tokens_to_show].cpu().numpy())
-    ax1.set_title('Original Attention Distribution\nFirst Generated Token')
-    ax1.set_xlabel('Token Position')
-    ax1.set_ylabel('Attention Score')
-    
-    ax2.bar(range(num_tokens_to_show), scores_h2o[0,0,0,:num_tokens_to_show].cpu().numpy())
-    ax2.set_title('H2O Attention Distribution\nFirst Generated Token')
-    ax2.set_xlabel('Token Position')
-    ax2.set_ylabel('Accumulative\nAttention Weight')
-    
-    ax3.bar(range(num_tokens_to_show), scores_a2sf[0,0,0,:num_tokens_to_show].cpu().numpy())
-    ax3.set_title('A2SF Attention Distribution\nFirst Generated Token')
-    ax3.set_xlabel('Token Position')
-    ax3.set_ylabel('Accumulative\nAttention Weight')
-    
-    for ax in [ax1, ax2, ax3]:
-        ax.set_xticks(range(0, num_tokens_to_show+1, 20))
-    
-    plt.tight_layout()
-    plt.savefig(f'{save_dir}/first_token_attention_distribution.png', bbox_inches='tight')
-    plt.close()
-
 def plot_attention_maps(original_map, h2o_map, a2sf_map, layer_idx, head_idx, save_path):
-    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(8, 10))
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(10, 8))
     
     original_map = torch.pow(original_map, 1/3)
     h2o_map = torch.pow(h2o_map, 1/3)
@@ -123,23 +101,37 @@ def plot_layer_similarities(h2o_similarity, a2sf_similarity, optimal_similarity,
     a2sf_layer_means = a2sf_similarity.mean(axis=1)
     optimal_layer_means = optimal_similarity.mean(axis=1)
     
-    plt.figure(figsize=(10, 6))
+    plt.figure(figsize=(12, 6))
     x = range(num_layers)
-    width = 0.25
     
-    plt.bar([i - width for i in x], h2o_layer_means, width, label='H2O', color='blue', alpha=0.7)
-    plt.bar([i for i in x], a2sf_layer_means, width, label='A2SF', color='orange', alpha=0.7)
-    plt.bar([i + width for i in x], optimal_layer_means, width, label='Optimal', color='green', alpha=0.7)
+    # 선 그래프 그리기
+    plt.plot(x, h2o_layer_means, 'b-', label='H2O', linewidth=2, marker='o', markersize=6)
+    plt.plot(x, a2sf_layer_means, 'r-', label='A2SF', linewidth=2, marker='s', markersize=6)
+    plt.plot(x, optimal_layer_means, 'g-', label='Optimal', linewidth=2, marker='^', markersize=6)
     
-    plt.xlabel('Layer')
-    plt.ylabel('Average Cosine Similarity')
-    plt.title('Layer-wise Average Attention Map Similarity')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
+    # 축 레이블과 제목 설정
+    plt.xlabel('Layer', fontsize=12)
+    plt.ylabel('Average Cosine Similarity', fontsize=12)
+    plt.title('Layer-wise Average Attention Map Similarity', fontsize=14, pad=20)
+    
+    # 범례 설정
+    plt.legend(fontsize=10, loc='upper right', framealpha=0.9)
+    
+    # 그리드 설정
+    plt.grid(True, linestyle='--', alpha=0.3)
+    
+    # y축 범위 설정
     plt.ylim(0.65, 1.02)
     
+    # x축 눈금 설정
+    plt.xticks(x, fontsize=10)
+    plt.yticks(fontsize=10)
+    
+    # 그래프 여백 조정
     plt.tight_layout()
-    plt.savefig(f'{save_dir}/layer_wise_average_similarity.png')
+    
+    # 그래프 저장
+    plt.savefig(f'{save_dir}/layer_wise_average_similarity.png', dpi=300, bbox_inches='tight')
     plt.close()
 
 def plot_layer_similarities_over_steps(h2o_similarity, a2sf_similarity, optimal_similarity, save_dir):
@@ -224,7 +216,7 @@ def process_model(model_config):
     model = AutoModelForCausalLM.from_pretrained(model_config['path']).to(torch.float16).to(device)
     
     with torch.inference_mode():
-        input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
+        input_ids = tokenizer(prompt, return_tensors="pt").input_ids[:, :PROMPT_LENGTH].to(device)
         past_key_values = None
         
         outputs = model(input_ids, use_cache=True)
@@ -246,12 +238,12 @@ def process_model(model_config):
     del model, tokenizer, outputs, past_key_values
     torch.cuda.empty_cache()
     
-    prompt_length = input_ids.size(1) - GENERATION_LENGTH
-    optimal_attention_maps = make_optimal_mask(attention_maps, prompt_length, NUM_SELECTED_TOKENS)
-    h2o_attention_maps = make_a2sf_mask(attention_maps, prompt_length, LOCAL_WINDOW_SIZE, NUM_SELECTED_TOKENS, forgetting_factor=1.00)
-    a2sf_attention_maps = make_a2sf_mask(attention_maps, prompt_length, LOCAL_WINDOW_SIZE, NUM_SELECTED_TOKENS, forgetting_factor=0.99)
-
-    # plot_first_token_attention(attention_maps, h2o_attention_maps, a2sf_attention_maps, prompt_length, model_config['plot_dir'])
+    h2o_config = load_configs(model_config['path'].split('/')[1], 'h2o', TOTAL_BUDGET)
+    a2sf_config = load_configs(model_config['path'].split('/')[1], 'a2sf', TOTAL_BUDGET)
+    
+    optimal_attention_maps = make_optimal_mask(attention_maps, PROMPT_LENGTH, TOTAL_BUDGET)
+    h2o_attention_maps = make_a2sf_mask(attention_maps, PROMPT_LENGTH, TOTAL_BUDGET, h2o_config.compression_ratio, h2o_config.forgetting_factors)
+    a2sf_attention_maps = make_a2sf_mask(attention_maps, PROMPT_LENGTH, TOTAL_BUDGET, a2sf_config.compression_ratio, a2sf_config.forgetting_factors)
     
     answer = attention_maps[:,:,-GENERATION_LENGTH:,:]
     optimal = optimal_attention_maps[:,:,-GENERATION_LENGTH:,:]
@@ -279,9 +271,9 @@ def process_model(model_config):
         for head_idx in range(attention_maps.size(1)):
             save_path = f"{model_config['plot_dir']}/attention/layer{layer_idx}/head{head_idx}.png"
             plot_attention_maps(
-                optimal_attention_maps[layer_idx, head_idx, -GENERATION_LENGTH:, :],
-                h2o_attention_maps[layer_idx, head_idx, -GENERATION_LENGTH:, :],
-                a2sf_attention_maps[layer_idx, head_idx, -GENERATION_LENGTH:, :],
+                optimal_attention_maps[layer_idx, head_idx, :, :],
+                h2o_attention_maps[layer_idx, head_idx, :, :],
+                a2sf_attention_maps[layer_idx, head_idx, :, :],
                 layer_idx, head_idx, save_path
             )
     
@@ -291,3 +283,4 @@ def process_model(model_config):
 for model_config in MODEL_CONFIGS:
     os.makedirs(model_config['plot_dir'], exist_ok=True)
     process_model(model_config)
+    torch.cuda.empty_cache()

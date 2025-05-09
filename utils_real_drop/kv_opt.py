@@ -738,7 +738,7 @@ class OPTModel(OPTPreTrainedModel):
         )
 
 
-class OPTForCausalLM(OPTPreTrainedModel):
+class KVOPTForCausalLM(OPTPreTrainedModel):
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self, config):

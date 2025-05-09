@@ -152,7 +152,6 @@ class LlamaKVCache():
         self.seq_length = 0
         self.key_data = None
         self.value_data = None
-        self.score = None
         self.use_compression = False
 
     def init_cache(self, compression_config, layer_idx):
@@ -162,12 +161,7 @@ class LlamaKVCache():
         
         if self.use_compression:
             self.total_budget = compression_config.total_budget
-            if compression_config.compression_ratio[layer_idx][0] + compression_config.compression_ratio[layer_idx][1] != 1:
-                raise ValueError("Compression ratio must sum to 1")
-            self.recent_budget = round(compression_config.compression_ratio[layer_idx][0] * self.total_budget)
-            self.select_budget = round(compression_config.compression_ratio[layer_idx][1] * self.total_budget)
-            self.forgetting_factor = compression_config.forgetting_factors[layer_idx]
-            self.score = None
+            self.prompt = False
 
     def len(self):
         return self.seq_length
@@ -188,43 +182,45 @@ class LlamaKVCache():
 
     def update(self, attn_scores):
         """Update cache based on attention scores"""
-        if not (self.use_compression and self.seq_length > self.total_budget):
-            return
+        if not (self.use_compression and self.seq_length > self.total_budget and self.prompt):
+            self.prompt = True
+            return attn_scores
+            
+        # 옵티멀
+        selected_indices = attn_scores.sort(dim=3).indices[:,:,:,:-self.total_budget]
+        new_scores = attn_scores.clone()
+        new_scores.scatter_(3, selected_indices, 0)
+        new_scores /= new_scores.sum(dim=3, keepdim=True)
+        
+        # 특정 퍼센트 부분 마스크 하는 것
+        # num_mask = self.seq_length//100
+        # new_scores = attn_scores.clone()
+        # if self.total_budget == 0:
+        #     new_scores[:,:,:,-num_mask:] = 0
+        # else:
+        #     new_scores[:,:,:,-num_mask*(self.total_budget+5):-num_mask*self.total_budget] = 0
+        # new_scores /= new_scores.sum(dim=3, keepdim=True)
+        
+        return new_scores
 
-        seq_len = attn_scores.size(2)
-        device, dtype = attn_scores.device, attn_scores.dtype
+    def update_with_sim(self, attn_scores, value_states):
+        """Update cache based on attention scores"""
+        if not (self.use_compression and self.seq_length > self.total_budget and self.prompt):
+            self.prompt = True
+            return torch.matmul(attn_scores, value_states)
+            
+        # 옵티멀
+        selected_indices = attn_scores.sort(dim=3).indices[:,:,:,:-self.total_budget]
+        new_scores = attn_scores.clone()
+        new_scores.scatter_(3, selected_indices, 0)
+        new_scores /= new_scores.sum(dim=3, keepdim=True)
         
-        # Calculate weighted attention scores
-        exponents = torch.arange(seq_len, 0, -1, device=device, dtype=dtype) - 1
-        forgetting = (self.forgetting_factor ** exponents).view(1, 1, seq_len, 1)
-        current_score = (forgetting * attn_scores).sum(dim=self.seq_dim)
+        original_outputs = torch.matmul(attn_scores, value_states)
+        new_outputs = torch.matmul(new_scores, value_states)
         
-        # Update cumulative scores
-        if self.score is not None:
-            current_score[:,:,:-1] += self.forgetting_factor * self.score
-        self.score = current_score
+        self.sim_scores = F.cosine_similarity(original_outputs, new_outputs, dim=3).mean().item()
         
-        # Select tokens to keep
-        selected_indices = self.score[:,:,:-self.recent_budget].topk(self.select_budget, dim=-1).indices.sort().values
-        
-        # Update scores
-        self.score = torch.cat((
-            self.score.gather(self.seq_dim, selected_indices),
-            self.score[:,:,-self.recent_budget:]
-        ), dim=self.seq_dim)
-        
-        # Update key-value cache
-        selected_indices = selected_indices.unsqueeze(-1).expand(-1,-1,-1,self.key_data.size(-1))
-        
-        self.key_data = torch.cat((
-            self.key_data.gather(self.seq_dim, selected_indices),
-            self.key_data[:,:,-self.recent_budget:,:]
-        ), dim=self.seq_dim)
-        
-        self.value_data = torch.cat((
-            self.value_data.gather(self.seq_dim, selected_indices),
-            self.value_data[:,:,-self.recent_budget:,:]
-        ), dim=self.seq_dim)
+        return new_outputs
 
 
 class LlamaAttention(nn.Module):
@@ -306,7 +302,9 @@ class LlamaAttention(nn.Module):
 
         # upcast attention to fp32
         attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-        attn_output = torch.matmul(attn_weights, value_states)
+        # attn_weights = self.past_key_value.update(attn_weights)
+        # attn_output = torch.matmul(attn_weights, value_states)
+        attn_output = self.past_key_value.update_with_sim(attn_weights, value_states)
 
         attn_output = attn_output.transpose(1, 2).contiguous()
 
@@ -318,8 +316,6 @@ class LlamaAttention(nn.Module):
             attn_output = sum([F.linear(attn_output[i], o_proj_slices[i]) for i in range(self.config.pretraining_tp)])
         else:
             attn_output = self.o_proj(attn_output)
-
-        self.past_key_value.update(attn_weights)
 
         if not output_attentions:
             attn_weights = None
@@ -547,7 +543,7 @@ class LlamaModel(LlamaPreTrainedModel):
         )
 
 
-class KVLlamaForCausalLM(LlamaPreTrainedModel):
+class OptimalLlamaForCausalLM(LlamaPreTrainedModel):
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self, config):

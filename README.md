@@ -28,11 +28,11 @@ A key-value (KV) cache compression technique utilizing accumulative attention sc
    from transformers import AutoTokenizer
 
    from utils import load_datasets
-   from utils_real_drop.kv_llama import LlamaForCausalLM
+   from utils_real_drop.kv_llama import KVLlamaForCausalLM
 
    model_name = "meta-llama/Llama-2-7b-hf"
    tokenizer = AutoTokenizer.from_pretrained(model_name)
-   model = LlamaForCausalLM.from_pretrained(model_name).half().to("cuda")
+   model = KVLlamaForCausalLM.from_pretrained(model_name).half().to("cuda")
 
    model.init_cache(
       use_compression=True,
