@@ -190,9 +190,9 @@ def main(args):
     
     # Load appropriate model based on model name
     if "llama" in args.model.lower():
-        model = (KVLlamaForCausalLM.from_pretrained(model_path).to(torch.float16).to(device))
+        model = (KVLlamaForCausalLM.from_pretrained(model_path).to(torch.bfloat16).to(device))
     elif "opt" in args.model.lower():
-        model = (KVOPTForCausalLM.from_pretrained(model_path).to(torch.float16).to(device))
+        model = (KVOPTForCausalLM.from_pretrained(model_path).to(torch.bfloat16).to(device))
     else:
         raise ValueError(f"Unsupported model: {args.model}. Only Llama and OPT models are supported.")
 

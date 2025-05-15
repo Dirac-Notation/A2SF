@@ -8,7 +8,7 @@ from rouge_score import rouge_scorer
 from tqdm import tqdm
 
 from utils import load_configs
-from utils_real_drop import KVLlamaForCausalLM, KVOPTForCausalLM, OptimalLlamaForCausalLM, MaskedLlamaForCausalLM
+from utils_real_drop import KVLlamaForCausalLM, KVOPTForCausalLM, OptimalLlamaForCausalLM, MaskedLlamaForCausalLM, KVQwen2ForCausalLM, Qwen2Tokenizer
 
 def load_datasets(
     dataset_path: str,
@@ -161,14 +161,19 @@ def main(args):
     model_path = model2path[args.model]
 
     if "masked" in args.model.lower():
-        model = (MaskedLlamaForCausalLM.from_pretrained(model_path).to(torch.float16).to(device))
+        model = (MaskedLlamaForCausalLM.from_pretrained(model_path).to(torch.bfloat16).to(device))
+        tokenizer = AutoTokenizer.from_pretrained(model_path)
     elif "llama" in args.model.lower():
-        model = (KVLlamaForCausalLM.from_pretrained(model_path).to(torch.float16).to(device))
+        model = (KVLlamaForCausalLM.from_pretrained(model_path).to(torch.bfloat16).to(device))
+        tokenizer = AutoTokenizer.from_pretrained(model_path)
     elif "opt" in args.model.lower():
-        model = (KVOPTForCausalLM.from_pretrained(model_path).to(torch.float16).to(device))
+        model = (KVOPTForCausalLM.from_pretrained(model_path).to(torch.bfloat16).to(device))
+        tokenizer = AutoTokenizer.from_pretrained(model_path)
+    elif "qwen" in args.model.lower():
+        model = (KVQwen2ForCausalLM.from_pretrained(model_path).to(torch.bfloat16).to(device))
+        tokenizer = Qwen2Tokenizer.from_pretrained(model_path)
     else:
         raise ValueError(f"Unsupported model: {args.model}. Only Llama and OPT models are supported.")
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
 
     cur_idx = 0
     for dataset in datasets:

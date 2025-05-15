@@ -14,7 +14,7 @@ from utils import load_configs
 def parse_args(args=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--gpu', type=int, default=0)
-    parser.add_argument('--model', type=str, default=None, choices=["llama", "llama2", "llama3", "opt"])
+    parser.add_argument('--model', type=str, default=None, choices=["llama", "llama2", "llama3", "opt", "qwen2"])
     parser.add_argument('--method', type=str, default="a2sf")
     parser.add_argument('--total_budget', type=int, default=100)
     return parser.parse_args(args)
@@ -71,7 +71,7 @@ def seed_everything(seed):
 
 def load_model_and_tokenizer(path, model_name, device):
     tokenizer = AutoTokenizer.from_pretrained(path)
-    model = KVLlamaForCausalLM.from_pretrained(path, torch_dtype=torch.float16).to(device)
+    model = KVLlamaForCausalLM.from_pretrained(path, torch_dtype=torch.bfloat16).to(device)
     model = model.eval()
     return model, tokenizer
 

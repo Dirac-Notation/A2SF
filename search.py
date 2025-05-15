@@ -12,6 +12,8 @@ import json
 from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
+from utils_real_drop import Qwen2Tokenizer, Qwen2ForCausalLM
+
 from utils import get_prompt
 
 def make_a2sf_mask(attention_maps, prompt_length, input_ids, total_budget, compression_ratio, forgetting_factor, puntuation_ids):
@@ -72,8 +74,12 @@ def process_model(model_name, device, prompt_length, generation_length, total_bu
     model2path = json.load(open("config/model2path.json", "r"))
     model_path = model2path[model_name]
     
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-    model = AutoModelForCausalLM.from_pretrained(model_path).to(torch.float16).to(device)
+    if "qwen" in model_name.lower():
+        tokenizer = Qwen2Tokenizer.from_pretrained(model_path)
+        model = Qwen2ForCausalLM.from_pretrained(model_path).to(torch.bfloat16).to(device)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(model_path)
+        model = AutoModelForCausalLM.from_pretrained(model_path).to(torch.bfloat16).to(device)
 
     punctuation_ids = [
         tokenizer.encode(".", add_special_tokens=False)[0],
@@ -113,13 +119,13 @@ def process_model(model_name, device, prompt_length, generation_length, total_bu
                 past_key_values = outputs.past_key_values
 
             outputs = model(input_ids, output_attentions=True)
-            
+
             attn_shape = outputs.attentions[0].shape
-            attention_maps = torch.cat(outputs.attentions, dim=0).view(-1, num_groups, num_heads // num_groups, *attn_shape[2:]).mean(dim=2).cpu().to(torch.float32)
+            attention_maps = torch.cat(outputs.attentions, dim=0).view(-1, num_groups, num_heads // num_groups, *attn_shape[2:]).mean(dim=2).cpu()
             past_key_values = outputs.past_key_values
             
             attention_map_buffer.append(attention_maps)
-            values_buffer.append(torch.cat([past_key_values[i][1] for i in range(num_heads)], dim=0).cpu().to(torch.float32))
+            values_buffer.append(torch.cat([past_key_values[i][1] for i in range(num_heads)], dim=0).cpu())
 
             del outputs, next_token_logits, past_key_values
             torch.cuda.empty_cache()
@@ -211,7 +217,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--gpu", type=int, default=0)
-    parser.add_argument("--models", type=str, nargs='+', default=["llama2"], choices=["llama", "llama2", "llama3", "opt"])
+    parser.add_argument("--models", type=str, nargs='+', default=["llama2"], choices=["llama", "llama2", "llama3", "opt", "qwen2"])
     parser.add_argument("--prompt_length", type=int, default=950)
     parser.add_argument("--generation_length", type=int, default=50)
     parser.add_argument("--total_budget", type=int, default=200)
