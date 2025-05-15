@@ -12,6 +12,9 @@ peft
 pytablewriter
 ftfy
 rouge
+py7zr
+jieba
+fuzzywuzzy
 datasets==2.21.0
 transformers==4.35.2
 urllib3==1.26.19

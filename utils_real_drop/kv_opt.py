@@ -10,8 +10,6 @@ from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_m
 from transformers.modeling_outputs import (
     BaseModelOutputWithPast,
     CausalLMOutputWithPast,
-    QuestionAnsweringModelOutput,
-    SequenceClassifierOutputWithPast,
 )
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import (
@@ -22,7 +20,13 @@ from transformers.utils import (
     replace_return_docstrings,
 )
 from transformers.models.opt.configuration_opt import OPTConfig
+from transformers.models.opt.modeling_opt import (
+    OPTLearnedPositionalEmbedding,
+    OPTPreTrainedModel,
+    OPTForCausalLM
+)
 
+from .kv_cache import A2SFKVCache
 
 logger = logging.get_logger(__name__)
 
@@ -47,172 +51,6 @@ OPT_PRETRAINED_MODEL_ARCHIVE_LIST = [
     "facebook/opt-30b",
     # See all OPT models at https://huggingface.co/models?filter=opt
 ]
-
-
-class OPTLearnedPositionalEmbedding(nn.Embedding):
-    """
-    This module learns positional embeddings up to a fixed maximum size.
-    """
-
-    def __init__(self, num_embeddings: int, embedding_dim: int):
-        # OPT is set up so that if padding_idx is specified then offset the embedding ids by 2
-        # and adjust num_embeddings appropriately. Other models don't have this hack
-        self.offset = 2
-        super().__init__(num_embeddings + self.offset, embedding_dim)
-
-    def forward(self, attention_mask: torch.LongTensor, past_key_values_length: int = 0):
-        """`input_ids_shape` is expected to be [bsz x seqlen]."""
-        attention_mask = attention_mask.long()
-
-        # create positions depending on attention_mask
-        positions = (torch.cumsum(attention_mask, dim=1).type_as(attention_mask) * attention_mask).long() - 1
-
-        # cut positions if `past_key_values_length` is > 0
-        positions = positions[:, past_key_values_length:]
-
-        return super().forward(positions + self.offset)
-
-
-class OPTKVCache():
-    def __init__(self, seq_dim: int = 2):
-        self.seq_dim = seq_dim
-        self.seq_length = 0
-        self.key_data = torch.empty((0,), dtype=torch.float32)
-        self.value_data = torch.empty((0,), dtype=torch.float32)
-        self.init_cache()
-
-    def init_cache(
-        self,
-        use_compression: bool = False,
-        select_budget: int = 64,
-        recent_budget: int = 64,
-        streaming_budget: int = 0,
-        random_budget: int = 0,
-        forgetting_factor: float = 1.0,
-        device=torch.device("cpu"),
-        dtype=torch.float32,
-        random_method: Optional[str] = None
-    ):
-        self.key_data = torch.empty((0,), device=device, dtype=dtype)
-        self.value_data = torch.empty((0,), device=device, dtype=dtype)
-        self.seq_length = 0
-
-        self.all_key_data = torch.zeros((1, 32, 4096, 128), device=device, dtype=dtype)
-        self.all_value_data = torch.zeros((1, 32, 4096, 128), device=device, dtype=dtype)
-
-        self.use_compression = use_compression
-        if use_compression:
-            self.score = None
-            self.select_budget = select_budget
-            self.recent_budget = recent_budget
-            self.streaming_budget = streaming_budget
-            self.all_budget = select_budget + recent_budget
-            self.forgetting_factor = forgetting_factor
-            self.random_budget = random_budget
-            self.token_indices = None
-            if random_method is not None:
-                self.random_method = random_method # "att" "random"
-    
-    def len(self):
-        return self.seq_length
-
-    def cat(self, key_tensor: torch.Tensor, value_tensor: torch.Tensor):
-        L = key_tensor.size(self.seq_dim)
-
-        # 1) First token case
-        if self.seq_length == 0:
-            self.key_data = key_tensor
-            self.value_data = value_tensor
-        # 2) Subsequent tokens
-        else:
-            self.key_data = torch.cat((self.key_data, key_tensor), dim=self.seq_dim)
-            self.value_data = torch.cat((self.value_data, value_tensor), dim=self.seq_dim)
-
-        # Update the full buffer
-        end = self.seq_length + L
-        self.all_key_data[:, :, self.seq_length:end].copy_(key_tensor, non_blocking=True)
-        self.all_value_data[:, :, self.seq_length:end].copy_(value_tensor, non_blocking=True)
-        self.seq_length += L
-        
-        return self.key_data, self.value_data
-
-    def update(self, attn_scores):
-        if not (self.use_compression and self.seq_length > self.all_budget):
-            return
-        
-        seq_len = attn_scores.size(2)
-        device, dtype = attn_scores.device, attn_scores.dtype
-        
-        # Update scores and extract tokens
-        exponents = torch.arange(seq_len, 0, -1, device=device, dtype=attn_scores.dtype) - 1
-        forgetting = (self.forgetting_factor ** exponents).view(1, 1, seq_len, 1)
-        
-        current_score = (forgetting*attn_scores).sum(dim=self.seq_dim)
-        
-        if self.score is not None:
-            current_score[:,:,:-1] += self.forgetting_factor * self.score
-        self.score = current_score
-        
-        selected_indices = self.score[:,:,self.streaming_budget:-self.recent_budget].topk(self.select_budget, dim=-1).indices.sort().values + self.streaming_budget
-        
-        flag = self.token_indices.gather(dim=2, index=selected_indices) if self.token_indices is not None else selected_indices
-
-        # Extract random tokens to revive
-        if self.random_budget != 0:
-            if self.random_method == "att":
-                if self.token_indices is None:
-                    self.all_score = attn_scores.sum(dim=self.seq_dim)
-                    self.all_round = torch.ones_like(self.all_score, device=device, dtype=dtype)
-                else:
-                    new_indices = torch.full((*self.token_indices.shape[:-1], 1), self.seq_length - 1, device=device, dtype=torch.int64)
-                    tmp_token_indices = torch.cat((self.token_indices, new_indices), dim=2)
-                    tmp_all_score = torch.zeros((*self.all_score.shape[:-1], self.seq_length), device=device, dtype=dtype)
-                    tmp_all_score = tmp_all_score.scatter(dim=2, index=tmp_token_indices, src=attn_scores.squeeze(2))
-                    tmp_all_round = (tmp_all_score > 0).to(dtype=dtype)
-                    tmp_all_score[:, :, :-1] += self.all_score
-                    tmp_all_round[:, :, :-1] += self.all_round
-                    self.all_score = tmp_all_score
-                    self.all_round = tmp_all_round                
-                tmp_score = (self.all_score/self.all_round)[:,:,:-self.recent_budget]
-            else:
-                tmp_score = torch.ones((1, 32, self.seq_length-self.recent_budget), device=device, dtype=dtype)
-
-            tmp_score.scatter_(2, flag, 0)
-            tmp_score /= tmp_score.sum(dim=2, keepdim=True)
-            random_missing = torch.multinomial(tmp_score.squeeze(dim=0), num_samples=self.random_budget, replacement=False).view(*tmp_score.shape[:-1], -1)
-        else:
-            random_missing = torch.empty((1,32,0), device=device, dtype=torch.int64)
-
-        self.token_indices = torch.cat((
-            torch.arange(0, self.streaming_budget, device=device, dtype=selected_indices.dtype).view(1,1,self.streaming_budget).expand(1,32,self.streaming_budget),
-            random_missing,
-            selected_indices if self.token_indices is None else flag,
-            torch.arange(self.seq_length-self.recent_budget, self.seq_length, device=device, dtype=selected_indices.dtype).view(1,1,self.recent_budget).expand(1,32,self.recent_budget)
-        ), dim=2)
-        
-        self.score = torch.cat((
-            self.score[:,:,:self.streaming_budget],
-            torch.zeros((1, 32, self.random_budget), device=device, dtype=dtype),
-            self.score.gather(self.seq_dim, selected_indices),
-            self.score[:,:,-self.recent_budget:]
-        ), dim=-1)
-        
-        random_missing = random_missing.unsqueeze(-1).expand(-1,-1,-1,self.key_data.size(-1))
-        selected_indices = selected_indices.unsqueeze(-1).expand(-1,-1,-1,self.key_data.size(-1))
-        
-        self.key_data = torch.cat((
-            self.key_data[:,:,:self.streaming_budget],
-            self.all_key_data.gather(self.seq_dim, random_missing),
-            self.key_data.gather(self.seq_dim, selected_indices),
-            self.key_data[:,:,-self.recent_budget:]
-        ), dim=self.seq_dim)
-        
-        self.value_data = torch.cat((
-            self.value_data[:,:,:self.streaming_budget],
-            self.all_value_data.gather(self.seq_dim, random_missing),
-            self.value_data.gather(self.seq_dim, selected_indices),
-            self.value_data[:,:,-self.recent_budget:]
-        ), dim=self.seq_dim)
 
 
 class OPTAttention(nn.Module):
@@ -245,29 +83,7 @@ class OPTAttention(nn.Module):
         self.q_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
         
-        self.past_key_value = OPTKVCache()
-
-    def init_cache(
-        self,
-        use_compression: bool = False,
-        select_budget: int = 64,
-        recent_budget: int = 64,
-        streaming_budget: int = 0,
-        random_budget: int = 0,
-        forgetting_factor: float = 1.0,
-        random_method: Optional[str] = None
-    ):
-        self.past_key_value.init_cache(
-            use_compression,
-            select_budget,
-            recent_budget,
-            streaming_budget,
-            random_budget,
-            forgetting_factor,
-            self.k_proj.weight.device,
-            self.k_proj.weight.dtype,
-            random_method
-        )
+        self.past_key_value = A2SFKVCache(self.num_heads)
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
@@ -358,26 +174,6 @@ class OPTDecoderLayer(nn.Module):
         self.fc2 = nn.Linear(config.ffn_dim, self.embed_dim, bias=config.enable_bias)
         self.final_layer_norm = nn.LayerNorm(self.embed_dim, elementwise_affine=config.layer_norm_elementwise_affine)
 
-    def init_cache(
-        self,
-        use_compression: bool = False,
-        select_budget: int = 64,
-        recent_budget: int = 64,
-        streaming_budget: int = 0,
-        random_budget: int = 0,
-        forgetting_factor: float = 1.0,
-        random_method: Optional[str] = None
-    ):
-        self.self_attn.init_cache(
-            use_compression,
-            select_budget,
-            recent_budget,
-            streaming_budget,
-            random_budget,
-            forgetting_factor,
-            random_method
-        )
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -441,32 +237,7 @@ class OPTDecoderLayer(nn.Module):
         return outputs
 
 
-class OPTPreTrainedModel(PreTrainedModel):
-    config_class = OPTConfig
-    base_model_prefix = "model"
-    supports_gradient_checkpointing = True
-    _no_split_modules = ["OPTDecoderLayer"]
-
-    def _init_weights(self, module):
-        std = self.config.init_std
-        if isinstance(module, nn.Linear):
-            module.weight.data.normal_(mean=0.0, std=std)
-            if module.bias is not None:
-                module.bias.data.zero_()
-        elif isinstance(module, nn.Embedding):
-            module.weight.data.normal_(mean=0.0, std=std)
-            if module.padding_idx is not None:
-                module.weight.data[module.padding_idx].zero_()
-
-
 class OPTDecoder(OPTPreTrainedModel):
-    """
-    Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`OPTDecoderLayer`]
-
-    Args:
-        config: OPTConfig
-    """
-
     def __init__(self, config: OPTConfig):
         super().__init__(config)
         self.dropout = config.dropout
@@ -504,18 +275,37 @@ class OPTDecoder(OPTPreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
-    def init_cache(
-        self,
-        use_compression: bool = False,
-        select_budget: int = 64,
-        recent_budget: int = 64,
-        streaming_budget: int = 0,
-        random_budget: int = 0,
-        forgetting_factor: float = 1.0,
-        random_method: Optional[str] = None
-    ):
+    def init_cache(self, compression_config):
+        self.input_ids = False
+        self.compression_method = compression_config.compression_method
+        for idx, layer in enumerate(self.layers):
+            layer.self_attn.past_key_value.init_cache(compression_config, layer_idx=idx)
+        
+    def set_forget(self, input_ids):
+        exponents = None
+        forget = False
+        
+        if self.compression_method == "a2sf":
+            if not self.input_ids:
+                self.input_ids = True
+                orig_shape = input_ids.shape
+                flattened_input_ids = input_ids.reshape(-1)
+                num_all = flattened_input_ids.size(0)
+
+                pos = torch.isin(flattened_input_ids, torch.tensor([4, 479], device=input_ids.device)).nonzero(as_tuple=True)[0].tolist()
+                num_t = len(pos)
+
+                starts = [0] + [p + 1 for p in pos]
+                ends   = pos + [num_all - 1]
+
+                exponents = torch.empty_like(flattened_input_ids)
+                for i, (s, e) in enumerate(zip(starts, ends)): exponents[s : e + 1] = num_t - i
+                exponents = exponents.view(orig_shape[0], 1, orig_shape[1])
+            else:
+                forget = torch.logical_or(input_ids == 4, input_ids == 479)
+
         for layer in self.layers:
-            layer.init_cache(use_compression, select_budget, recent_budget, streaming_budget, random_budget, forgetting_factor, random_method)
+            layer.self_attn.past_key_value.set_forget(forget, exponents)
 
     def get_input_embeddings(self):
         return self.embed_tokens
@@ -556,6 +346,8 @@ class OPTDecoder(OPTPreTrainedModel):
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
+
+        self.set_forget(input_ids)
 
         batch_size, seq_length = input_shape
         past_key_values_length = past_key_values[0].len() if past_key_values is not None else 0
@@ -668,17 +460,8 @@ class OPTModel(OPTPreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
-    def init_cache(
-        self,
-        use_compression: bool = False,
-        select_budget: int = 64,
-        recent_budget: int = 64,
-        streaming_budget: int = 0,
-        random_budget: int = 0,
-        forgetting_factor: float = 1.0,
-        random_method: Optional[str] = None
-    ):
-        self.decoder.init_cache(use_compression, select_budget, recent_budget, streaming_budget, random_budget, forgetting_factor, random_method)
+    def init_cache(self, compression_config):
+        self.decoder.init_cache(compression_config)
 
     def get_input_embeddings(self):
         return self.decoder.embed_tokens
@@ -738,9 +521,7 @@ class OPTModel(OPTPreTrainedModel):
         )
 
 
-class KVOPTForCausalLM(OPTPreTrainedModel):
-    _tied_weights_keys = ["lm_head.weight"]
-
+class KVOPTForCausalLM(OPTForCausalLM):
     def __init__(self, config):
         super().__init__(config)
         self.model = OPTModel(config)
@@ -751,175 +532,8 @@ class KVOPTForCausalLM(OPTPreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
-    def init_cache(
-        self,
-        use_compression: bool = False,
-        select_budget: int = 64,
-        recent_budget: int = 64,
-        streaming_budget: int = 0,
-        random_budget: int = 0,
-        forgetting_factor: float = 1.0,
-        random_method: Optional[str] = None
-    ):
-        self.model.init_cache(
-            use_compression,
-            select_budget,
-            recent_budget,
-            streaming_budget,
-            random_budget,
-            forgetting_factor,
-            random_method
-        )
-
-    def get_input_embeddings(self):
-        return self.model.decoder.embed_tokens
-
-    def set_input_embeddings(self, value):
-        self.model.decoder.embed_tokens = value
-
-    def get_output_embeddings(self):
-        return self.lm_head
-
-    def set_output_embeddings(self, new_embeddings):
-        self.lm_head = new_embeddings
-
-    def set_decoder(self, decoder):
-        self.model.decoder = decoder
-
-    def get_decoder(self):
-        return self.model.decoder
-
-    @replace_return_docstrings(output_type=CausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC)
-    def forward(
-        self,
-        input_ids: torch.LongTensor = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        head_mask: Optional[torch.Tensor] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        labels: Optional[torch.LongTensor] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-    ) -> Union[Tuple, CausalLMOutputWithPast]:
-        r"""
-        Args:
-            input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
-                Indices of input sequence tokens in the vocabulary. Padding will be ignored by default should you
-                provide it.
-
-                Indices can be obtained using [`AutoTokenizer`]. See [`PreTrainedTokenizer.encode`] and
-                [`PreTrainedTokenizer.__call__`] for details.
-
-                [What are input IDs?](../glossary#input-ids)
-            attention_mask (`torch.Tensor` of shape `(batch_size, sequence_length)`, *optional*):
-                Mask to avoid performing attention on padding token indices. Mask values selected in `[0, 1]`:
-
-                - 1 for tokens that are **not masked**,
-                - 0 for tokens that are **masked**.
-
-                [What are attention masks?](../glossary#attention-mask)
-            head_mask (`torch.Tensor` of shape `(num_hidden_layers, num_attention_heads)`, *optional*):
-                Mask to nullify selected heads of the attention modules. Mask values selected in `[0, 1]`:
-
-                - 1 indicates the head is **not masked**,
-                - 0 indicates the head is **masked**.
-
-            past_key_values (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `use_cache=True` is passed or when `config.use_cache=True`):
-                Tuple of `tuple(torch.FloatTensor)` of length `config.n_layers`, with each tuple having 2 tensors of
-                shape `(batch_size, num_heads, sequence_length, embed_size_per_head)`) and 2 additional tensors of
-                shape `(batch_size, num_heads, encoder_sequence_length, embed_size_per_head)`. The two additional
-                tensors are only required when the model is used as a decoder in a Sequence to Sequence model.
-
-                Contains pre-computed hidden-states (key and values in the self-attention blocks and in the
-                cross-attention blocks) that can be used (see `past_key_values` input) to speed up sequential decoding.
-
-                If `past_key_values` are used, the user can optionally input only the last `decoder_input_ids` (those
-                that don't have their past key value states given to this model) of shape `(batch_size, 1)` instead of
-                all `decoder_input_ids` of shape `(batch_size, sequence_length)`.
-            inputs_embeds (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`, *optional*):
-                Optionally, instead of passing `input_ids` you can choose to directly pass an embedded representation.
-                This is useful if you want more control over how to convert `input_ids` indices into associated vectors
-                than the model's internal embedding lookup matrix.
-            labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
-                Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,
-                config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored
-                (masked), the loss is only computed for the tokens with labels in `[0, ..., config.vocab_size]`.
-            use_cache (`bool`, *optional*):
-                If set to `True`, `past_key_values` key value states are returned and can be used to speed up decoding
-                (see `past_key_values`).
-            output_attentions (`bool`, *optional*):
-                Whether or not to return the attentions tensors of all attention layers. See `attentions` under
-                returned tensors for more detail.
-            output_hidden_states (`bool`, *optional*):
-                Whether or not to return the hidden states of all layers. See `hidden_states` under returned tensors
-                for more detail.
-            return_dict (`bool`, *optional*):
-                Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
-
-        Returns:
-
-        Example:
-
-        ```python
-        >>> from transformers import AutoTokenizer, OPTForCausalLM
-
-        >>> model = OPTForCausalLM.from_pretrained("facebook/opt-350m")
-        >>> tokenizer = AutoTokenizer.from_pretrained("facebook/opt-350m")
-
-        >>> prompt = "Hey, are you conscious? Can you talk to me?"
-        >>> inputs = tokenizer(prompt, return_tensors="pt")
-
-        >>> # Generate
-        >>> generate_ids = model.generate(inputs.input_ids, max_length=30)
-        >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
-        "Hey, are you conscious? Can you talk to me?\nI'm not conscious. I'm just a little bit of a weirdo."
-        ```"""
-
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
-        # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
-        outputs = self.model.decoder(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            head_mask=head_mask,
-            past_key_values=past_key_values,
-            inputs_embeds=inputs_embeds,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-        )
-
-        logits = self.lm_head(outputs[0]).contiguous()
-
-        loss = None
-        if labels is not None:
-            # move labels to correct device to enable model parallelism
-            labels = labels.to(logits.device)
-            # Shift so that tokens < n predict n
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            # Flatten the tokens
-            loss_fct = CrossEntropyLoss()
-            loss = loss_fct(shift_logits.view(-1, self.config.vocab_size), shift_labels.view(-1))
-
-        if not return_dict:
-            output = (logits,) + outputs[1:]
-            return (loss,) + output if loss is not None else output
-
-        return CausalLMOutputWithPast(
-            loss=loss,
-            logits=logits,
-            past_key_values=outputs.past_key_values,
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
-        )
+    def init_cache(self, compression_config):
+        self.model.init_cache(compression_config)
 
     def prepare_inputs_for_generation(
         self, input_ids, past_key_values=None, attention_mask=None, inputs_embeds=None, **kwargs
@@ -950,12 +564,3 @@ class KVOPTForCausalLM(OPTPreTrainedModel):
             }
         )
         return model_inputs
-
-    @staticmethod
-    def _reorder_cache(past_key_values, beam_idx):
-        reordered_past = ()
-        for layer_past in past_key_values:
-            reordered_past += (
-                tuple(past_state.index_select(0, beam_idx.to(past_state.device)) for past_state in layer_past),
-            )
-        return reordered_past

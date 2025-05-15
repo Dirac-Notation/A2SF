@@ -3,6 +3,8 @@
 *.txt
 !pip.txt
 *.jsonl
+*.json
+*.sh
 
 # Custom Directories
 
