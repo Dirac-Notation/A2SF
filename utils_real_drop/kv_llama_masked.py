@@ -185,55 +185,17 @@ class LlamaKVCache():
         if not (self.use_compression and self.seq_length > self.total_budget and self.prompt):
             self.prompt = True
             return attn_scores
-            
-        # 옵티멀
-        selected_indices = attn_scores.sort(dim=3).indices[:,:,:,:-self.total_budget]
-        new_scores = attn_scores.clone()
-        new_scores.scatter_(3, selected_indices, 0)
-        new_scores /= new_scores.sum(dim=3, keepdim=True)
         
         # 특정 퍼센트 부분 마스크 하는 것
-        # num_mask = self.seq_length//100
-        # new_scores = attn_scores.clone()
-        # if self.total_budget == 0:
-        #     new_scores[:,:,:,-num_mask:] = 0
-        # else:
-        #     new_scores[:,:,:,-num_mask*(self.total_budget+5):-num_mask*self.total_budget] = 0
-        # new_scores /= new_scores.sum(dim=3, keepdim=True)
-        
-        return new_scores
-
-    def update_with_sim(self, attn_scores, value_states, bsz, q_len, hidden_size, o_proj):
-        """Update cache based on attention scores"""
-        
-        original_outputs = torch.matmul(attn_scores, value_states)
-        original_outputs = original_outputs.transpose(1, 2).contiguous()
-        original_outputs = original_outputs.reshape(bsz, q_len, hidden_size)
-        original_outputs_out = o_proj(original_outputs)
-        
-        if not (self.use_compression and self.seq_length > self.total_budget and self.prompt):
-            self.prompt = True
-            return original_outputs_out
-            
-        # 옵티멀
-        # sorted_indices = attn_scores.sort(dim=3).indices
-        # selected_indices = torch.randperm(sorted_indices.size(3)-10)[self.total_budget-10:]
-        # selected_indices = sorted_indices[...,selected_indices]
-        selected_indices = attn_scores.sort(dim=3).indices[:,:,:,:-self.total_budget]
+        num_mask = self.seq_length//10
         new_scores = attn_scores.clone()
-        new_scores.scatter_(3, selected_indices, 0)
+        start = self.total_budget * num_mask
+        end = start + num_mask
+        new_scores[:,:,:,start:end] = 0
+
         new_scores /= new_scores.sum(dim=3, keepdim=True)
         
-        new_outputs = torch.matmul(new_scores, value_states)
-        
-        new_outputs = new_outputs.transpose(1, 2).contiguous()
-        new_outputs = new_outputs.reshape(bsz, q_len, hidden_size)
-        new_outputs_out = o_proj(new_outputs)
-        
-        self.sim_scores = F.cosine_similarity(original_outputs, new_outputs, dim=2).mean().item()
-        # self.sim_scores = 1 - torch.norm(original_outputs - new_outputs, dim=2).mean().item()
-        
-        return new_outputs_out
+        return new_scores
 
 
 class LlamaAttention(nn.Module):
@@ -315,21 +277,20 @@ class LlamaAttention(nn.Module):
 
         # upcast attention to fp32
         attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-        # attn_weights = self.past_key_value.update(attn_weights)
-        # attn_output = torch.matmul(attn_weights, value_states)
+        attn_weights = self.past_key_value.update(attn_weights)
+        
+        attn_output = torch.matmul(attn_weights, value_states)
 
-        # attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.transpose(1, 2).contiguous()
 
-        # attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
+        attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
-        # if self.config.pretraining_tp > 1:
-        #     attn_output = attn_output.split(self.hidden_size // self.config.pretraining_tp, dim=2)
-        #     o_proj_slices = self.o_proj.weight.split(self.hidden_size // self.config.pretraining_tp, dim=1)
-        #     attn_output = sum([F.linear(attn_output[i], o_proj_slices[i]) for i in range(self.config.pretraining_tp)])
-        # else:
-        #     attn_output = self.o_proj(attn_output)
-
-        attn_output = self.past_key_value.update_with_sim(attn_weights, value_states, bsz, q_len, self.hidden_size, self.o_proj)
+        if self.config.pretraining_tp > 1:
+            attn_output = attn_output.split(self.hidden_size // self.config.pretraining_tp, dim=2)
+            o_proj_slices = self.o_proj.weight.split(self.hidden_size // self.config.pretraining_tp, dim=1)
+            attn_output = sum([F.linear(attn_output[i], o_proj_slices[i]) for i in range(self.config.pretraining_tp)])
+        else:
+            attn_output = self.o_proj(attn_output)
 
         if not output_attentions:
             attn_weights = None
@@ -557,7 +518,7 @@ class LlamaModel(LlamaPreTrainedModel):
         )
 
 
-class OptimalLlamaForCausalLM(LlamaPreTrainedModel):
+class MaskedLlamaForCausalLM(LlamaPreTrainedModel):
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self, config):

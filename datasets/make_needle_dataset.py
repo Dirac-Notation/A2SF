@@ -9,17 +9,18 @@ from datasets import load_dataset
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_name", type=str, default="meta-llama/Llama-2-7b-hf", help="Name of the model to use (e.g., 'meta-llama/Llama-2-7b-hf')")
+    parser.add_argument("--model", type=str, default="meta-llama/Llama-2-7b-hf", help="Name of the model to use (e.g., 'meta-llama/Llama-2-7b-hf')")
     args = parser.parse_args()
 
     # Create output directory if needed
     os.makedirs("datasets", exist_ok=True)
     
     # Load tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
     
     # Define user prompt
-    user_prompt = "Identify the password hidden in the text above."
+    system_prompt = "[INST]You are a helpful assistant that can identify the password in the text.\n\n<text>\n"
+    user_prompt = "\n</text>\n\nIdentify the password in the text. Format your response as follows: \"The password is (insert answer here)\".[/INST]"
 
     # Collect sentences by token length
     print("Loading dataset and collecting sentences...")
@@ -41,12 +42,11 @@ def main():
     all_sentences = [s for lst in sentences_by_length.values() for s in lst]
 
     # Define total token lengths and needle positions
-    target_lengths = list(range(200, 3801, 200))
-    positions = [i / 100 for i in range(5, 101, 5)]
+    target_lengths = list(range(400, 3601, 400))
+    positions = [i / 100 for i in range(0, 100, 10)]
 
     # Prepare output file
-    model_file_name = args.model_name.split('/')[-1]
-    output_file = f"datasets/needle_dataset_{model_file_name}.jsonl"
+    output_file = f"datasets/needle_dataset.jsonl"
 
     all_samples = []
     for total_tokens in tqdm(target_lengths, desc="Generating samples"):
@@ -55,14 +55,13 @@ def main():
         for position in positions:
             num_before = int(total_sentences * position)
             num_after = total_sentences - num_before
-            for _ in range(5):  # 5 samples per position
-                # Generate a new random 5-digit number for each sample
+            for _ in range(5):
                 random_password = str(random.randint(10000, 99999))
-                needle = f"Password is {random_password} ."
+                needle = f"The password is {random_password}."
                 before = random.sample(all_sentences, num_before) if num_before > 0 else []
                 after = random.sample(all_sentences, num_after) if num_after > 0 else []
                 context = " ".join(before + [needle] + after)
-                prompt = f"{context}\n{user_prompt}"
+                prompt = f"{system_prompt}{context}{user_prompt}"
                 sample = {
                     "prompt": prompt,
                     "answer": random_password,
@@ -79,7 +78,7 @@ def main():
     print(f"Saved {len(all_samples)} samples to {output_file}")
 
     # Analyze token lengths and save to file
-    analysis_file = f"datasets/token_length_analysis_{model_file_name}.txt"
+    analysis_file = f"datasets/token_length_analysis.txt"
     with open(analysis_file, "w", encoding="utf-8") as f:
         f.write("Sample Index | Target Tokens | Actual Tokens | Difference\n")
         f.write("-" * 60 + "\n")
