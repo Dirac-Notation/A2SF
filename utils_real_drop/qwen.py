@@ -1,3 +1,324 @@
+import json
+import os
+import unicodedata
+from functools import lru_cache
+from typing import Optional, Tuple
+
+import regex as re
+
+from transformers.tokenization_utils import AddedToken, PreTrainedTokenizer
+from transformers.utils import logging
+
+
+logger = logging.get_logger(__name__)
+
+VOCAB_FILES_NAMES = {
+    "vocab_file": "vocab.json",
+    "merges_file": "merges.txt",
+}
+
+
+MAX_MODEL_INPUT_SIZES = {"qwen/qwen-tokenizer": 32768}
+
+PRETOKENIZE_REGEX = r"""(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"""
+
+
+@lru_cache()
+# Copied from transformers.models.gpt2.tokenization_gpt2.bytes_to_unicode
+def bytes_to_unicode():
+    bs = (
+        list(range(ord("!"), ord("~") + 1)) + list(range(ord("¡"), ord("¬") + 1)) + list(range(ord("®"), ord("ÿ") + 1))
+    )
+    cs = bs[:]
+    n = 0
+    for b in range(2**8):
+        if b not in bs:
+            bs.append(b)
+            cs.append(2**8 + n)
+            n += 1
+    cs = [chr(n) for n in cs]
+    return dict(zip(bs, cs))
+
+
+# Copied from transformers.models.gpt2.tokenization_gpt2.get_pairs
+def get_pairs(word):
+    pairs = set()
+    prev_char = word[0]
+    for char in word[1:]:
+        pairs.add((prev_char, char))
+        prev_char = char
+    return pairs
+
+
+class Qwen2Tokenizer(PreTrainedTokenizer):
+    vocab_files_names = VOCAB_FILES_NAMES
+    model_input_names = ["input_ids", "attention_mask"]
+
+    def __init__(
+        self,
+        vocab_file,
+        merges_file,
+        errors="replace",
+        unk_token="<|endoftext|>",
+        bos_token=None,
+        eos_token="<|endoftext|>",
+        pad_token="<|endoftext|>",
+        clean_up_tokenization_spaces=False,
+        split_special_tokens=False,
+        **kwargs,
+    ):
+        # Qwen vocab does not contain control tokens; added tokens need to be special
+        bos_token = (
+            AddedToken(bos_token, lstrip=False, rstrip=False, special=True, normalized=False)
+            if isinstance(bos_token, str)
+            else bos_token
+        )
+        eos_token = (
+            AddedToken(eos_token, lstrip=False, rstrip=False, special=True, normalized=False)
+            if isinstance(eos_token, str)
+            else eos_token
+        )
+        unk_token = (
+            AddedToken(unk_token, lstrip=False, rstrip=False, special=True, normalized=False)
+            if isinstance(unk_token, str)
+            else unk_token
+        )
+        pad_token = (
+            AddedToken(pad_token, lstrip=False, rstrip=False, special=True, normalized=False)
+            if isinstance(pad_token, str)
+            else pad_token
+        )
+
+        with open(vocab_file, encoding="utf-8") as vocab_handle:
+            self.encoder = json.load(vocab_handle)
+        self.decoder = {v: k for k, v in self.encoder.items()}
+        self.errors = errors  # how to handle errors in decoding
+        self.byte_encoder = bytes_to_unicode()
+        self.byte_decoder = {v: k for k, v in self.byte_encoder.items()}
+        bpe_merges = []
+        with open(merges_file, encoding="utf-8") as merges_handle:
+            for i, line in enumerate(merges_handle):
+                line = line.strip()
+                if (i == 0 and line.startswith("#version:")) or not line:
+                    continue
+                bpe_merges.append(tuple(line.split()))
+        self.bpe_ranks = dict(zip(bpe_merges, range(len(bpe_merges))))
+        # NOTE: the cache can grow without bound and will get really large for long running processes
+        # (esp. for texts of language that do not use space between word, e.g. Chinese); technically
+        # not a memory leak but appears as one.
+        # GPT2Tokenizer has the same problem, so let's be consistent.
+        self.cache = {}
+
+        self.pat = re.compile(PRETOKENIZE_REGEX)
+
+        if kwargs.get("add_prefix_space", False):
+            logger.warning_once(
+                f"{self.__class__.__name} does not support `add_prefix_space`, setting it to True has no effect."
+            )
+
+        super().__init__(
+            errors=errors,
+            bos_token=bos_token,
+            eos_token=eos_token,
+            pad_token=pad_token,
+            unk_token=unk_token,
+            clean_up_tokenization_spaces=clean_up_tokenization_spaces,
+            split_special_tokens=split_special_tokens,
+            **kwargs,
+        )
+
+    @property
+    def vocab_size(self) -> int:
+        return len(self.encoder)
+
+    # Copied from transformers.models.gpt2.tokenization_gpt2.GPT2Tokenizer.get_vocab
+    def get_vocab(self):
+        return dict(self.encoder, **self.added_tokens_encoder)
+
+    # Copied from transformers.models.gpt2.tokenization_gpt2.GPT2Tokenizer.bpe
+    def bpe(self, token):
+        if token in self.cache:
+            return self.cache[token]
+        word = tuple(token)
+        pairs = get_pairs(word)
+
+        if not pairs:
+            return token
+
+        while True:
+            bigram = min(pairs, key=lambda pair: self.bpe_ranks.get(pair, float("inf")))
+            if bigram not in self.bpe_ranks:
+                break
+            first, second = bigram
+            new_word = []
+            i = 0
+            while i < len(word):
+                try:
+                    j = word.index(first, i)
+                except ValueError:
+                    new_word.extend(word[i:])
+                    break
+                else:
+                    new_word.extend(word[i:j])
+                    i = j
+
+                if word[i] == first and i < len(word) - 1 and word[i + 1] == second:
+                    new_word.append(first + second)
+                    i += 2
+                else:
+                    new_word.append(word[i])
+                    i += 1
+            new_word = tuple(new_word)
+            word = new_word
+            if len(word) == 1:
+                break
+            else:
+                pairs = get_pairs(word)
+        word = " ".join(word)
+        self.cache[token] = word
+        return word
+
+    # Copied from transformers.models.gpt2.tokenization_gpt2.GPT2Tokenizer._tokenize
+    def _tokenize(self, text):
+        """Tokenize a string."""
+        bpe_tokens = []
+        for token in re.findall(self.pat, text):
+            token = "".join(
+                self.byte_encoder[b] for b in token.encode("utf-8")
+            )  # Maps all our bytes to unicode strings, avoiding control tokens of the BPE (spaces in our case)
+            bpe_tokens.extend(bpe_token for bpe_token in self.bpe(token).split(" "))
+        return bpe_tokens
+
+    # Copied from transformers.models.gpt2.tokenization_gpt2.GPT2Tokenizer._convert_token_to_id
+    def _convert_token_to_id(self, token):
+        """Converts a token (str) in an id using the vocab."""
+        return self.encoder.get(token, self.encoder.get(self.unk_token))
+
+    # Copied from transformers.models.gpt2.tokenization_gpt2.GPT2Tokenizer._convert_id_to_token
+    def _convert_id_to_token(self, index):
+        """Converts an index (integer) in a token (str) using the vocab."""
+        return self.decoder.get(index)
+
+    # Copied from transformers.models.gpt2.tokenization_gpt2.GPT2Tokenizer.convert_tokens_to_string
+    def convert_tokens_to_string(self, tokens):
+        """Converts a sequence of tokens (string) in a single string."""
+        text = "".join(tokens)
+        text = bytearray([self.byte_decoder[c] for c in text]).decode("utf-8", errors=self.errors)
+        return text
+
+    def decode(
+        self,
+        token_ids,
+        skip_special_tokens: bool = False,
+        clean_up_tokenization_spaces: Optional[bool] = False,
+        spaces_between_special_tokens: bool = False,
+        **kwargs,
+    ) -> str:
+        # `spaces_between_special_tokens` defaults to True for _decode in slow tokenizers
+        # and cannot be configured elsewhere, but it should default to False for Qwen2Tokenizer
+        return super().decode(
+            token_ids,
+            skip_special_tokens=skip_special_tokens,
+            clean_up_tokenization_spaces=clean_up_tokenization_spaces,
+            spaces_between_special_tokens=spaces_between_special_tokens,
+            **kwargs,
+        )
+
+    # Copied from transformers.models.gpt2.tokenization_gpt2.GPT2Tokenizer.save_vocabulary
+    def save_vocabulary(self, save_directory: str, filename_prefix: Optional[str] = None) -> Tuple[str]:
+        if not os.path.isdir(save_directory):
+            logger.error(f"Vocabulary path ({save_directory}) should be a directory")
+            return
+        vocab_file = os.path.join(
+            save_directory, (filename_prefix + "-" if filename_prefix else "") + VOCAB_FILES_NAMES["vocab_file"]
+        )
+        merge_file = os.path.join(
+            save_directory, (filename_prefix + "-" if filename_prefix else "") + VOCAB_FILES_NAMES["merges_file"]
+        )
+
+        with open(vocab_file, "w", encoding="utf-8") as f:
+            f.write(json.dumps(self.encoder, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
+
+        index = 0
+        with open(merge_file, "w", encoding="utf-8") as writer:
+            writer.write("#version: 0.2\n")
+            for bpe_tokens, token_index in sorted(self.bpe_ranks.items(), key=lambda kv: kv[1]):
+                if index != token_index:
+                    logger.warning(
+                        f"Saving vocabulary to {merge_file}: BPE merge indices are not consecutive."
+                        " Please check that the tokenizer is not corrupted!"
+                    )
+                    index = token_index
+                writer.write(" ".join(bpe_tokens) + "\n")
+                index += 1
+
+        return vocab_file, merge_file
+
+    def prepare_for_tokenization(self, text, **kwargs):
+        text = unicodedata.normalize("NFC", text)
+        return (text, kwargs)
+
+
+from transformers.configuration_utils import PretrainedConfig
+from transformers.utils import logging
+
+
+logger = logging.get_logger(__name__)
+
+
+class Qwen2Config(PretrainedConfig):
+    model_type = "qwen2"
+    keys_to_ignore_at_inference = ["past_key_values"]
+
+    def __init__(
+        self,
+        vocab_size=151936,
+        hidden_size=4096,
+        intermediate_size=22016,
+        num_hidden_layers=32,
+        num_attention_heads=32,
+        num_key_value_heads=32,
+        hidden_act="silu",
+        max_position_embeddings=32768,
+        initializer_range=0.02,
+        rms_norm_eps=1e-6,
+        use_cache=True,
+        tie_word_embeddings=False,
+        rope_theta=10000.0,
+        use_sliding_window=False,
+        sliding_window=4096,
+        max_window_layers=28,
+        attention_dropout=0.0,
+        **kwargs,
+    ):
+        self.vocab_size = vocab_size
+        self.max_position_embeddings = max_position_embeddings
+        self.hidden_size = hidden_size
+        self.intermediate_size = intermediate_size
+        self.num_hidden_layers = num_hidden_layers
+        self.num_attention_heads = num_attention_heads
+        self.use_sliding_window = use_sliding_window
+        self.sliding_window = sliding_window if use_sliding_window else None
+        self.max_window_layers = max_window_layers
+
+        # for backward compatibility
+        if num_key_value_heads is None:
+            num_key_value_heads = num_attention_heads
+
+        self.num_key_value_heads = num_key_value_heads
+        self.hidden_act = hidden_act
+        self.initializer_range = initializer_range
+        self.rms_norm_eps = rms_norm_eps
+        self.use_cache = use_cache
+        self.rope_theta = rope_theta
+        self.attention_dropout = attention_dropout
+
+        super().__init__(
+            tie_word_embeddings=tie_word_embeddings,
+            **kwargs,
+        )
+
+
 import math
 import warnings
 from typing import List, Optional, Tuple, Union
@@ -12,33 +333,22 @@ from transformers.activations import ACT2FN
 from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
-from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
 from transformers.utils import (
-    add_start_docstrings,
-    add_start_docstrings_to_model_forward,
     logging,
     replace_return_docstrings,
 )
 from transformers.utils.import_utils import is_torch_fx_available
-from transformers.models.llama.configuration_llama import LlamaConfig
 
-
-# This makes `_prepare_4d_causal_attention_mask` a leaf function in the FX graph.
-# It means that the function will not be traced through and simply appear as a node in the graph.
 if is_torch_fx_available():
     _prepare_4d_causal_attention_mask = torch.fx.wrap(_prepare_4d_causal_attention_mask)
 
 
 logger = logging.get_logger(__name__)
 
-_CONFIG_FOR_DOC = "LlamaConfig"
+_CONFIG_FOR_DOC = "Qwen2Config"
 
-
-class LlamaRMSNorm(nn.Module):
+class Qwen2RMSNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-6):
-        """
-        LlamaRMSNorm is equivalent to T5LayerNorm
-        """
         super().__init__()
         self.weight = nn.Parameter(torch.ones(hidden_size))
         self.variance_epsilon = eps
@@ -51,10 +361,7 @@ class LlamaRMSNorm(nn.Module):
         return self.weight * hidden_states.to(input_dtype)
 
 
-ALL_LAYERNORM_LAYERS.append(LlamaRMSNorm)
-
-
-class LlamaRotaryEmbedding(nn.Module):
+class Qwen2RotaryEmbedding(nn.Module):
     def __init__(self, dim, max_position_embeddings=2048, base=10000, device=None):
         super().__init__()
 
@@ -98,26 +405,6 @@ def rotate_half(x):
 
 
 def apply_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim=1):
-    """Applies Rotary Position Embedding to the query and key tensors.
-
-    Args:
-        q (`torch.Tensor`): The query tensor.
-        k (`torch.Tensor`): The key tensor.
-        cos (`torch.Tensor`): The cosine part of the rotary embedding.
-        sin (`torch.Tensor`): The sine part of the rotary embedding.
-        position_ids (`torch.Tensor`):
-            The position indices of the tokens corresponding to the query and key tensors. For example, this can be
-            used to pass offsetted position ids when working with a KV-cache.
-        unsqueeze_dim (`int`, *optional*, defaults to 1):
-            The 'unsqueeze_dim' argument specifies the dimension along which to unsqueeze cos[position_ids] and
-            sin[position_ids] so that they can be properly broadcasted to the dimensions of q and k. For example, note
-            that cos[position_ids] and sin[position_ids] have the shape [batch_size, seq_len, head_dim]. Then, if q and
-            k have the shape [batch_size, heads, seq_len, head_dim], then setting unsqueeze_dim=1 makes
-            cos[position_ids] and sin[position_ids] broadcastable to the shapes of q and k. Similarly, if q and k have
-            the shape [batch_size, seq_len, heads, head_dim], then set unsqueeze_dim=2.
-    Returns:
-        `tuple(torch.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
-    """
     cos = cos[position_ids].unsqueeze(unsqueeze_dim)
     sin = sin[position_ids].unsqueeze(unsqueeze_dim)
     q_embed = (q * cos) + (rotate_half(q) * sin)
@@ -125,10 +412,9 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim=1):
     return q_embed, k_embed
 
 
-class LlamaMLP(nn.Module):
+class Qwen2MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.config = config
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.intermediate_size
         self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
@@ -136,34 +422,11 @@ class LlamaMLP(nn.Module):
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
         self.act_fn = ACT2FN[config.hidden_act]
 
-    def forward(self, x):
-        if self.config.pretraining_tp > 1:
-            slice = self.intermediate_size // self.config.pretraining_tp
-            gate_proj_slices = self.gate_proj.weight.split(slice, dim=0)
-            up_proj_slices = self.up_proj.weight.split(slice, dim=0)
-            down_proj_slices = self.down_proj.weight.split(slice, dim=1)
-
-            gate_proj = torch.cat(
-                [F.linear(x, gate_proj_slices[i]) for i in range(self.config.pretraining_tp)], dim=-1
-            )
-            up_proj = torch.cat([F.linear(x, up_proj_slices[i]) for i in range(self.config.pretraining_tp)], dim=-1)
-
-            intermediate_states = (self.act_fn(gate_proj) * up_proj).split(slice, dim=2)
-            down_proj = [
-                F.linear(intermediate_states[i], down_proj_slices[i]) for i in range(self.config.pretraining_tp)
-            ]
-            down_proj = sum(down_proj)
-        else:
-            down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
-
-        return down_proj
+    def forward(self, hidden_state):
+        return self.down_proj(self.act_fn(self.gate_proj(hidden_state)) * self.up_proj(hidden_state))
 
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """
-    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
-    num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
-    """
     batch, num_key_value_heads, slen, head_dim = hidden_states.shape
     if n_rep == 1:
         return hidden_states
@@ -171,156 +434,10 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
 
-class LlamaKVCache():
-    def __init__(self, seq_dim: int = 2):
-        self.seq_dim = seq_dim
-        self.seq_length = 0
-        self.key_data = torch.empty((0,), dtype=torch.float32)
-        self.value_data = torch.empty((0,), dtype=torch.float32)
-        self.init_cache()
-
-    def init_cache(
-        self,
-        use_compression: bool = False,
-        select_budget: int = 64,
-        recent_budget: int = 64,
-        streaming_budget: int = 0,
-        random_budget: int = 0,
-        forgetting_factor: float = 1.0,
-        random_method: Optional[str] = None,
-        device=torch.device("cpu"),
-        dtype=torch.float32,
-    ):
-        self.key_data = torch.empty((0,), device=device, dtype=dtype)
-        self.value_data = torch.empty((0,), device=device, dtype=dtype)
-        self.seq_length = 0
-
-        self.all_key_data = torch.zeros((1, 32, 4096, 128), device=device, dtype=dtype)
-        self.all_value_data = torch.zeros((1, 32, 4096, 128), device=device, dtype=dtype)
-
-        self.use_compression = use_compression
-        if use_compression:
-            self.score = None
-            self.select_budget = select_budget
-            self.recent_budget = recent_budget
-            self.streaming_budget = streaming_budget
-            self.all_budget = select_budget + recent_budget
-            self.forgetting_factor = forgetting_factor
-            self.random_budget = random_budget
-            self.token_indices = None
-            if random_method is not None:
-                self.random_method = random_method # "att" "random"
-    
-    def len(self):
-        return self.seq_length
-
-    def cat(self, key_tensor: torch.Tensor, value_tensor: torch.Tensor):
-        L = key_tensor.size(self.seq_dim)
-
-        # 1) 첫 토큰인 경우
-        if self.seq_length == 0:
-            self.key_data = key_tensor
-            self.value_data = value_tensor
-        # 2) 이후
-        else:
-            self.key_data = torch.cat((self.key_data, key_tensor), dim=self.seq_dim)
-            self.value_data = torch.cat((self.value_data, value_tensor), dim=self.seq_dim)
-
-        # 전체 버퍼 갱신
-        end = self.seq_length + L
-        self.all_key_data[:, :, self.seq_length:end].copy_(key_tensor, non_blocking=True)
-        self.all_value_data[:, :, self.seq_length:end].copy_(value_tensor, non_blocking=True)
-        self.seq_length += L
-
-        return self.key_data, self.value_data
-
-    def update(self, attn_scores):
-        if not (self.use_compression and self.seq_length > self.all_budget):
-            return
-        
-        seq_len = attn_scores.size(2)
-        device, dtype = attn_scores.device, attn_scores.dtype
-        
-        # 스코어 최신화 및 토큰 추출
-        exponents = torch.arange(seq_len, 0, -1, device=device, dtype=attn_scores.dtype) - 1
-        forgetting = (self.forgetting_factor ** exponents).view(1, 1, seq_len, 1)
-        
-        current_score = (forgetting*attn_scores).sum(dim=self.seq_dim)
-        
-        if self.score is not None:
-            current_score[:,:,:-1] += self.forgetting_factor * self.score
-        self.score = current_score
-        
-        selected_indices = self.score[:,:,self.streaming_budget:-self.recent_budget].topk(self.select_budget, dim=-1).indices.sort().values + self.streaming_budget
-        # print((selected_indices<self.random_budget).sum(dim=2).squeeze(dim=0).tolist())
-        
-        flag = self.token_indices.gather(dim=2, index=selected_indices) if self.token_indices is not None else selected_indices
-
-        # 랜덤 토큰 되살리기 추출
-        if self.random_budget != 0:
-            if self.random_method == "att":
-                if self.token_indices is None:
-                    self.all_score = attn_scores.sum(dim=self.seq_dim)
-                    self.all_round = torch.ones_like(self.all_score, device=device, dtype=dtype)
-                else:
-                    # print(attn_scores[0,:,0,:self.random_budget].tolist()) 
-                    new_indices = torch.full((*self.token_indices.shape[:-1], 1), self.seq_length - 1, device=device, dtype=torch.int64)
-                    tmp_token_indices = torch.cat((self.token_indices, new_indices), dim=2)
-                    tmp_all_score = torch.zeros((*self.all_score.shape[:-1], self.seq_length), device=device, dtype=dtype)
-                    tmp_all_score = tmp_all_score.scatter(dim=2, index=tmp_token_indices, src=attn_scores.squeeze(2))
-                    tmp_all_round = (tmp_all_score > 0).to(dtype=dtype)
-                    tmp_all_score[:, :, :-1] += self.all_score
-                    tmp_all_round[:, :, :-1] += self.all_round
-                    self.all_score = tmp_all_score
-                    self.all_round = tmp_all_round                
-                tmp_score = (self.all_score/self.all_round)[:,:,:-self.recent_budget]
-            else:
-                # if self.token_indices is not None:
-                #     print(attn_scores[0,:,0,:self.random_budget].tolist())
-                tmp_score = torch.ones((1, 32, self.seq_length-self.recent_budget), device=device, dtype=dtype)
-
-            tmp_score.scatter_(2, flag, 0)
-            tmp_score /= tmp_score.sum(dim=2, keepdim=True)
-            random_missing = torch.multinomial(tmp_score.squeeze(dim=0), num_samples=self.random_budget, replacement=False).view(*tmp_score.shape[:-1], -1)
-        else:
-            random_missing = torch.empty((1,32,0), device=device, dtype=torch.int64)
-
-        self.token_indices = torch.cat((
-            torch.arange(0, self.streaming_budget, device=device, dtype=selected_indices.dtype).view(1,1,self.streaming_budget).expand(1,32,self.streaming_budget),
-            random_missing,
-            selected_indices if self.token_indices is None else flag,
-            torch.arange(self.seq_length-self.recent_budget, self.seq_length, device=device, dtype=selected_indices.dtype).view(1,1,self.recent_budget).expand(1,32,self.recent_budget)
-        ), dim=2)
-        
-        self.score = torch.cat((
-            self.score[:,:,:self.streaming_budget],
-            torch.zeros((1, 32, self.random_budget), device=device, dtype=dtype),
-            self.score.gather(self.seq_dim, selected_indices),
-            self.score[:,:,-self.recent_budget:]
-        ), dim=-1)
-        
-        random_missing = random_missing.unsqueeze(-1).expand(-1,-1,-1,self.key_data.size(-1))
-        selected_indices = selected_indices.unsqueeze(-1).expand(-1,-1,-1,self.key_data.size(-1))
-        
-        self.key_data = torch.cat((
-            self.key_data[:,:,:self.streaming_budget],
-            self.all_key_data.gather(self.seq_dim, random_missing),
-            self.key_data.gather(self.seq_dim, selected_indices),
-            self.key_data[:,:,-self.recent_budget:]
-        ), dim=self.seq_dim)
-        
-        self.value_data = torch.cat((
-            self.value_data[:,:,:self.streaming_budget],
-            self.all_value_data.gather(self.seq_dim, random_missing),
-            self.value_data.gather(self.seq_dim, selected_indices),
-            self.value_data[:,:,-self.recent_budget:]
-        ), dim=self.seq_dim)
-
-
-class LlamaAttention(nn.Module):
+class Qwen2Attention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
-    def __init__(self, config: LlamaConfig):
+    def __init__(self, config: Qwen2Config):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
@@ -331,44 +448,18 @@ class LlamaAttention(nn.Module):
         self.max_position_embeddings = config.max_position_embeddings
         self.rope_theta = config.rope_theta
         self.is_causal = True
-
+        
         if (self.head_dim * self.num_heads) != self.hidden_size:
             raise ValueError(
                 f"hidden_size must be divisible by num_heads (got `hidden_size`: {self.hidden_size}"
                 f" and `num_heads`: {self.num_heads})."
             )
-        self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=config.attention_bias)
-        self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
-        self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
-        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=config.attention_bias)
-        self._init_rope()
+        self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=True)
+        self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=True)
+        self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=True)
+        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
         
-        self.past_key_value = LlamaKVCache()
-    
-    def init_cache(
-        self,
-        use_compression: bool = False,
-        select_budget: int = 64,
-        recent_budget: int = 64,
-        streaming_budget: int = 0,
-        random_budget: int = 0,
-        forgetting_factor: float = 1.0,
-        random_method: Optional[str] = None
-    ):
-        self.past_key_value.init_cache(
-            use_compression,
-            select_budget,
-            recent_budget,
-            streaming_budget,
-            random_budget,
-            forgetting_factor,
-            random_method,
-            self.k_proj.weight.device,
-            self.k_proj.weight.dtype,
-        )
-
-    def _init_rope(self):
-        self.rotary_emb = LlamaRotaryEmbedding(
+        self.rotary_emb = Qwen2RotaryEmbedding(
             self.head_dim,
             max_position_embeddings=self.max_position_embeddings,
             base=self.rope_theta,
@@ -395,23 +486,39 @@ class LlamaAttention(nn.Module):
         bsz, q_len, _ = hidden_states.size()
 
         query_states = self.q_proj(hidden_states).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = self.k_proj(hidden_states).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        value_states = self.v_proj(hidden_states).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        key_states = self.k_proj(hidden_states).view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        value_states = self.v_proj(hidden_states).view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
-        kv_seq_len = key_states.shape[-2] + self.past_key_value.len()
+        kv_seq_len = key_states.shape[-2]
+        if past_key_value is not None:
+            kv_seq_len += past_key_value[0].shape[-2]
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
 
-        # reuse k, v, self_attention
-        key_states, value_states = self.past_key_value.cat(key_states, value_states)
+        if past_key_value is not None:
+            # reuse k, v, self_attention
+            key_states = torch.cat([past_key_value[0], key_states], dim=2)
+            value_states = torch.cat([past_key_value[1], value_states], dim=2)
+        
+        past_key_value = (key_states, value_states) if use_cache else None
 
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
         attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
+        if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
+            raise ValueError(
+                f"Attention weights should be of size {(bsz, self.num_heads, q_len, kv_seq_len)}, but is"
+                f" {attn_weights.size()}"
+            )
+
         if attention_mask is not None:
-            attn_weights = attn_weights + attention_mask[:,:,:,:attn_weights.size(-1)]
+            if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
+                raise ValueError(
+                    f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
+                )
+            attn_weights = attn_weights + attention_mask
 
         # upcast attention to fp32
         attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
@@ -421,52 +528,22 @@ class LlamaAttention(nn.Module):
 
         attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
-        if self.config.pretraining_tp > 1:
-            attn_output = attn_output.split(self.hidden_size // self.config.pretraining_tp, dim=2)
-            o_proj_slices = self.o_proj.weight.split(self.hidden_size // self.config.pretraining_tp, dim=1)
-            attn_output = sum([F.linear(attn_output[i], o_proj_slices[i]) for i in range(self.config.pretraining_tp)])
-        else:
-            attn_output = self.o_proj(attn_output)
-
-        self.past_key_value.update(attn_weights)
+        attn_output = self.o_proj(attn_output)
 
         if not output_attentions:
             attn_weights = None
 
-        if use_cache:
-            past_key_value = self.past_key_value
-
         return attn_output, attn_weights, past_key_value
 
 
-class LlamaDecoderLayer(nn.Module):
-    def __init__(self, config: LlamaConfig):
+class Qwen2DecoderLayer(nn.Module):
+    def __init__(self, config: Qwen2Config):
         super().__init__()
         self.hidden_size = config.hidden_size
-        self.self_attn = LlamaAttention(config=config)
-        self.mlp = LlamaMLP(config)
-        self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-    
-    def init_cache(
-        self,
-        use_compression: bool = False,
-        select_budget: int = 64,
-        recent_budget: int = 64,
-        streaming_budget: int = 0,
-        random_budget: int = 0,
-        forgetting_factor: float = 1.0,
-        random_method: Optional[str] = None
-    ):
-        self.self_attn.init_cache(
-            use_compression,
-            select_budget,
-            recent_budget,
-            streaming_budget,
-            random_budget,
-            forgetting_factor,
-            random_method
-        )
+        self.self_attn = Qwen2Attention(config=config)
+        self.mlp = Qwen2MLP(config)
+        self.input_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -478,6 +555,7 @@ class LlamaDecoderLayer(nn.Module):
         use_cache: Optional[bool] = False,
         **kwargs,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+
         residual = hidden_states
 
         hidden_states = self.input_layernorm(hidden_states)
@@ -510,13 +588,12 @@ class LlamaDecoderLayer(nn.Module):
 
         return outputs
 
-class LlamaPreTrainedModel(PreTrainedModel):
-    config_class = LlamaConfig
+class Qwen2PreTrainedModel(PreTrainedModel):
+    config_class = Qwen2Config
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
-    _no_split_modules = ["LlamaDecoderLayer"]
+    _no_split_modules = ["Qwen2DecoderLayer"]
     _skip_keys_device_placement = "past_key_values"
-    _supports_flash_attn_2 = True
 
     def _init_weights(self, module):
         std = self.config.initializer_range
@@ -530,39 +607,20 @@ class LlamaPreTrainedModel(PreTrainedModel):
                 module.weight.data[module.padding_idx].zero_()
 
 
-class LlamaModel(LlamaPreTrainedModel):
-    def __init__(self, config: LlamaConfig):
+class Qwen2Model(Qwen2PreTrainedModel):
+    def __init__(self, config: Qwen2Config):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
-        self.layers = nn.ModuleList([LlamaDecoderLayer(config) for _ in range(config.num_hidden_layers)])
-        self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.layers = nn.ModuleList([Qwen2DecoderLayer(config) for _ in range(config.num_hidden_layers)])
+        self.norm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing
+        self.use_compression = False
         self.post_init()
-    
-    def init_cache(
-        self,
-        use_compression: bool = False,
-        select_budget: int = 64,
-        recent_budget: int = 64,
-        streaming_budget: int = 0,
-        random_budget: int = 0,
-        forgetting_factor: float = 1.0,
-        random_method: Optional[str] = None
-    ):
-        custom_config = [((0.95, 0.05), 0.644), ((0.9, 0.1), 1.0), ((0.25, 0.75), 0.828), ((0.35, 0.65), 0.982), ((0.2, 0.8), 0.918), ((0.2, 0.8), 0.796), ((0.25, 0.75), 0.946), ((0.35, 0.65), 0.992), ((0.35, 0.65), 0.994), ((0.35, 0.65), 0.994), ((0.35, 0.65), 0.996), ((0.25, 0.75), 0.996), ((0.25, 0.75), 0.992), ((0.3, 0.7), 0.994), ((0.25, 0.75), 0.996), ((0.25, 0.75), 0.994), ((0.25, 0.75), 0.996), ((0.15, 0.85), 0.878), ((0.15, 0.85), 0.85), ((0.15, 0.85), 0.814), ((0.15, 0.85), 0.882), ((0.15, 0.85), 0.92), ((0.15, 0.85), 0.858), ((0.15, 0.85), 0.924), ((0.1, 0.9), 0.926), ((0.15, 0.85), 0.912), ((0.1, 0.9), 0.784), ((0.15, 0.85), 0.912), ((0.2, 0.8), 0.934), ((0.2, 0.8), 0.944), ((0.15, 0.85), 0.888), ((0.25, 0.75), 0.954)]
-        for idx, layer in enumerate(self.layers):
-            recent = custom_config[idx][0][0]
-            factor = custom_config[idx][1]
-            total_budget = select_budget + recent_budget
-            tmp_recent_budget = int(recent*total_budget)
-            tmp_select_budget = total_budget - tmp_recent_budget
-            layer.init_cache(use_compression, tmp_select_budget, tmp_recent_budget, streaming_budget, random_budget, factor, random_method)
-            # layer.init_cache(use_compression, select_budget, recent_budget, streaming_budget, random_budget, forgetting_factor, random_method)
 
     def get_input_embeddings(self):
         return self.embed_tokens
@@ -602,7 +660,7 @@ class LlamaModel(LlamaPreTrainedModel):
 
         past_key_values_length = 0
         if past_key_values is not None:
-            past_key_values_length = past_key_values[0].len()
+            past_length = past_key_values[0][0].shape[2]
 
         if position_ids is None:
             device = input_ids.device if input_ids is not None else inputs_embeds.device
@@ -689,29 +747,17 @@ class LlamaModel(LlamaPreTrainedModel):
         )
 
 
-class LlamaForCausalLM(LlamaPreTrainedModel):
+class Qwen2ForCausalLM(Qwen2PreTrainedModel):
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self, config):
         super().__init__(config)
-        self.model = LlamaModel(config)
+        self.model = Qwen2Model(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
         # Initialize weights and apply final processing
         self.post_init()
-    
-    def init_cache(
-        self,
-        use_compression: bool = False,
-        select_budget: int = 64,
-        recent_budget: int = 64,
-        streaming_budget: int = 0,
-        random_budget: int = 0,
-        forgetting_factor: float = 1.0,
-        random_method: Optional[str] = None
-    ):
-        self.model.init_cache(use_compression, select_budget, recent_budget, streaming_budget, random_budget, forgetting_factor, random_method)
 
     def get_input_embeddings(self):
         return self.model.embed_tokens
@@ -744,6 +790,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
+
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -764,12 +811,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         )
 
         hidden_states = outputs[0]
-        if self.config.pretraining_tp > 1:
-            lm_head_slices = self.lm_head.weight.split(self.vocab_size // self.config.pretraining_tp, dim=0)
-            logits = [F.linear(hidden_states, lm_head_slices[i]) for i in range(self.config.pretraining_tp)]
-            logits = torch.cat(logits, dim=-1)
-        else:
-            logits = self.lm_head(hidden_states)
+        logits = self.lm_head(hidden_states)
         logits = logits.float()
 
         loss = None

@@ -50,6 +50,16 @@ class A2SFKVCache():
         """Update cache based on attention scores"""
         if not (self.use_compression and self.seq_length > self.total_budget):
             return
+        elif self.compression_method == "streamingLLM":
+            self.key_data = torch.cat((
+                self.key_data[:,:,:self.streaming_budget,:],
+                self.key_data[:,:,-self.recent_budget:,:]
+            ), dim=self.seq_dim)
+            
+            self.value_data = torch.cat((
+                self.value_data[:,:,:self.streaming_budget,:],
+                self.value_data[:,:,-self.recent_budget:,:]
+            ), dim=self.seq_dim)
         
         attn_scores_shape = attn_scores.shape
         
@@ -71,10 +81,7 @@ class A2SFKVCache():
                 self.score *= self.forgetting_factor
         
         # Select tokens to keep
-        try:
-            selected_indices = self.score[:,:,:-self.recent_budget].topk(self.select_budget, dim=-1).indices.sort().values
-        except:
-            import pdb; pdb.set_trace()
+        selected_indices = self.score[:,:,:-self.recent_budget].topk(self.select_budget, dim=-1).indices.sort().values
         
         # Update scores
         self.score = torch.cat((
@@ -86,13 +93,11 @@ class A2SFKVCache():
         selected_indices = selected_indices.unsqueeze(-1).expand(-1,-1,-1,self.key_data.size(-1))
         
         self.key_data = torch.cat((
-            self.key_data[:,:,:self.streaming_budget,:],
             self.key_data.gather(self.seq_dim, selected_indices),
             self.key_data[:,:,-self.recent_budget:,:]
         ), dim=self.seq_dim)
         
         self.value_data = torch.cat((
-            self.value_data[:,:,:self.streaming_budget,:],
             self.value_data.gather(self.seq_dim, selected_indices),
             self.value_data[:,:,-self.recent_budget:,:]
         ), dim=self.seq_dim)
