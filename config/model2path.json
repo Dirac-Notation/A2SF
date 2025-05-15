@@ -1,0 +1,7 @@
+{
+    "llama": "huggyllama/llama-7b",
+    "llama2": "meta-llama/Llama-2-7b-chat-hf",
+    "llama3": "meta-llama/Meta-Llama-3-8B-Instruct",
+    "opt": "facebook/opt-6.7b",
+    "llama2_masked": "meta-llama/Llama-2-7b-chat-hf"
+}
