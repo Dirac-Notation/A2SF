@@ -17,7 +17,7 @@ class CompressionConfig:
 def load_configs(model_name, method, total_budget, tokenizer=None):
     data = {
         "streamingLLM": {
-            "compression_method": "h2o", "compression_ratio": [1.0 for _ in range(32)], "streaming_ratio": 0.05
+            "compression_method": "streamingLLM", "compression_ratio": [1.0 for _ in range(32)], "streaming_budget": 10
         },
         "h2o": {
             "compression_method": "h2o", "compression_ratio": [0.5 for _ in range(32)]
@@ -51,18 +51,18 @@ def load_configs(model_name, method, total_budget, tokenizer=None):
         },
         "llama2": {
             "compression_method": "a2sf",
-            "compression_ratio" : [0.95, 0.85, 0.05, 0.05, 0.1, 0.25, 0.2, 0.15, 0.2, 0.25, 0.2, 0.2, 0.2, 0.2, 0.15, 0.2, 0.15, 0.2, 0.2, 0.15, 0.15, 0.15, 0.2, 0.15, 0.2, 0.2, 0.2, 0.1, 0.25, 0.2, 0.25, 0.3],
-            "forgetting_factors": [0.0, 0.01, 0.01, 0.01, 0.01, 0.92, 0.96, 0.97, 0.95, 0.97, 0.97, 1.0, 0.97, 0.98, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.95, 1.0, 0.93, 0.99, 0.01, 0.94, 1.0, 0.94, 0.9]
+            "compression_ratio" : [0.95, 0.8, 0.05, 0.05, 0.05, 0.25, 0.15, 0.1, 0.1, 0.15, 0.15, 0.15, 0.1, 0.15, 0.15, 0.2, 0.15, 0.15, 0.1, 0.1, 0.1, 0.15, 0.15, 0.1, 0.15, 0.15, 0.1, 0.05, 0.2, 0.15, 0.1, 0.1],
+            "forgetting_factors": [0.0, 0.01, 0.01, 0.01, 0.01, 0.92, 0.96, 0.95, 0.94, 0.92, 0.9, 0.95, 0.95, 0.95, 0.98, 1.0, 1.0, 0.99, 1.0, 1.0, 1.0, 0.99, 0.95, 0.92, 0.94, 0.86, 0.91, 0.01, 0.88, 0.93, 0.86, 0.01]
         },
         "llama3": {
             "compression_method": "a2sf",
-            "compression_ratio" : [0.95, 0.55, 0.2, 0.3, 0.15, 0.1, 0.25, 0.15, 0.25, 0.2, 0.25, 0.25, 0.3, 0.1, 0.1, 0.15, 0.1, 0.25, 0.1, 0.1, 0.15, 0.25, 0.15, 0.1, 0.1, 0.05, 0.1, 0.15, 0.25, 0.25, 0.15, 0.25],
-            "forgetting_factors": [0.92, 0.83, 0.82, 0.9, 0.88, 0.78, 0.87, 0.89, 0.86, 0.86, 0.88, 0.87, 0.9, 0.86, 0.86, 0.89, 0.86, 0.9, 0.84, 0.81, 0.87, 0.84, 0.82, 0.83, 0.84, 0.79, 0.88, 0.79, 0.88, 0.91, 0.9, 0.91]
+            "compression_ratio" : [0.95, 0.05, 0.1, 0.1, 0.1, 0.1, 0.05, 0.15, 0.1, 0.1, 0.2, 0.1, 0.05, 0.05, 0.05, 0.05, 0.05, 0.1, 0.05, 0.1, 0.1, 0.05, 0.1, 0.05, 0.05, 0.05, 0.05, 0.1, 0.1, 0.1, 0.05, 0.05],
+            "forgetting_factors": [0.0, 0.01, 0.71, 0.7, 0.8, 0.7, 0.74, 0.83, 0.82, 0.78, 0.91, 0.8, 0.01, 0.81, 0.79, 0.86, 0.83, 0.83, 0.78, 0.75, 0.81, 0.12, 0.73, 0.74, 0.77, 0.01, 0.88, 0.72, 0.85, 0.11, 0.84, 0.86]
         },
-        "opt": {
+        "qwen2": {
             "compression_method": "a2sf",
-            "compression_ratio" : [0.6, 0.95, 0.6, 0.75, 0.55, 0.15, 0.1, 0.1, 0.1, 0.1, 0.15, 0.1, 0.15, 0.2, 0.15, 0.15, 0.1, 0.15, 0.05, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.05, 0.1, 0.1, 0.15, 0.05, 0.05],
-            "forgetting_factors": [0.95, 0.99, 0.0, 0.0, 0.0, 0.11, 0.08, 0.15, 0.22, 0.19, 0.33, 0.28, 0.74, 0.77, 0.79, 0.78, 0.79, 0.81, 0.09, 0.83, 0.86, 0.85, 0.86, 0.86, 0.86, 0.85, 0.15, 0.78, 0.83, 0.81, 0.22, 0.14]
+            "compression_ratio" : [0.05, 0.1, 0.25, 0.05, 0.15, 0.1, 0.05, 0.3, 0.15, 0.2, 0.25, 0.15, 0.05, 0.25, 0.1, 0.05, 0.1, 0.15, 0.1, 0.15, 0.1, 0.1, 0.2, 0.15, 0.1, 0.1, 0.05, 0.1],
+            "forgetting_factors": [0.01, 0.66, 0.64, 0.01, 0.01, 0.87, 0.01, 0.99, 0.0, 0.95, 0.97, 0.93, 0.01, 0.96, 0.93, 0.86, 1.0, 0.98, 0.9, 0.97, 0.95, 0.97, 1.0, 0.97, 0.94, 0.97, 0.92, 0.95]
         }
     }
 
@@ -87,8 +87,8 @@ def load_configs(model_name, method, total_budget, tokenizer=None):
             use_compression=True,
             compression_method=data_point["compression_method"],
             total_budget=total_budget,
-            compression_ratio=data_point["compression_ratio"] if "compression_ratio" in data_point else None,
-            forgetting_factors=data_point["forgetting_factors"] if "forgetting_factors" in data_point else None,
+            compression_ratio=data_point["compression_ratio"],
+            forgetting_factors=data_point["forgetting_factors"],
             punctuation_ids=punctuation_ids
         )
     elif "h2o" in method:
@@ -96,14 +96,15 @@ def load_configs(model_name, method, total_budget, tokenizer=None):
             use_compression=True,
             compression_method=data_point["compression_method"],
             total_budget=total_budget,
-            compression_ratio=data_point["compression_ratio"] if "compression_ratio" in data_point else None,
+            compression_ratio=data_point["compression_ratio"]
         )
     elif "streamingLLM" in method:
         config = CompressionConfig(
             use_compression=True,
             compression_method=data_point["compression_method"],
             total_budget=total_budget,
-            streaming_ratio=data_point["streaming_ratio"] if "streaming_ratio" in data_point else None,
+            compression_ratio=data_point["compression_ratio"],
+            streaming_budget=data_point["streaming_budget"]
         )
     elif method == "full":
         config = CompressionConfig(
