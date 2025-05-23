@@ -49,23 +49,23 @@ def plot_attention_heatmap(attention_matrix, save_path):
     plt.figure(figsize=(10, 8))
     im = plt.imshow(attention_matrix, cmap='Blues', norm=LogNorm())
     cbar = plt.colorbar(im, label='Attention Score')
-    cbar.ax.tick_params(labelsize=20)
-    cbar.set_label('Attention Score', fontsize=22)
+    cbar.ax.tick_params(labelsize=25)
+    cbar.set_label('Attention Score', fontsize=28)
     
     # Add text annotations
     for i in range(attention_matrix.shape[0]):
         for j in range(attention_matrix.shape[1]):
             plt.text(j, i, f'{attention_matrix[i, j]:.2f}',
-                    ha='center', va='center', fontsize=18)
+                    ha='center', va='center', fontsize=25)
     
     # Move x-axis to top
     ax = plt.gca()
     ax.xaxis.set_label_position('top')
     ax.xaxis.tick_top()
-    plt.xlabel("Key Sentence", fontsize=22)
-    plt.ylabel("Query Sentence", fontsize=22)
-    plt.xticks(fontsize=20) 
-    plt.yticks(fontsize=20)
+    plt.xlabel("Key Sentence", fontsize=28)
+    plt.ylabel("Query Sentence", fontsize=28)
+    plt.xticks(fontsize=25) 
+    plt.yticks(fontsize=25)
     
     plt.tight_layout()
     plt.savefig(save_path, dpi=300)
@@ -85,8 +85,8 @@ def plot_full_attention_heatmap(attention_maps, sentence_segments, save_path):
     
     # Add colorbar with correct fontsize setting
     cbar = plt.colorbar(im)
-    cbar.set_label('Attention Score', fontsize=22)
-    cbar.ax.tick_params(labelsize=20)
+    cbar.set_label('Attention Score', fontsize=28)
+    cbar.ax.tick_params(labelsize=25)
     
     # Add sentence boundary lines
     for length in cum_lengths[1:-1]:  # Skip first and last boundaries
@@ -97,10 +97,10 @@ def plot_full_attention_heatmap(attention_maps, sentence_segments, save_path):
     ax = plt.gca()
     ax.xaxis.set_label_position('top')
     ax.xaxis.tick_top()
-    plt.xlabel("Key Token", fontsize=22)
-    plt.ylabel("Query Token", fontsize=22)
-    plt.xticks(fontsize=20)
-    plt.yticks(fontsize=20)
+    plt.xlabel("Key Token", fontsize=28)
+    plt.ylabel("Query Token", fontsize=28)
+    plt.xticks(fontsize=25)
+    plt.yticks(fontsize=25)
     
     plt.tight_layout()
     plt.savefig(save_path, dpi=300)
@@ -126,7 +126,7 @@ with open(dataset_path, "r") as f:
         articles.append(json.loads(dataline))
 
 # Process articles from 0 to 100
-for article_idx in tqdm(range(101)):
+for article_idx in tqdm(range(100)):
     # Create directory for this article
     article_dir = f"plots/sentences/article_{article_idx}"
     os.makedirs(article_dir, exist_ok=True)

@@ -54,7 +54,7 @@ def main(args):
     device = f"cuda:{args.gpu}"
     
     tokenizer = AutoTokenizer.from_pretrained(model_name_hf)
-    model = (OptimalLlamaForCausalLM.from_pretrained(model_name_hf).to(torch.bfloat16).to(device))
+    model = (OptimalLlamaForCausalLM.from_pretrained(model_name_hf).to(torch.float16).to(device))
     
     # Load dataset
     prompts, answers, output_indices = load_datasets(
@@ -85,7 +85,7 @@ def main(args):
     print("Budget\tAverage Similarity\tROUGE-1 Score")
     print("-" * 50)
 
-    for i in range(25,525,5):
+    for i in range(25,525,10):
         rouge_score = 0
         sim_score = 0
         for idx in range(1, num_prompts+1):
@@ -122,11 +122,6 @@ def main(args):
     
     # Plot the data points
     plt.scatter(sim_scores, rouge_scores, color='blue', alpha=0.5, label='ROUGE-1 Scores')
-    
-    # Calculate and plot trend line
-    z = np.polyfit(sim_scores, rouge_scores, 3)
-    p = np.poly1d(z)
-    plt.plot(sim_scores, p(sim_scores), color='red', linewidth=2, label='Trend Line')
     
     plt.title('ROUGE-1 Scores vs Similarity', fontsize=24)
     plt.xlabel('Similarity Score', fontsize=22)

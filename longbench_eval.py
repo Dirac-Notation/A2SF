@@ -111,7 +111,7 @@ if __name__ == '__main__':
         group_scores = calculate_group_averages(scores)
         
         # Calculate overall average
-        all_scores = list(group_scores.values())
+        all_scores = list(scores.values())
         overall_avg = round(sum(all_scores) / len(all_scores), 2) if all_scores else 0
         
         # Combine individual scores and group scores
@@ -135,7 +135,7 @@ if __name__ == '__main__':
         
         print("\nGroup Averages:")
         for group_name, avg_score in group_scores.items():
-            if group_name == "Overall Average":
+            if group_name == "overall average":
                 print("-" * 50)
             print(f"{group_name:20}: {avg_score:.2f}")
         

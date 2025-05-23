@@ -76,10 +76,10 @@ def process_model(model_name, device, prompt_length, generation_length, total_bu
     
     if "qwen" in model_name.lower():
         tokenizer = Qwen2Tokenizer.from_pretrained(model_path)
-        model = Qwen2ForCausalLM.from_pretrained(model_path).to(torch.bfloat16).to(device)
+        model = Qwen2ForCausalLM.from_pretrained(model_path).to(torch.float16).to(device)
     else:
         tokenizer = AutoTokenizer.from_pretrained(model_path)
-        model = AutoModelForCausalLM.from_pretrained(model_path).to(torch.bfloat16).to(device)
+        model = AutoModelForCausalLM.from_pretrained(model_path).to(torch.float16).to(device)
 
     punctuation_ids = [
         tokenizer.encode(".", add_special_tokens=False)[0],
@@ -136,8 +136,12 @@ def process_model(model_name, device, prompt_length, generation_length, total_bu
     # Search space
     ratio_step = 0.05
     factor_step = 0.01
-    compression_ratio = [ratio_step*i for i in range(1, int(1/ratio_step))]
+    # compression_ratio = [ratio_step*i for i in range(1, int(1/ratio_step))]
     a2sf_factors = [factor_step*i for i in range(int(1/factor_step)+1)]
+    
+    # Fixed
+    compression_ratio = [0.5 for i in range(32)]
+    # a2sf_factors = [1.00 for i in range(32)]
     
     conditions = []
     for ratio in compression_ratio:
