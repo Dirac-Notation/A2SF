@@ -63,7 +63,37 @@ def load_configs(model_name, method, total_budget, tokenizer=None):
             "compression_method": "a2sf",
             "compression_ratio" : [0.05, 0.1, 0.25, 0.05, 0.15, 0.1, 0.05, 0.3, 0.15, 0.2, 0.25, 0.15, 0.05, 0.25, 0.1, 0.05, 0.1, 0.15, 0.1, 0.15, 0.1, 0.1, 0.2, 0.15, 0.1, 0.1, 0.05, 0.1],
             "forgetting_factors": [0.01, 0.66, 0.64, 0.01, 0.01, 0.87, 0.01, 0.99, 0.0, 0.95, 0.97, 0.93, 0.01, 0.96, 0.93, 0.86, 1.0, 0.98, 0.9, 0.97, 0.95, 0.97, 1.0, 0.97, 0.94, 0.97, 0.92, 0.95]
-        }
+        },
+        "llama2_ratio_fixed": {
+            "compression_method": "a2sf",
+            "compression_ratio" : [0.5 for i in range(32)],
+            "forgetting_factors": [0.0, 0.01, 0.01, 0.01, 0.01, 0.01, 0.98, 0.98, 0.96, 0.94, 0.95, 0.99, 0.98, 1.0, 1.0, 1.0, 0.99, 0.96, 1.0, 0.99, 0.95, 0.97, 0.93, 0.9, 0.97, 0.89, 0.96, 0.01, 0.01, 0.91, 0.87, 0.83]
+        },
+        "llama2_factor_fixed": {
+            "compression_method": "a2sf",
+            "compression_ratio" : [0.95, 0.8, 0.4, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.2, 0.15, 0.15, 0.1, 0.1, 0.1, 0.15, 0.15, 0.15, 0.15, 0.15, 0.1, 0.1, 0.25, 0.15, 0.15, 0.2],
+            "forgetting_factors": [1.0 for i in range(32)]
+        },
+        "llama3_ratio_fixed": {
+            "compression_method": "a2sf",
+            "compression_ratio" : [0.5 for i in range(32)],
+            "forgetting_factors": [0.0, 0.0, 0.76, 0.78, 0.8, 0.77, 0.8, 0.66, 0.82, 0.79, 0.84, 0.78, 0.01, 0.83, 0.87, 0.87, 0.87, 0.87, 0.79, 0.81, 0.83, 0.8, 0.76, 0.48, 0.81, 0.72, 0.84, 0.84, 0.77, 0.01, 0.87, 0.9]
+        },
+        "llama3_factor_fixed": {
+            "compression_method": "a2sf",
+            "compression_ratio" : [0.95, 0.45, 0.95, 0.25, 0.2, 0.65, 0.25, 0.25, 0.2, 0.25, 0.25, 0.5, 0.25, 0.1, 0.2, 0.2, 0.15, 0.25, 0.2, 0.15, 0.25, 0.15, 0.1, 0.15, 0.15, 0.1, 0.1, 0.25, 0.25, 0.15, 0.15, 0.15],
+            "forgetting_factors": [1.0 for i in range(32)]
+        },
+        "qwen2_ratio_fixed": {
+            "compression_method": "a2sf",
+            "compression_ratio" : [0.5 for i in range(32)],
+            "forgetting_factors": [0.0, 0.0, 0.76, 0.78, 0.8, 0.77, 0.8, 0.66, 0.82, 0.79, 0.84, 0.78, 0.01, 0.83, 0.87, 0.87, 0.87, 0.87, 0.79, 0.81, 0.83, 0.8, 0.76, 0.48, 0.81, 0.72, 0.84, 0.84, 0.77, 0.01, 0.87, 0.9]
+        },
+        "qwen2_factor_fixed": {
+            "compression_method": "a2sf",
+            "compression_ratio" : [0.15, 0.75, 0.85, 0.15, 0.15, 0.15, 0.2, 0.4, 0.15, 0.25, 0.2, 0.15, 0.2, 0.3, 0.15, 0.15, 0.1, 0.15, 0.1, 0.1, 0.1, 0.1, 0.2, 0.05, 0.1, 0.15, 0.2, 0.1],
+            "forgetting_factors": [1.0 for i in range(32)]
+        },
     }
 
     punctuation_ids = None
@@ -178,13 +208,10 @@ def make_a2sf_mask(attention_maps, prompt_length, total_budget, compression_rati
         elif method == "h2o":
             layer_scores = a2sf_maps[layer_idx,:,:prompt_length,:].sum(dim=1, keepdim=True)
             
-            
         scores.append(layer_scores)
     
     # Process each layer
     for layer_idx in range(num_layers):
-        num_round = 0  # For a2sf_round method
-        
         for i in range(prompt_length, attention_maps.size(2)):
             window_start = i - recent_budget[layer_idx]
             

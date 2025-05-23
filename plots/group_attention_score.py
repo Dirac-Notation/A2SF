@@ -41,7 +41,7 @@ def load_datasets(
     
     return prompts, answers, output_indices
 
-def proportional_grouping_mean(attention_row, total_length, num_groups=100):
+def proportional_grouping_mean(attention_row, total_length, num_groups=50):
     # Calculate group sizes based on proportions
     group_sizes = [int(total_length * (i+1)/num_groups) - int(total_length * i/num_groups) for i in range(num_groups)]
     scores = []
@@ -54,7 +54,7 @@ def proportional_grouping_mean(attention_row, total_length, num_groups=100):
     
     return torch.stack(scores, dim=2)
 
-def proportional_grouping_sum(attention_row, total_length, num_groups=100):
+def proportional_grouping_sum(attention_row, total_length, num_groups=50):
     # Calculate group sizes based on proportions
     group_sizes = [int(total_length * (i+1)/num_groups) - int(total_length * i/num_groups) for i in range(num_groups)]
     scores = []
@@ -70,21 +70,23 @@ def proportional_grouping_sum(attention_row, total_length, num_groups=100):
 def plot_average_attention_scores(original_ratio_scores, h2o_ratio_scores, a2sf_ratio_scores, h2o_small_ratio_scores, h2o_large_ratio_scores,
                                 original_raw_scores, h2o_raw_scores, a2sf_raw_scores, h2o_small_raw_scores, h2o_large_raw_scores):
     # Calculate averages across all layers and heads
-    avg_h2o_ratio = h2o_ratio_scores.mean(dim=(0,1))
-    avg_a2sf_ratio = a2sf_ratio_scores.mean(dim=(0,1))
+    avg_h2o_ratio = h2o_ratio_scores.mean(dim=(0,1)).to(torch.float32)
+    avg_a2sf_ratio = a2sf_ratio_scores.mean(dim=(0,1)).to(torch.float32)
     
-    avg_original_raw = original_raw_scores.mean(dim=(0,1))
-    avg_h2o_raw = h2o_raw_scores.mean(dim=(0,1))
-    avg_a2sf_raw = a2sf_raw_scores.mean(dim=(0,1))
+    avg_original_raw = original_raw_scores.mean(dim=(0,1)).to(torch.float32)
+    avg_h2o_raw = h2o_raw_scores.mean(dim=(0,1)).to(torch.float32)
+    avg_a2sf_raw = a2sf_raw_scores.mean(dim=(0,1)).to(torch.float32)
 
     graph_x_size = avg_h2o_ratio.size(0)
     avg_seq_length = (sum(prompt_lengths) + sum(generation_lengths))/len(prompt_lengths)
     
     h2o_ratio = 0.5*args.total_budget/avg_seq_length
-    a2sf_ratio = torch.tensor([i for i,_ in a2sf_configs.compression_ratio]).mean().item()*args.total_budget/avg_seq_length
+    a2sf_ratio = torch.tensor([i for i in a2sf_configs.compression_ratio]).mean().item()*args.total_budget/avg_seq_length
     
-    h2o_window = (1 - h2o_ratio) * graph_x_size
-    a2sf_window = (1 - a2sf_ratio) * graph_x_size
+    h2o_window = 1 - h2o_ratio
+    a2sf_window = 1 - a2sf_ratio
+    
+    x = [i/50 + 1/100 for i in range(50)]
     
     # Define section boundaries and colors (10 sections)
     sections = [
@@ -103,57 +105,55 @@ def plot_average_attention_scores(original_ratio_scores, h2o_ratio_scores, a2sf_
     # Function to add background colors
     def add_section_backgrounds(ax):
         for start, end, color in sections:
-            start_idx = int(start * graph_x_size / 100)
-            end_idx = int(end * graph_x_size / 100)
+            start_idx = start / 100
+            end_idx = end / 100
             ax.axvspan(start_idx, end_idx, color=color, alpha=0.3)
     
     # Create directory for saving plots
     os.makedirs('plots/group_attention_score', exist_ok=True)
     
     # First plot: Token Selection Ratio
-    plt.figure(figsize=(15, 8))
+    plt.figure(figsize=(12, 9))
     add_section_backgrounds(plt.gca())
-    plt.plot(avg_h2o_ratio, color='#FF0000', label='H2O(0.5,0.5)', linewidth=2.5)  # Bright Red
-    plt.plot(avg_a2sf_ratio, color='#0000FF', label='A2SF', linewidth=2.5)         # Bright Blue
+    plt.plot(x, avg_h2o_ratio, color='#FF0000', label='H2O', linewidth=2.5)  # Bright Red
+    plt.plot(x, avg_a2sf_ratio, color='#0000FF', label='A2SF', linewidth=2.5)         # Bright Blue
     
     # Add vertical lines for local windows
     plt.axvline(x=h2o_window, color='#FF0000', linestyle='--', alpha=0.7)
-    plt.text(h2o_window, plt.gca().get_ylim()[1], 'H2O\nWindow', rotation=90, va='top', ha='center', color='#FF0000', fontsize=20)
+    plt.text(h2o_window, plt.gca().get_ylim()[1], 'H2O\nWindow', rotation=90, va='top', ha='right', color='#FF0000', fontsize=30)
     plt.axvline(x=a2sf_window, color='#0000FF', linestyle='--', alpha=0.7)
-    plt.text(a2sf_window, plt.gca().get_ylim()[1], 'A2SF\nWindow', rotation=90, va='top', ha='center', color='#0000FF', fontsize=20)
+    plt.text(a2sf_window, plt.gca().get_ylim()[1], 'A2SF\nWindow', rotation=90, va='top', ha='left', color='#0000FF', fontsize=30)
     
-    plt.title('Average Token Selection Ratio Across All Layers and Heads', fontsize=24)
-    plt.xlabel('Token Position', fontsize=22)
-    plt.ylabel('Ratio of Selected Tokens', fontsize=22)
+    plt.xlabel('Relative Token Position', fontsize=30)
+    plt.ylabel('Ratio of Selected Tokens', fontsize=30)
     plt.grid(True, linestyle='--', alpha=0.7)
-    plt.legend(fontsize=20, loc='upper center')
-    plt.xticks(fontsize=18)
-    plt.yticks(fontsize=18)
+    plt.legend(fontsize=30, loc='upper center')
+    plt.xticks(fontsize=30)
+    plt.yticks(fontsize=30)
     plt.tight_layout()
     plt.savefig('plots/group_attention_score/token_selection_ratio.png', dpi=300, bbox_inches='tight')
     plt.close()
     
     # Second plot: Attention Scores
-    plt.figure(figsize=(15, 8))
+    plt.figure(figsize=(12, 9))
     add_section_backgrounds(plt.gca())
-    plt.plot(avg_original_raw, color='#000000', label='Original', linewidth=2.5, linestyle='--')  # Black
-    plt.plot(avg_h2o_raw, color='#FF0000', label='H2O(0.5,0.5)', linewidth=2.5)                  # Bright Red
-    plt.plot(avg_a2sf_raw, color='#0000FF', label='A2SF', linewidth=2.5)                         # Bright Blue
+    plt.plot(x, avg_original_raw, color='#000000', label='Original', linewidth=2.5, linestyle='--')  # Black
+    plt.plot(x, avg_h2o_raw, color='#FF0000', label='H2O', linewidth=2.5)                  # Bright Red
+    plt.plot(x, avg_a2sf_raw, color='#0000FF', label='A2SF', linewidth=2.5)                         # Bright Blue
     
     # Add vertical lines for local windows
     plt.axvline(x=h2o_window, color='#FF0000', linestyle='--', alpha=0.7)
-    plt.text(h2o_window, plt.gca().get_ylim()[1], 'H2O\nWindow', rotation=90, va='top', ha='center', color='#FF0000', fontsize=20)
+    plt.text(h2o_window, plt.gca().get_ylim()[1], 'H2O\nWindow', rotation=90, va='top', ha='right', color='#FF0000', fontsize=30)
     plt.axvline(x=a2sf_window, color='#0000FF', linestyle='--', alpha=0.7)
-    plt.text(a2sf_window, plt.gca().get_ylim()[1], 'A2SF\nWindow', rotation=90, va='top', ha='center', color='#0000FF', fontsize=20)
+    plt.text(a2sf_window, plt.gca().get_ylim()[1], 'A2SF\nWindow', rotation=90, va='top', ha='left', color='#0000FF', fontsize=30)
     
-    plt.title('Average Attention Scores Across All Layers and Heads', fontsize=24)
-    plt.xlabel('Token Position', fontsize=22)
-    plt.ylabel('Attention Score', fontsize=22)
+    plt.xlabel('Relative Token Position', fontsize=30)
+    plt.ylabel('Sum of Attention Scores', fontsize=30)
     plt.grid(True, linestyle='--', alpha=0.7)
-    plt.legend(fontsize=20, loc='upper center')
+    plt.legend(fontsize=30, loc='upper center')
     plt.yscale('log')
-    plt.xticks(fontsize=18)
-    plt.yticks(fontsize=18)
+    plt.xticks(fontsize=30)
+    plt.yticks(fontsize=30)
     plt.tight_layout()
     plt.savefig('plots/group_attention_score/attention_scores.png', dpi=300, bbox_inches='tight')
     plt.close()
@@ -275,7 +275,7 @@ args = parser.parse_args()
 device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
 
 tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-chat-hf")
-model = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-2-7b-chat-hf").to(torch.float16).to(device)
+model = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-2-7b-chat-hf").to(torch.bfloat16).to(device)
 
 input_ids, answers, output_indices = load_datasets(args.dataset, tokenizer)
 
@@ -285,26 +285,27 @@ prompt_lengths = []
 generation_lengths = []
 
 # 각 프롬프트에 대해 처리
-for inputs, outputs in tqdm(zip(input_ids[:10], output_indices[:10]), desc="Processing prompts..."):
+for i in tqdm(range(10), desc="Processing prompts..."):
+    inputs = input_ids[i]
+    outputs = output_indices[i]
     prompt_length = inputs.shape[1]
     
     inputs = inputs.to(device)
     
     with torch.inference_mode():
         outputs = model.generate(inputs, max_new_tokens=outputs.shape[1], eos_token_id=tokenizer.eos_token_id, do_sample=False)
+        input_ids_buffer.append(outputs)
         generation_length = outputs.shape[1] - prompt_length
         outputs = model(outputs, output_attentions=True)
     
     attention_maps = torch.cat(outputs.attentions, dim=0)
     
-    input_ids_buffer.append(inputs)
     prompt_lengths.append(prompt_length)
     generation_lengths.append(generation_length)
     attention_map_buffer.append(attention_maps.cpu())
     
     del outputs, attention_maps
     torch.cuda.empty_cache()
-
 del model
 torch.cuda.empty_cache()
 
@@ -320,44 +321,41 @@ all_a2sf_raw_scores = []
 all_h2o_small_raw_scores = []
 all_h2o_large_raw_scores = []
 
-h2o_configs = load_configs("llama2", "h2o", args.total_budget)
-a2sf_configs = load_configs("llama2", "a2sf", args.total_budget)
-h2o_small_configs = load_configs("llama2", "h2o_2", args.total_budget)
-h2o_large_configs = load_configs("llama2", "h2o_8", args.total_budget)
+h2o_configs = load_configs("llama2", "h2o", args.total_budget, tokenizer)
+a2sf_configs = load_configs("llama2", "a2sf", args.total_budget, tokenizer)
+h2o_small_configs = load_configs("llama2", "h2o_2", args.total_budget, tokenizer)
+h2o_large_configs = load_configs("llama2", "h2o_8", args.total_budget, tokenizer)
 
 for prompt_idx in tqdm(range(len(prompt_lengths)), desc="Masking attention maps..."):
+    input_ids = input_ids_buffer[prompt_idx]
     prompt_length = prompt_lengths[prompt_idx]
     generation_length = generation_lengths[prompt_idx]
     
     attention_maps = (attention_map_buffer[prompt_idx].to(device))
     
     # 마스크와 점수 계산
-    optimal_map = make_optimal_mask(attention_maps, prompt_length, args.total_budget)
-    h2o_map = make_a2sf_mask(attention_maps, prompt_length, args.total_budget, h2o_configs.compression_ratio, h2o_configs.forgetting_factors)
+    h2o_map = make_a2sf_mask(attention_maps, prompt_length, args.total_budget, h2o_configs.compression_ratio, h2o_configs.forgetting_factors, method="h2o")
     a2sf_map = make_a2sf_mask(attention_maps, prompt_length, args.total_budget, a2sf_configs.compression_ratio, a2sf_configs.forgetting_factors, method="a2sf", input_ids=input_ids_buffer[prompt_idx], punctuation_ids=[tokenizer.encode(".", add_special_tokens=False)[0], tokenizer.encode(" .", add_special_tokens=False)[0]])
-    h2o_small_map = make_a2sf_mask(attention_maps, prompt_length, args.total_budget, h2o_small_configs.compression_ratio, h2o_small_configs.forgetting_factors)
-    h2o_large_map = make_a2sf_mask(attention_maps, prompt_length, args.total_budget, h2o_large_configs.compression_ratio, h2o_large_configs.forgetting_factors)
+    h2o_small_map = make_a2sf_mask(attention_maps, prompt_length, args.total_budget, h2o_small_configs.compression_ratio, h2o_small_configs.forgetting_factors, method="h2o")
+    h2o_large_map = make_a2sf_mask(attention_maps, prompt_length, args.total_budget, h2o_large_configs.compression_ratio, h2o_large_configs.forgetting_factors, method="h2o")
 
     # Ratio scores (binary masks)
-    original_ratio = (attention_maps > 0.0).to(torch.float16)
-    optimal_ratio = (optimal_map > 0.0).to(torch.float16)
-    h2o_ratio = (h2o_map > 0.0).to(torch.float16)
-    a2sf_ratio = (a2sf_map > 0.0).to(torch.float16)
-    h2o_small_ratio = (h2o_small_map > 0.0).to(torch.float16)
-    h2o_large_ratio = (h2o_large_map > 0.0).to(torch.float16)
+    original_ratio = (attention_maps > 0.0).to(torch.bfloat16)
+    h2o_ratio = (h2o_map > 0.0).to(torch.bfloat16)
+    a2sf_ratio = (a2sf_map > 0.0).to(torch.bfloat16)
+    h2o_small_ratio = (h2o_small_map > 0.0).to(torch.bfloat16)
+    h2o_large_ratio = (h2o_large_map > 0.0).to(torch.bfloat16)
 
     # Raw attention scores
-    original_raw = attention_maps.to(torch.float16)
-    optimal_raw = optimal_map.to(torch.float16)
-    h2o_raw = h2o_map.to(torch.float16)
-    a2sf_raw = a2sf_map.to(torch.float16)
-    h2o_small_raw = h2o_small_map.to(torch.float16)
-    h2o_large_raw = h2o_large_map.to(torch.float16)
+    original_raw = attention_maps.to(torch.bfloat16)
+    h2o_raw = h2o_map.to(torch.bfloat16)
+    a2sf_raw = a2sf_map.to(torch.bfloat16)
+    h2o_small_raw = h2o_small_map.to(torch.bfloat16)
+    h2o_large_raw = h2o_large_map.to(torch.bfloat16)
 
     for i in range(prompt_length, prompt_length+generation_length):
         # Calculate ratio scores using proportional grouping
         ratio_scores = proportional_grouping_mean(original_ratio[:,:,i,:], i+1).cpu()
-        optimal_ratio_scores = proportional_grouping_mean(optimal_ratio[:,:,i,:], i+1).cpu()
         h2o_ratio_scores = proportional_grouping_mean(h2o_ratio[:,:,i,:], i+1).cpu()
         a2sf_ratio_scores = proportional_grouping_mean(a2sf_ratio[:,:,i,:], i+1).cpu()
         h2o_small_ratio_scores = proportional_grouping_mean(h2o_small_ratio[:,:,i,:], i+1).cpu()
@@ -365,7 +363,6 @@ for prompt_idx in tqdm(range(len(prompt_lengths)), desc="Masking attention maps.
 
         # Calculate raw attention scores using proportional grouping
         raw_scores = proportional_grouping_sum(original_raw[:,:,i,:], i+1).cpu()
-        optimal_raw_scores = proportional_grouping_sum(optimal_raw[:,:,i,:], i+1).cpu()
         h2o_raw_scores = proportional_grouping_sum(h2o_raw[:,:,i,:], i+1).cpu()
         a2sf_raw_scores = proportional_grouping_sum(a2sf_raw[:,:,i,:], i+1).cpu()
         h2o_small_raw_scores = proportional_grouping_sum(h2o_small_raw[:,:,i,:], i+1).cpu()
@@ -383,11 +380,11 @@ for prompt_idx in tqdm(range(len(prompt_lengths)), desc="Masking attention maps.
         all_h2o_small_raw_scores.append(h2o_small_raw_scores)
         all_h2o_large_raw_scores.append(h2o_large_raw_scores)
 
-    del attention_maps, optimal_map, h2o_map, a2sf_map, h2o_small_map, h2o_large_map
-    del original_ratio, optimal_ratio, h2o_ratio, a2sf_ratio, h2o_small_ratio, h2o_large_ratio
-    del original_raw, optimal_raw, h2o_raw, a2sf_raw, h2o_small_raw, h2o_large_raw
-    del ratio_scores, optimal_ratio_scores, h2o_ratio_scores, a2sf_ratio_scores, h2o_small_ratio_scores, h2o_large_ratio_scores
-    del raw_scores, optimal_raw_scores, h2o_raw_scores, a2sf_raw_scores, h2o_small_raw_scores, h2o_large_raw_scores
+    del attention_maps, h2o_map, a2sf_map, h2o_small_map, h2o_large_map
+    del original_ratio, h2o_ratio, a2sf_ratio, h2o_small_ratio, h2o_large_ratio
+    del original_raw, h2o_raw, a2sf_raw, h2o_small_raw, h2o_large_raw
+    del ratio_scores, h2o_ratio_scores, a2sf_ratio_scores, h2o_small_ratio_scores, h2o_large_ratio_scores
+    del raw_scores, h2o_raw_scores, a2sf_raw_scores, h2o_small_raw_scores, h2o_large_raw_scores
     torch.cuda.empty_cache()
 
 all_original_ratio_scores = torch.stack(all_original_ratio_scores).mean(dim=0) + 1e-5

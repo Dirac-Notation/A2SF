@@ -7,8 +7,9 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from collections import defaultdict
+import datetime
 
-from utils_real_drop import KVLlamaForCausalLM, KVOPTForCausalLM, OptimalLlamaForCausalLM
+from utils_real_drop import KVLlamaForCausalLM, KVOPTForCausalLM, OptimalLlamaForCausalLM, KVQwen2ForCausalLM, Qwen2Tokenizer
 from utils import load_configs
 
 def calculate_lcs_ratio(expected, predicted):
@@ -146,24 +147,17 @@ def create_heatmap(metrics, output_file):
     
     # Add colorbar
     cbar = plt.colorbar(im)
-    cbar.set_label('Accuracy', fontsize=20)
-    cbar.ax.tick_params(labelsize=16)
+    cbar.set_label('Accuracy', fontsize=25)
+    cbar.ax.tick_params(labelsize=20)
     
     # Set axis labels and title
-    plt.xlabel('Context Length (tokens)', fontsize=20)
-    plt.ylabel('Needle Position (%)', fontsize=20)
-    plt.title('Needle-in-Haystack Performance with Budget Settings', fontsize=22, pad=20)
+    plt.xlabel('Context Length (tokens)', fontsize=25)
+    plt.ylabel('Needle Position (%)', fontsize=25)
+    plt.title('Needle-in-Haystack Performance with Budget Settings', fontsize=25, pad=20)
     
     # Set tick labels
-    plt.xticks(np.arange(len(context_lengths)), context_lengths, fontsize=16)
-    plt.yticks(np.arange(len(positions)), positions, fontsize=16)
-    
-    # Add text annotations
-    for i in range(len(positions)):
-        for j in range(len(context_lengths)):
-            if (context_lengths[j], positions[i]) in metrics:
-                text = plt.text(j, i, f"{heatmap_data[i, j]:.2f}", 
-                               ha="center", va="center", color="black", fontsize=16)
+    plt.xticks(np.arange(len(context_lengths)), context_lengths, fontsize=22)
+    plt.yticks(np.arange(len(positions)), positions, fontsize=22)
     
     plt.tight_layout()
     
@@ -174,79 +168,129 @@ def create_heatmap(metrics, output_file):
 def main(args):
     # Load model paths
     model2path = json.load(open("config/model2path.json", "r"))
-    model_path = model2path[args.model]
     
     # Initialize budget and hyperparameter lists
     datasets = args.dataset
     budget_list = args.budget
     methods = args.method
+    models = args.model
 
     # Check and extend list lengths
-    max_len = len(datasets) * len(budget_list) * len(methods)
+    max_len = len(datasets) * len(budget_list) * len(methods) * len(models)
     
-    # Prepare device, model, and tokenizer
-    device = f"cuda:{args.gpu}"
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    # Create directory for saving results
+    os.makedirs("result_json/needle", exist_ok=True)
+    os.makedirs("plots/needle", exist_ok=True)
     
-    # Load appropriate model based on model name
-    if "llama" in args.model.lower():
-        model = (KVLlamaForCausalLM.from_pretrained(model_path).to(torch.bfloat16).to(device))
-    elif "opt" in args.model.lower():
-        model = (KVOPTForCausalLM.from_pretrained(model_path).to(torch.bfloat16).to(device))
-    else:
-        raise ValueError(f"Unsupported model: {args.model}. Only Llama and OPT models are supported.")
-
+    # Dictionary to store all results
+    all_results = {
+        "experiment_info": {
+            "models": models,
+            "datasets": datasets,
+            "budgets": budget_list,
+            "methods": methods
+        },
+        "results": {}
+    }
+    
     cur_idx = 0
-    for dataset in datasets:
-        dataset_name = os.path.basename(dataset).split('.')[0]
+    for model_name in models:
+        model_path = model2path[model_name]
         
-        # Load dataset
-        dataset = load_dataset(dataset)
+        # Prepare device, model, and tokenizer
+        device = f"cuda:{args.gpu}"
+        
+        # Load appropriate model based on model name
+        if "llama" in model_name.lower():
+            model = (KVLlamaForCausalLM.from_pretrained(model_path).to(torch.bfloat16).to(device))
+            tokenizer = AutoTokenizer.from_pretrained(model_path)
+        elif "opt" in model_name.lower():
+            model = (KVOPTForCausalLM.from_pretrained(model_path).to(torch.bfloat16).to(device))
+            tokenizer = AutoTokenizer.from_pretrained(model_path)
+        elif "qwen" in model_name.lower():
+            model = (KVQwen2ForCausalLM.from_pretrained(model_path).to(torch.bfloat16).to(device))
+            tokenizer = Qwen2Tokenizer.from_pretrained(model_path)
+        else:
+            raise ValueError(f"Unsupported model: {model_name}. Only Llama, OPT, and Qwen2 models are supported.")
 
-        # Nested loops: budget → method
-        for cur_budget in budget_list:
-            for cur_method in methods:
-                cur_idx += 1
-                config = load_configs(args.model, cur_method, cur_budget)
+        for dataset in datasets:
+            dataset_name = os.path.basename(dataset).split('.')[0]
+            
+            # Load dataset
+            dataset = load_dataset(dataset)
 
-                # Evaluate with current configuration
-                results = evaluate_model(
-                    model=model,
-                    tokenizer=tokenizer,
-                    dataset=dataset,
-                    device=device,
-                    method=cur_method,
-                    init_cache_fn=model.init_cache,
-                    cache_params=config
-                )
+            # Nested loops: budget → method
+            for cur_budget in budget_list:
+                for cur_method in methods:
+                    cur_idx += 1
+                    config = load_configs(model_name, cur_method, cur_budget, tokenizer)
 
-                # Calculate metrics
-                metrics = calculate_metrics(results)
-                
-                # Create heatmap
-                if cur_method == "full":
-                    output_file = f"plots/needle/needle_heatmap_full.png"
-                else:
-                    output_file = f"plots/needle/needle_heatmap_{cur_method}_budget{cur_budget}.png"
-                os.makedirs("plots/needle", exist_ok=True)
-                create_heatmap(metrics, output_file)
-                
-                # Print summary
-                print(f"\nConfig {cur_idx}/{max_len} | dataset={dataset_name}, method={cur_method}, budget={cur_budget}")
-                print("Position | Accuracy | Correct/Total")
-                print("-" * 40)
-                for position in sorted(set(k[1] for k in metrics.keys())):
-                    # Calculate average accuracy across all context lengths for this position
-                    position_samples = [(k[0], v) for k, v in metrics.items() if k[1] == position]
-                    total_correct = sum(sample[1]["correct_count"] for sample in position_samples)
-                    total_samples = sum(sample[1]["total_count"] for sample in position_samples)
-                    avg_accuracy = total_correct / total_samples if total_samples > 0 else 0
-                    print(f"{position:3.2f} | {avg_accuracy:.2%} | {total_correct}/{total_samples}")
+                    # Evaluate with current configuration
+                    results = evaluate_model(
+                        model=model,
+                        tokenizer=tokenizer,
+                        dataset=dataset,
+                        device=device,
+                        method=cur_method,
+                        init_cache_fn=model.init_cache,
+                        cache_params=config
+                    )
+
+                    # Calculate metrics
+                    metrics = calculate_metrics(results)
+                    
+                    # Create heatmap
+                    if cur_method == "full":
+                        output_file = f"plots/needle/needle_heatmap_{model_name}_full.png"
+                    else:
+                        output_file = f"plots/needle/needle_heatmap_{model_name}_{cur_method}_budget{cur_budget}.png"
+                    
+                    create_heatmap(metrics, output_file)
+                    
+                    # Store results in the dictionary
+                    result_key = f"{model_name}_{dataset_name}_{cur_method}_{cur_budget}"
+                    all_results["results"][result_key] = {
+                        "model": model_name,
+                        "dataset": dataset_name,
+                        "method": cur_method,
+                        "budget": cur_budget,
+                        "metrics": {
+                            str(position): {
+                                "accuracy": metrics[(length, position)]["accuracy"],
+                                "correct_count": metrics[(length, position)]["correct_count"],
+                                "total_count": metrics[(length, position)]["total_count"]
+                            }
+                            for length, position in metrics.keys()
+                        }
+                    }
+                    
+                    # Print summary
+                    print(f"\nConfig {cur_idx}/{max_len} | model={model_name}, dataset={dataset_name}, method={cur_method}, budget={cur_budget}")
+                    print("Position | Accuracy | Correct/Total")
+                    print("-" * 40)
+                    for position in sorted(set(k[1] for k in metrics.keys())):
+                        # Calculate average accuracy across all context lengths for this position
+                        position_samples = [(k[0], v) for k, v in metrics.items() if k[1] == position]
+                        total_correct = sum(sample[1]["correct_count"] for sample in position_samples)
+                        total_samples = sum(sample[1]["total_count"] for sample in position_samples)
+                        avg_accuracy = total_correct / total_samples if total_samples > 0 else 0
+                        print(f"{position:3.2f} | {avg_accuracy:.2%} | {total_correct}/{total_samples}")
+        
+        # Clear GPU memory after processing each model
+        del model
+        torch.cuda.empty_cache()
+    
+    # Save all results to a JSON file
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    result_file = f"result_json/needle/needle_results_{timestamp}.json"
+    with open(result_file, 'w', encoding='utf-8') as f:
+        json.dump(all_results, f, indent=2, ensure_ascii=False)
+    print(f"\nAll results saved to {result_file}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate Llama predictions with various budgets on needle-in-haystack task.")
     parser.add_argument("--gpu", type=int, default=0)
-    parser.add_argument("--model", type=str, default="llama2", choices=["llama", "llama2", "llama3", "opt"])
+    parser.add_argument("--model", type=str, nargs='+', default=["llama2"], choices=["llama", "llama2", "llama3", "qwen2"])
     parser.add_argument("--dataset", type=str, nargs='+', default=["datasets/needle_dataset.jsonl"])
     parser.add_argument("--budget", type=int, nargs='+', default=[100])
     parser.add_argument("--method", type=str, nargs='+', default=["h2o"])
