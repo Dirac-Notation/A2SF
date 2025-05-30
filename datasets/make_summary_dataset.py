@@ -37,7 +37,7 @@ if args.use_model:
         return response
 
 SYSTEM_PROMPT = 'You are a helpful assistant that can summarize the text.\n\n'
-USER_PROMPT_TEMPLATE = '<text>\n{article}\n</text>\n\nSummarize the above article briefly.'
+USER_PROMPT_TEMPLATE = '<text>\n{article}\n</text>\n\nSummarize the key points from the text above. Provide a direct response.'
 
 dataset_obj = (load_dataset(args.dataset, "2.0.0") if args.dataset == "abisee/cnn_dailymail" else load_dataset(args.dataset))
 dataset = dataset_obj['test']
