@@ -12,6 +12,7 @@ import datetime
 from utils_real_drop import KVLlamaForCausalLM, KVOPTForCausalLM, OptimalLlamaForCausalLM, KVQwen2ForCausalLM, Qwen2Tokenizer
 from utils import load_configs
 
+
 def calculate_lcs_ratio(expected, predicted):
     """Calculate the ratio of longest common subsequence length to expected answer length."""
     if not expected or not predicted:
