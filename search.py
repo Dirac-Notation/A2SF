@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch.nn.functional as F
 import json
+import random
 
 from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -16,18 +17,20 @@ from utils_real_drop import Qwen2Tokenizer, Qwen2ForCausalLM
 
 from utils import get_prompt
 
-def make_a2sf_mask(attention_maps, prompt_length, input_ids, total_budget, compression_ratio, forgetting_factor, puntuation_ids):
-    a2sf_maps = attention_maps.clone()
+seed=42
+random.seed(seed)
+np.random.seed(seed)
+torch.manual_seed(seed)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+def make_sentence_exp(input_ids, puntuation_ids):
+    orig_shape = input_ids.shape
     
-    recent = compression_ratio
-    
-    recent_budget = round(recent * total_budget)
-    select_budget = round((1-recent) * total_budget)
-    
-    prompt_ids = input_ids[:, :PROMPT_LENGTH]
-    orig_shape = prompt_ids.shape
-    
-    flattened_input_ids = prompt_ids.view(-1)
+    flattened_input_ids = input_ids.view(-1)
     num_all = flattened_input_ids.size(0)
     
     pos = torch.isin(flattened_input_ids, torch.tensor(puntuation_ids, device=input_ids.device)).nonzero(as_tuple=True)[0].tolist()
@@ -35,57 +38,115 @@ def make_a2sf_mask(attention_maps, prompt_length, input_ids, total_budget, compr
     
     starts = [0] + [p + 1 for p in pos]
     ends   = pos + [num_all - 1]
-
+    
     exponents = torch.empty_like(flattened_input_ids)
     for i, (s, e) in enumerate(zip(starts, ends)):
         exponents[s : e + 1] = num_t - i
     exponents = exponents.view(orig_shape[0], 1, orig_shape[1])
-
-    forgetting = (forgetting_factor**exponents).view(1,1,-1,1)
-
-    scores = (a2sf_maps[:,:,:prompt_length,:] * forgetting).sum(dim=2, keepdim=True)
     
-    for i in range(attention_maps.size(2)-prompt_length-1):
+    return exponents
+
+def make_layerwise_a2sf_mask(attention_maps, prompt_length, input_ids, total_budget, budget_ratio, a2sf_factor, sentence_exp, puntuation_ids):
+    a2sf_maps = attention_maps.clone()
+    
+    layer_cache_budget = int(total_budget * budget_ratio)
+    layer_recent_budget = round(layer_cache_budget * 0.5)
+    layer_select_budget = round(layer_cache_budget * 0.5)
+    
+    forgetting = (a2sf_factor**sentence_exp).view(1,-1,1)
+    layer_scores = (a2sf_maps[:,:prompt_length,:] * forgetting).sum(dim=1, keepdim=True)
+    
+    for i in range(attention_maps.size(2)-prompt_length):
         current_pos = prompt_length + i
-        window_start = current_pos - recent_budget
+        window_start = current_pos - layer_recent_budget
+        selected_scores = layer_scores[:,:,:window_start].topk(k=layer_select_budget, dim=2).indices
         
-        selected_scores = scores[:,:,:,:window_start].topk(k=select_budget, dim=3).indices
+        mask = torch.zeros_like(layer_scores, device=attention_maps.device)
+        mask[:,:,window_start:] = 1
+        mask.scatter_(2, selected_scores, 1)
         
-        mask = torch.zeros_like(scores, device=attention_maps.device)
-        mask[:,:,:,window_start:] = 1
-        mask.scatter_(3, selected_scores, 1)
+        a2sf_maps[:,current_pos:,:] = a2sf_maps[:,current_pos:,:] * mask
+        divider = a2sf_maps[:,current_pos,:].sum(dim=1, keepdim=True)
+        a2sf_maps[:,current_pos,:] = a2sf_maps[:,current_pos,:] / divider
         
-        a2sf_maps[:,:,current_pos+1:,:] = a2sf_maps[:,:,current_pos+1:,:] * mask
-        divider = a2sf_maps[:,:,current_pos+1,:].sum(dim=2, keepdim=True)
-        a2sf_maps[:,:,current_pos+1,:] = a2sf_maps[:,:,current_pos+1,:] / divider
-        
-        scores = scores * mask
-        scores = scores + a2sf_maps[:,:,current_pos+1,:].unsqueeze(2)
+        layer_scores = layer_scores * mask
+        layer_scores = layer_scores + a2sf_maps[:,current_pos,:].unsqueeze(1)
         
         if input_ids[0,current_pos].item() in puntuation_ids:
-            scores *= forgetting_factor
+            layer_scores *= a2sf_factor
             
     return a2sf_maps
 
-def process_model(model_name, device, prompt_length, generation_length, total_budget, num_prompts):
-    print(f"\nProcessing model: {model_name}")
-    
-    # Load model and tokenizer
-    model2path = json.load(open("config/model2path.json", "r"))
-    model_path = model2path[model_name]
-    
+def load_model_and_tokenizer(model_name, model_path, device):
+    """Load model and tokenizer based on model name."""
     if "qwen" in model_name.lower():
         tokenizer = Qwen2Tokenizer.from_pretrained(model_path)
         model = Qwen2ForCausalLM.from_pretrained(model_path).to(torch.float16).to(device)
     else:
         tokenizer = AutoTokenizer.from_pretrained(model_path)
         model = AutoModelForCausalLM.from_pretrained(model_path).to(torch.float16).to(device)
+    return model, tokenizer
 
-    punctuation_ids = [
+def get_punctuation_ids(tokenizer):
+    """Get punctuation token IDs from tokenizer."""
+    return [
         tokenizer.encode(".", add_special_tokens=False)[0],
         tokenizer.encode(" .", add_special_tokens=False)[0],
     ]
 
+def process_single_prompt(model, tokenizer, prompt, prompt_length, generation_length, model_name, puntuation_ids, device):
+    """Process a single prompt and return attention maps and values."""
+    with torch.inference_mode():
+        if "llama" in model_name.lower():
+            prompt = f"[INST]{prompt}[/INST]"
+        
+        input_ids = tokenizer(prompt, return_tensors="pt").input_ids
+        input_ids = torch.cat([input_ids[:, :prompt_length//2], input_ids[:, -prompt_length//2:]], dim=1).to(device)
+        
+        sentence_exp = make_sentence_exp(input_ids, puntuation_ids)
+        
+        outputs = model(input_ids, use_cache=True)
+        next_token_logits = outputs.logits[:, -1, :]
+        past_key_values = outputs.past_key_values
+        
+        for _ in range(generation_length):
+            next_token_scores = next_token_logits
+            next_tokens = torch.argmax(next_token_scores, dim=-1)
+            input_ids = torch.cat([input_ids, next_tokens.unsqueeze(-1)], dim=1)
+            
+            outputs = model(next_tokens.unsqueeze(-1), past_key_values=past_key_values, use_cache=True)
+            next_token_logits = outputs.logits[:, -1, :]
+            past_key_values = outputs.past_key_values
+
+        outputs = model(input_ids, output_attentions=True)
+
+        num_heads = model.config.num_attention_heads
+        num_groups = model.config.num_key_value_heads if hasattr(model.config, 'num_key_value_heads') else num_heads
+        
+        attn_shape = outputs.attentions[0].shape
+        
+        input_ids = input_ids.cpu()
+        attention_maps = torch.cat(outputs.attentions, dim=0).view(-1, num_groups, num_heads // num_groups, *attn_shape[2:]).mean(dim=2).cpu()
+        values = torch.cat([past_key_values[i][1] for i in range(num_heads)], dim=0).cpu()
+        sentence_exp = sentence_exp.cpu()
+
+        return attention_maps, values, input_ids, sentence_exp
+
+def process_model(model_name, device, args):
+    prompt_length = args.prompt_length
+    generation_length = args.generation_length
+    total_budget = args.total_budget
+    num_prompts = args.num_prompts
+    
+    print(f"\nProcessing model: {model_name}")
+    
+    # Load model and tokenizer
+    model2path = json.load(open("config/model2path.json", "r"))
+    model_path = model2path[model_name]
+    
+    model, tokenizer = load_model_and_tokenizer(model_name, model_path, device)
+    puntuation_ids = get_punctuation_ids(tokenizer)
+    
     # Get model configuration
     num_heads = model.config.num_attention_heads
     num_groups = model.config.num_key_value_heads if hasattr(model.config, 'num_key_value_heads') else num_heads
@@ -95,91 +156,93 @@ def process_model(model_name, device, prompt_length, generation_length, total_bu
     # Process prompts
     attention_map_buffer = []
     values_buffer = []
+    input_ids_buffer = []
+    sentence_exp_buffer = []
     
-    for prompt_idx in range(num_prompts):
+    for prompt_idx in tqdm(range(num_prompts), desc="Processing prompts"):
         prompt = get_prompt(prompt_idx)
-        with torch.inference_mode():
-            if "llama" in model_name.lower():
-                prompt = f"[INST]{prompt}[/INST]"
-            
-            input_ids = tokenizer(prompt, return_tensors="pt").input_ids
-            input_ids = torch.cat([input_ids[:, :prompt_length//2], input_ids[:, -prompt_length//2:]], dim=1).to(device)
-            
-            outputs = model(input_ids, use_cache=True)
-            next_token_logits = outputs.logits[:, -1, :]
-            past_key_values = outputs.past_key_values
-            
-            for i in tqdm(range(generation_length), desc="Token generation"):
-                next_token_scores = next_token_logits
-                next_tokens = torch.argmax(next_token_scores, dim=-1)
-                input_ids = torch.cat([input_ids, next_tokens.unsqueeze(-1)], dim=1)
-                
-                outputs = model(next_tokens.unsqueeze(-1), past_key_values=past_key_values, use_cache=True)
-                next_token_logits = outputs.logits[:, -1, :]
-                past_key_values = outputs.past_key_values
-
-            outputs = model(input_ids, output_attentions=True)
-
-            attn_shape = outputs.attentions[0].shape
-            attention_maps = torch.cat(outputs.attentions, dim=0).view(-1, num_groups, num_heads // num_groups, *attn_shape[2:]).mean(dim=2).cpu()
-            past_key_values = outputs.past_key_values
-            
-            attention_map_buffer.append(attention_maps)
-            values_buffer.append(torch.cat([past_key_values[i][1] for i in range(num_heads)], dim=0).cpu())
-
-            del outputs, next_token_logits, past_key_values
-            torch.cuda.empty_cache()
+        attention_maps, values, input_ids, sentence_exp = process_single_prompt(model, tokenizer, prompt, prompt_length, generation_length, model_name, puntuation_ids, device)
+        
+        attention_map_buffer.append(attention_maps)
+        values_buffer.append(values)
+        input_ids_buffer.append(input_ids)
+        sentence_exp_buffer.append(sentence_exp)
+        
+        torch.cuda.empty_cache()
     
     del model, tokenizer
     torch.cuda.empty_cache()
     
     # Search space
-    ratio_step = 0.05
     factor_step = 0.01
-    # compression_ratio = [ratio_step*i for i in range(1, int(1/ratio_step))]
     a2sf_factors = [factor_step*i for i in range(int(1/factor_step)+1)]
     
-    # Fixed
-    compression_ratio = [0.5 for i in range(32)]
-    # a2sf_factors = [1.00 for i in range(32)]
+    layerwise_a2sf_factors = [1.0 for i in range(32)]
+    layerwise_budget_ratio = [1.0 for i in range(32)]
     
-    conditions = []
-    for ratio in compression_ratio:
-        for a2sf_factor in a2sf_factors:
-            conditions.append((ratio, a2sf_factor))
-    
-    conditions_results = [0 for _ in range(len(conditions))]
-    
-    for prompt_idx in range(num_prompts):
+    for prompt_idx in tqdm(range(num_prompts)):
         attention_maps = attention_map_buffer[prompt_idx].to(device)
         values = values_buffer[prompt_idx].to(device)
-        
+        input_ids = input_ids_buffer[prompt_idx].to(device)
+        sentence_exp = sentence_exp_buffer[prompt_idx].to(device)
+    
         original_output = torch.matmul(attention_maps[:,:,prompt_length:,:], values)
         original_output = original_output.transpose(1, 2).contiguous()
-        original_output = original_output.reshape(original_output.size(0), -1, original_output.size(3))
+        original_output = original_output.reshape(original_output.size(0), original_output.size(1), -1)
         
-        for cond_idx, condition in enumerate(tqdm(conditions, desc=f"Processing conditions")):
-            compression_ratio = condition[0]
-            forgetting_factors = condition[1]
+        if args.factor_search:
+            a2sf_results = [0.0 for _ in range(len(a2sf_factors))]                     
+            for layer_idx in tqdm(range(attention_maps.size(0))):
+                layer_ratio = layerwise_budget_ratio[layer_idx]
+
+                for a2sf_factor_idx, a2sf_factor in enumerate(a2sf_factors):
+                    condition_maps = make_layerwise_a2sf_mask(attention_maps[layer_idx], prompt_length, input_ids, total_budget, layer_ratio, a2sf_factor, sentence_exp, puntuation_ids)
+                    condition_output = torch.matmul(condition_maps[:,prompt_length:,:], values[layer_idx])
+                    condition_output = condition_output.transpose(0, 1).contiguous()
+                    condition_output = condition_output.reshape(condition_output.size(0), -1)
+                    a2sf_results[a2sf_factor_idx] += F.cosine_similarity(original_output[layer_idx], condition_output, dim=1).mean(dim=0).item()
+                
+                max_idx = a2sf_results.index(max(a2sf_results))
+                layerwise_a2sf_factors[layer_idx] = a2sf_factors[max_idx]
+        
+        if args.ratio_search:
+            condition_maps = []
+            for layer_idx in range(attention_maps.size(0)):
+                layer_a2sf_factor = layerwise_a2sf_factors[layer_idx]
+                layer_ratio = layerwise_budget_ratio[layer_idx]
+                
+                condition_maps.append(
+                    make_layerwise_a2sf_mask(attention_maps[layer_idx], prompt_length, input_ids, total_budget, layer_ratio, layer_a2sf_factor, sentence_exp, puntuation_ids)
+                )
             
-            condition_maps = make_a2sf_mask(attention_maps, prompt_length, input_ids, total_budget, compression_ratio, forgetting_factors, punctuation_ids)
+            condition_maps = torch.stack(condition_maps, dim=0)
             condition_output = torch.matmul(condition_maps[:,:,prompt_length:,:], values)
             condition_output = condition_output.transpose(1, 2).contiguous()
-            condition_output = condition_output.reshape(condition_output.size(0), -1, condition_output.size(3))
-            conditions_results[cond_idx] += F.cosine_similarity(original_output, condition_output, dim=2).mean(dim=1)
-    
-    conditions_results = torch.stack(conditions_results)
-    selected = conditions_results.max(dim=0).indices
-    selected_conditions = [conditions[i] for i in selected]
-    
-    budgets = [round(selected_conditions[i][0], 2) for i in range(len(selected_conditions))]
-    a2sf_factors = [round(selected_conditions[i][1], 2) for i in range(len(selected_conditions))]
+            condition_output = condition_output.reshape(condition_output.size(0), condition_output.size(1), -1)
+            sim_score = F.cosine_similarity(original_output, condition_output, dim=2).mean(dim=1)
+            
+            for _ in tqdm(range(100)):
+                min_idx = sim_score.argmin()
+                max_idx = sim_score.argmax()
+                
+                layerwise_budget_ratio[min_idx] += 0.01
+                layerwise_budget_ratio[max_idx] -= 0.01
+                
+                condition_maps[min_idx] = make_layerwise_a2sf_mask(attention_maps[min_idx], prompt_length, input_ids, total_budget, layerwise_budget_ratio[min_idx], layerwise_a2sf_factors[min_idx], sentence_exp, puntuation_ids)
+                condition_maps[max_idx] = make_layerwise_a2sf_mask(attention_maps[max_idx], prompt_length, input_ids, total_budget, layerwise_budget_ratio[max_idx], layerwise_a2sf_factors[max_idx], sentence_exp, puntuation_ids)
+                
+                condition_output = torch.matmul(condition_maps[:,:,prompt_length:,:], values)
+                condition_output = condition_output.transpose(1, 2).contiguous()
+                condition_output = condition_output.reshape(condition_output.size(0), condition_output.size(1), -1)
+                sim_score = F.cosine_similarity(original_output, condition_output, dim=2).mean(dim=1)
+
+        layerwise_a2sf_factors = [round(factor, 2) for factor in layerwise_a2sf_factors]
+        layerwise_budget_ratio = [round(ratio, 2) for ratio in layerwise_budget_ratio]
     
     return {
         "model": model_name,
-        "compression_method": "a2sf",
-        "compression_ratio": budgets,
-        "forgetting_factors": a2sf_factors
+        "layerwise_ratio": layerwise_budget_ratio,
+        "forgetting_factors": layerwise_a2sf_factors
     }
 
 def save_config(results, output_file="config/config.jsonl"):
@@ -198,10 +261,7 @@ def main(args):
         result = process_model(
             model_name=model_name,
             device=device,
-            prompt_length=args.prompt_length,
-            generation_length=args.generation_length,
-            total_budget=args.total_budget,
-            num_prompts=args.num_prompts
+            args=args,
         )
         results.append(result)
         
@@ -210,9 +270,10 @@ def main(args):
         print("=" * 50)
         print(f"Model: {model_name}")
         print(f"Total Budget: {args.total_budget}")
-        print(f"Compression Method: {result['compression_method']}")
-        print(f"Compression Ratios: {result['compression_ratio']}")
-        print(f"Forgetting Factors: {result['forgetting_factors']}")
+        print(f'''
+\"layerwise_ratio\": {result['layerwise_ratio']},
+\"forgetting_factors\": {result['forgetting_factors']}
+''')
         print("-" * 50)
     
     # Save all results to config file
@@ -224,14 +285,10 @@ if __name__ == "__main__":
     parser.add_argument("--models", type=str, nargs='+', default=["llama2"], choices=["llama", "llama2", "llama3", "opt", "qwen2"])
     parser.add_argument("--prompt_length", type=int, default=950)
     parser.add_argument("--generation_length", type=int, default=50)
-    parser.add_argument("--total_budget", type=int, default=200)
     parser.add_argument("--num_prompts", type=int, default=5)
+    parser.add_argument("--total_budget", type=int, default=100)
+    parser.add_argument("--ratio_search", action="store_true", default=False)
+    parser.add_argument("--factor_search", action="store_true", default=False)
     args = parser.parse_args()
-    
-    # Set global variables
-    PROMPT_LENGTH = args.prompt_length
-    GENERATION_LENGTH = args.generation_length
-    TOTAL_BUDGET = args.total_budget
-    NUM_PROMPTS = args.num_prompts
     
     main(args)

@@ -17,8 +17,8 @@ class A2SFKVCache():
         
         if self.use_compression:
             self.compression_method = compression_config.compression_method
-            self.total_budget = compression_config.total_budget
-            self.recent_budget = round(compression_config.compression_ratio[layer_idx] * self.total_budget)
+            self.total_budget = max(round(compression_config.total_budget * compression_config.layerwise_ratio[layer_idx]), 2)
+            self.recent_budget = round(self.total_budget * 0.5)
             self.select_budget = self.total_budget - self.recent_budget
             self.forgetting_factor = compression_config.forgetting_factors[layer_idx] if compression_config.forgetting_factors is not None else None
             if compression_config.streaming_budget is not None:
