@@ -1,5 +1,7 @@
 import torch
 import json
+import random
+import numpy as np
 
 from datasets import load_dataset
 from dataclasses import dataclass
@@ -10,7 +12,7 @@ class CompressionConfig:
     compression_method: str = None
     total_budget: int = None
     streaming_budget: int = None
-    compression_ratio: list = None
+    layerwise_ratio: list = None
     forgetting_factors: list = None
     punctuation_ids: list = None
 
@@ -20,80 +22,25 @@ def load_configs(model_name, method, total_budget, tokenizer=None):
             "compression_method": "streamingLLM", "compression_ratio": [1.0 for _ in range(32)], "streaming_budget": 10
         },
         "h2o": {
-            "compression_method": "h2o", "compression_ratio": [0.5 for _ in range(32)]
-        },
-        "h2o_1": {
-            "compression_method": "h2o", "compression_ratio": [0.1 for _ in range(32)]
-        },
-        "h2o_2": {
-            "compression_method": "h2o", "compression_ratio": [0.2 for _ in range(32)]
-        },
-        "h2o_3": {
-            "compression_method": "h2o", "compression_ratio": [0.3 for _ in range(32)]
-        },
-        "h2o_4": {
-            "compression_method": "h2o", "compression_ratio": [0.4 for _ in range(32)]
-        },
-        "h2o_5": {
-            "compression_method": "h2o", "compression_ratio": [0.5 for _ in range(32)]
-        },
-        "h2o_6": {
-            "compression_method": "h2o", "compression_ratio": [0.6 for _ in range(32)]
-        },
-        "h2o_7": {
-            "compression_method": "h2o", "compression_ratio": [0.7 for _ in range(32)]
-        },
-        "h2o_8": {
-            "compression_method": "h2o", "compression_ratio": [0.8 for _ in range(32)]
-        },
-        "h2o_9": {
-            "compression_method": "h2o", "compression_ratio": [0.9 for _ in range(32)]
+            "compression_method": "h2o",
+            "layerwise_ratio" : [1.0 for _ in range(32)],
+            "forgetting_factors": [1.0 for _ in range(32)]
         },
         "llama2": {
             "compression_method": "a2sf",
-            "compression_ratio" : [0.95, 0.8, 0.05, 0.05, 0.05, 0.25, 0.15, 0.1, 0.1, 0.15, 0.15, 0.15, 0.1, 0.15, 0.15, 0.2, 0.15, 0.15, 0.1, 0.1, 0.1, 0.15, 0.15, 0.1, 0.15, 0.15, 0.1, 0.05, 0.2, 0.15, 0.1, 0.1],
-            "forgetting_factors": [0.0, 0.01, 0.01, 0.01, 0.01, 0.92, 0.96, 0.95, 0.94, 0.92, 0.9, 0.95, 0.95, 0.95, 0.98, 1.0, 1.0, 0.99, 1.0, 1.0, 1.0, 0.99, 0.95, 0.92, 0.94, 0.86, 0.91, 0.01, 0.88, 0.93, 0.86, 0.01]
-        },
-        "llama3": {
-            "compression_method": "a2sf",
-            "compression_ratio" : [0.95, 0.05, 0.1, 0.1, 0.1, 0.1, 0.05, 0.15, 0.1, 0.1, 0.2, 0.1, 0.05, 0.05, 0.05, 0.05, 0.05, 0.1, 0.05, 0.1, 0.1, 0.05, 0.1, 0.05, 0.05, 0.05, 0.05, 0.1, 0.1, 0.1, 0.05, 0.05],
-            "forgetting_factors": [0.0, 0.01, 0.71, 0.7, 0.8, 0.7, 0.74, 0.83, 0.82, 0.78, 0.91, 0.8, 0.01, 0.81, 0.79, 0.86, 0.83, 0.83, 0.78, 0.75, 0.81, 0.12, 0.73, 0.74, 0.77, 0.01, 0.88, 0.72, 0.85, 0.11, 0.84, 0.86]
-        },
-        "qwen2": {
-            "compression_method": "a2sf",
-            "compression_ratio" : [0.05, 0.1, 0.25, 0.05, 0.15, 0.1, 0.05, 0.3, 0.15, 0.2, 0.25, 0.15, 0.05, 0.25, 0.1, 0.05, 0.1, 0.15, 0.1, 0.15, 0.1, 0.1, 0.2, 0.15, 0.1, 0.1, 0.05, 0.1],
-            "forgetting_factors": [0.01, 0.66, 0.64, 0.01, 0.01, 0.87, 0.01, 0.99, 0.0, 0.95, 0.97, 0.93, 0.01, 0.96, 0.93, 0.86, 1.0, 0.98, 0.9, 0.97, 0.95, 0.97, 1.0, 0.97, 0.94, 0.97, 0.92, 0.95]
-        },
-        "llama2_ratio_fixed": {
-            "compression_method": "a2sf",
-            "compression_ratio" : [0.5 for i in range(32)],
-            "forgetting_factors": [0.0, 0.01, 0.01, 0.01, 0.01, 0.01, 0.98, 0.98, 0.96, 0.94, 0.95, 0.99, 0.98, 1.0, 1.0, 1.0, 0.99, 0.96, 1.0, 0.99, 0.95, 0.97, 0.93, 0.9, 0.97, 0.89, 0.96, 0.01, 0.01, 0.91, 0.87, 0.83]
+            "layerwise_ratio": [1.67, 1.53, 1.0, 1.07, 0.43, 0.55, 1.59, 1.41, 2.07, 1.0, 1.0, 2.39, 1.0, 1.0, 1.27, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.5, 1.0, 1.0, 0.52, 0.14, 0.3, 0.79, 0.27, 0.5],
+            "forgetting_factors": [0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
         },
         "llama2_factor_fixed": {
             "compression_method": "a2sf",
-            "compression_ratio" : [0.95, 0.8, 0.4, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.2, 0.15, 0.15, 0.1, 0.1, 0.1, 0.15, 0.15, 0.15, 0.15, 0.15, 0.1, 0.1, 0.25, 0.15, 0.15, 0.2],
-            "forgetting_factors": [1.0 for i in range(32)]
+            "layerwise_ratio": [1.91, 1.51, 1.0, 1.07, 0.43, 0.55, 1.51, 1.41, 2.07, 1.0, 1.0, 2.25, 1.0, 1.0, 1.27, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.5, 1.0, 1.0, 0.52, 0.14, 0.3, 0.79, 0.27, 0.5],
+            "forgetting_factors": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
         },
-        "llama3_ratio_fixed": {
+        "llama2_ratio_fixed": {
             "compression_method": "a2sf",
-            "compression_ratio" : [0.5 for i in range(32)],
-            "forgetting_factors": [0.0, 0.0, 0.76, 0.78, 0.8, 0.77, 0.8, 0.66, 0.82, 0.79, 0.84, 0.78, 0.01, 0.83, 0.87, 0.87, 0.87, 0.87, 0.79, 0.81, 0.83, 0.8, 0.76, 0.48, 0.81, 0.72, 0.84, 0.84, 0.77, 0.01, 0.87, 0.9]
-        },
-        "llama3_factor_fixed": {
-            "compression_method": "a2sf",
-            "compression_ratio" : [0.95, 0.45, 0.95, 0.25, 0.2, 0.65, 0.25, 0.25, 0.2, 0.25, 0.25, 0.5, 0.25, 0.1, 0.2, 0.2, 0.15, 0.25, 0.2, 0.15, 0.25, 0.15, 0.1, 0.15, 0.15, 0.1, 0.1, 0.25, 0.25, 0.15, 0.15, 0.15],
-            "forgetting_factors": [1.0 for i in range(32)]
-        },
-        "qwen2_ratio_fixed": {
-            "compression_method": "a2sf",
-            "compression_ratio" : [0.5 for i in range(32)],
-            "forgetting_factors": [0.0, 0.0, 0.76, 0.78, 0.8, 0.77, 0.8, 0.66, 0.82, 0.79, 0.84, 0.78, 0.01, 0.83, 0.87, 0.87, 0.87, 0.87, 0.79, 0.81, 0.83, 0.8, 0.76, 0.48, 0.81, 0.72, 0.84, 0.84, 0.77, 0.01, 0.87, 0.9]
-        },
-        "qwen2_factor_fixed": {
-            "compression_method": "a2sf",
-            "compression_ratio" : [0.15, 0.75, 0.85, 0.15, 0.15, 0.15, 0.2, 0.4, 0.15, 0.25, 0.2, 0.15, 0.2, 0.3, 0.15, 0.15, 0.1, 0.15, 0.1, 0.1, 0.1, 0.1, 0.2, 0.05, 0.1, 0.15, 0.2, 0.1],
-            "forgetting_factors": [1.0 for i in range(32)]
-        },
+            "layerwise_ratio": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            "forgetting_factors": [0.0, 0.01, 0.01, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+        }
     }
 
     punctuation_ids = None
@@ -117,7 +64,7 @@ def load_configs(model_name, method, total_budget, tokenizer=None):
             use_compression=True,
             compression_method=data_point["compression_method"],
             total_budget=total_budget,
-            compression_ratio=data_point["compression_ratio"],
+            layerwise_ratio=data_point["layerwise_ratio"],
             forgetting_factors=data_point["forgetting_factors"],
             punctuation_ids=punctuation_ids
         )
@@ -126,14 +73,15 @@ def load_configs(model_name, method, total_budget, tokenizer=None):
             use_compression=True,
             compression_method=data_point["compression_method"],
             total_budget=total_budget,
-            compression_ratio=data_point["compression_ratio"]
+            layerwise_ratio=data_point["layerwise_ratio"],
+            forgetting_factors=data_point["forgetting_factors"]
         )
     elif "streamingLLM" in method:
         config = CompressionConfig(
             use_compression=True,
             compression_method=data_point["compression_method"],
             total_budget=total_budget,
-            compression_ratio=data_point["compression_ratio"],
+            layerwise_ratio=data_point["compression_ratio"],
             streaming_budget=data_point["streaming_budget"]
         )
     elif method == "full":
