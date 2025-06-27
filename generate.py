@@ -19,6 +19,7 @@ args = parser.parse_args()
 # assign CLI args
 device = f"cuda:{args.gpu}"
 
+
 # Hardcoded model name and example prompt (>200 tokens)
 model_name = "meta-llama/Llama-2-7b-chat-hf"
 prompt = get_prompt()
