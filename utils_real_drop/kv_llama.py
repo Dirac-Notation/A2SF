@@ -236,7 +236,8 @@ class LlamaModel(LlamaPreTrainedModel):
                 forget = input_ids.item() in self.punctuation_ids
 
         for layer in self.layers:
-            layer.self_attn.past_key_value.set_forget(forget, exponents)
+            device = layer.self_attn.q_proj.weight.device
+            layer.self_attn.past_key_value.set_forget(forget, exponents.to(device) if exponents is not None else None)
 
     def get_input_embeddings(self):
         return self.embed_tokens
