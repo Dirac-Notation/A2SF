@@ -70,8 +70,20 @@ def seed_everything(seed):
     torch.cuda.manual_seed_all(seed)
 
 def load_model_and_tokenizer(path, model_name, device):
+    device_1 = 4
+    device_2 = 5
+    device_map = {f"model.layers.{i}": device_1 for i in range(0,16)}
+    device_map.update({f"model.layers.{i}": device_2 for i in range(16,32)})
+    device_map["model.embed_tokens"] = device_1
+    device_map["model.norm"] = device_2
+    device_map["lm_head"] = device_2
+
     tokenizer = AutoTokenizer.from_pretrained(path)
-    model = KVLlamaForCausalLM.from_pretrained(path, torch_dtype=torch.bfloat16).to(device)
+    model = KVLlamaForCausalLM.from_pretrained(
+        path,
+        torch_dtype=torch.bfloat16,
+        device_map=device_map,
+    )
     model = model.eval()
     return model, tokenizer
 
