@@ -114,6 +114,7 @@ def plot_attention_patterns(h2o_scores, recent_scores, answer_scores, layer_idx,
     plt.savefig(save_path)
     plt.close()
 
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--gpu", type=int, default=0, help="GPU device index to use")
