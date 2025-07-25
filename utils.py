@@ -17,84 +17,83 @@ class CompressionConfig:
     punctuation_ids: list = None
 
 def load_configs(model_name, method, total_budget, tokenizer=None):
-    data = {
-        "streamingLLM": {
-            "compression_method": "streamingLLM", "compression_ratio": [1.0 for _ in range(32)], "streaming_budget": 10
-        },
-        "h2o": {
-            "compression_method": "h2o",
-            "layerwise_ratio" : [1.0 for _ in range(32)],
-            "forgetting_factors": [1.0 for _ in range(32)]
-        },
-        "llama2": {
-            "compression_method": "a2sf",
-            "layerwise_ratio": [1.67, 1.53, 1.0, 1.07, 0.43, 0.55, 1.59, 1.41, 2.07, 1.0, 1.0, 2.39, 1.0, 1.0, 1.27, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.5, 1.0, 1.0, 0.52, 0.14, 0.3, 0.79, 0.27, 0.5],
-            "forgetting_factors": [0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
-        },
-        "llama2_factor_fixed": {
-            "compression_method": "a2sf",
-            "layerwise_ratio": [1.91, 1.51, 1.0, 1.07, 0.43, 0.55, 1.51, 1.41, 2.07, 1.0, 1.0, 2.25, 1.0, 1.0, 1.27, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.5, 1.0, 1.0, 0.52, 0.14, 0.3, 0.79, 0.27, 0.5],
-            "forgetting_factors": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
-        },
-        "llama2_ratio_fixed": {
-            "compression_method": "a2sf",
-            "layerwise_ratio": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-            "forgetting_factors": [0.0, 0.01, 0.01, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
-        },
-        "llama3": {
-            "compression_method": "a2sf",
-            "layerwise_ratio": [0.59, 0.23, 3.84, 0.26, 1.19, 1.14, 0.79, 1.0, 1.0, 1.0, 1.0, 1.0, 0.42, 1.0, 1.0, 1.0, 1.0, 1.0, 1.02, 1.0, 1.82, 0.38, 1.0, 1.0, 1.4, 1.0, 1.0, 1.59, 0.65, 0.66, 1.0, 0.02],
-            "forgetting_factors": [0.0, 0.0, 0.88, 0.88, 0.88, 0.88, 0.88, 0.9, 0.9, 0.88, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.93, 0.93, 0.93, 0.93, 0.93, 0.93, 0.93, 0.93, 0.93, 0.93, 0.93, 0.93, 0.93, 0.93, 0.93]
-        }
-    }
-
-    punctuation_ids = None
-    if method == "a2sf" and tokenizer is None:
-        raise ValueError("Tokenizer is required for a2sf method")
-    elif method == "a2sf" and tokenizer is not None:
+    """
+    Load compression configuration based on model name and method.
+    
+    Args:
+        model_name (str): Name of the model (e.g., 'llama2', 'llama3')
+        method (str): Compression method ('a2sf', 'h2o', 'streamingLLM', 'average', 'full')
+        total_budget (int): Total budget for compression
+        tokenizer: Tokenizer instance (required for a2sf method)
+    
+    Returns:
+        CompressionConfig: Configuration object for the specified method
+    """
+    import json
+    
+    # Load compression configurations from JSON file
+    try:
+        with open("config/compression_configs.json", "r") as f:
+            compression_configs = json.load(f)
+    except FileNotFoundError:
+        raise FileNotFoundError("compression_configs.json not found in config/ directory")
+    
+    # Validate method and get configuration
+    if method == "a2sf":
+        if model_name not in compression_configs:
+            raise ValueError(f"Model '{model_name}' not found in compression configurations")
+        config_data = compression_configs[model_name]
+        
+        # Validate a2sf method requires tokenizer
+        if tokenizer is None:
+            raise ValueError("Tokenizer is required for a2sf method")
+        
+        # Get punctuation IDs for a2sf method
         punctuation_ids = [
             tokenizer.encode(".", add_special_tokens=False)[0],
             tokenizer.encode(" .", add_special_tokens=False)[0],
         ]
-    
-    if method == "a2sf":
-        data_point = data[model_name]
-    elif "h2o" in method or method == "streamingLLM":
-        data_point = data[method]
-    elif method == "full":
-        data_point = None
-    
-    if method == "a2sf":
-        config = CompressionConfig(
+        
+        return CompressionConfig(
             use_compression=True,
-            compression_method=data_point["compression_method"],
+            compression_method=config_data["compression_method"],
             total_budget=total_budget,
-            layerwise_ratio=data_point["layerwise_ratio"],
-            forgetting_factors=data_point["forgetting_factors"],
+            layerwise_ratio=config_data["layerwise_ratio"],
+            forgetting_factors=config_data["forgetting_factors"],
             punctuation_ids=punctuation_ids
         )
-    elif "h2o" in method:
-        config = CompressionConfig(
+    
+    elif method in ["h2o", "average"]:
+        if method not in compression_configs:
+            raise ValueError(f"Method '{method}' not found in compression configurations")
+        config_data = compression_configs[method]
+        
+        return CompressionConfig(
             use_compression=True,
-            compression_method=data_point["compression_method"],
+            compression_method=config_data["compression_method"],
             total_budget=total_budget,
-            layerwise_ratio=data_point["layerwise_ratio"],
-            forgetting_factors=data_point["forgetting_factors"]
-        )
-    elif "streamingLLM" in method:
-        config = CompressionConfig(
-            use_compression=True,
-            compression_method=data_point["compression_method"],
-            total_budget=total_budget,
-            layerwise_ratio=data_point["compression_ratio"],
-            streaming_budget=data_point["streaming_budget"]
-        )
-    elif method == "full":
-        config = CompressionConfig(
-            use_compression=False,
+            layerwise_ratio=config_data["layerwise_ratio"],
+            forgetting_factors=config_data["forgetting_factors"]
         )
     
-    return config
+    elif method == "streamingLLM":
+        if method not in compression_configs:
+            raise ValueError(f"Method '{method}' not found in compression configurations")
+        config_data = compression_configs[method]
+        
+        return CompressionConfig(
+            use_compression=True,
+            compression_method=config_data["compression_method"],
+            total_budget=total_budget,
+            layerwise_ratio=config_data["compression_ratio"],
+            streaming_budget=config_data["streaming_budget"]
+        )
+    
+    elif method == "full":
+        return CompressionConfig(use_compression=False)
+    
+    else:
+        raise ValueError(f"Unsupported method: {method}. Supported methods: a2sf, h2o, streamingLLM, average, full")
 
 def get_prompt(index: int = 0):
     with open("datasets/cnn_dailymail-2shot.jsonl", "r") as f:
