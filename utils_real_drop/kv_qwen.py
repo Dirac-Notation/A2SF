@@ -339,7 +339,7 @@ from transformers.utils import (
 )
 from transformers.utils.import_utils import is_torch_fx_available
 
-from .kv_cache import A2SFKVCache
+from .kv_cache import KVCache
 
 if is_torch_fx_available():
     _prepare_4d_causal_attention_mask = torch.fx.wrap(_prepare_4d_causal_attention_mask)
@@ -467,7 +467,7 @@ class Qwen2Attention(nn.Module):
             base=self.rope_theta,
         )
         
-        self.past_key_value = A2SFKVCache(self.num_key_value_heads)
+        self.past_key_value = KVCache(self.num_key_value_heads)
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()

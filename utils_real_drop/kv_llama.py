@@ -25,7 +25,7 @@ from transformers.models.llama.modeling_llama import (
     repeat_kv
 )
 
-from .kv_cache import A2SFKVCache
+from .kv_cache import KVCache
 
 # This makes `_prepare_4d_causal_attention_mask` a leaf function in the FX graph.
 # It means that the function will not be traced through and simply appear as a node in the graph.
@@ -64,7 +64,7 @@ class LlamaAttention(nn.Module):
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=config.attention_bias)
         self._init_rope()
         
-        self.past_key_value = A2SFKVCache(self.num_key_value_heads)
+        self.past_key_value = KVCache(self.num_key_value_heads)
 
     def _init_rope(self):
         self.rotary_emb = LlamaRotaryEmbedding(
@@ -93,6 +93,7 @@ class LlamaAttention(nn.Module):
 
         bsz, q_len, _ = hidden_states.size()
 
+        # QKV projection on GPU
         query_states = self.q_proj(hidden_states).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         key_states = self.k_proj(hidden_states).view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         value_states = self.v_proj(hidden_states).view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
@@ -107,14 +108,24 @@ class LlamaAttention(nn.Module):
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+        if True:
+            # Use flash attention for efficient computation
+            attn_output = self.past_key_value.flash_attention(
+                query=query_states,
+                key=key_states,
+                value=value_states,
+                attn_mask=attention_mask,
+                head_dim=self.head_dim
+            )
+        else:
+            attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
-        if attention_mask is not None:
-            attn_weights = attn_weights + attention_mask[:,:,:,:attn_weights.size(-1)]
+            if attention_mask is not None:
+                attn_weights = attn_weights + attention_mask[:,:,:,:attn_weights.size(-1)]
 
-        # upcast attention to fp32
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-        attn_output = torch.matmul(attn_weights, value_states)
+            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+            
+            attn_output = torch.matmul(attn_weights, value_states)
 
         attn_output = attn_output.transpose(1, 2).contiguous()
 
@@ -127,7 +138,7 @@ class LlamaAttention(nn.Module):
         else:
             attn_output = self.o_proj(attn_output)
 
-        self.past_key_value.update(attn_weights)
+        # self.past_key_value.update(attn_weights)
 
         if not output_attentions:
             attn_weights = None
@@ -290,7 +301,7 @@ class LlamaModel(LlamaPreTrainedModel):
             inputs_embeds = self.embed_tokens(input_ids)
 
         self.set_forget(input_ids)
-
+        import pdb; pdb.set_trace()
         if getattr(self.config, "_flash_attn_2_enabled", False):
             # 2d mask is passed through the layers
             attention_mask = attention_mask if (attention_mask is not None and 0 in attention_mask) else None

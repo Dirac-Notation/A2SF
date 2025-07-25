@@ -2,7 +2,7 @@ import os
 from datasets import load_dataset
 import torch
 import json
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, AutoConfig
 from tqdm import tqdm
 import numpy as np
 import random
@@ -13,7 +13,7 @@ from utils import load_configs
 
 def parse_args(args=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument('--gpu', type=int, default=0)
+    parser.add_argument('--gpus', type=int, nargs='+', default=[0], help="List of GPU IDs (e.g., --gpus 0 1 2 3)")
     parser.add_argument('--model', type=str, default=None, choices=["llama", "llama2", "llama3", "opt", "qwen2"])
     parser.add_argument('--method', type=str, default="a2sf")
     parser.add_argument('--total_budget', type=int, default=100)
@@ -69,16 +69,36 @@ def seed_everything(seed):
     torch.backends.cudnn.deterministic = True
     torch.cuda.manual_seed_all(seed)
 
-def load_model_and_tokenizer(path, model_name, device):
-    device_1 = 4
-    device_2 = 5
-    device_map = {f"model.layers.{i}": device_1 for i in range(0,16)}
-    device_map.update({f"model.layers.{i}": device_2 for i in range(16,32)})
-    device_map["model.embed_tokens"] = device_1
-    device_map["model.norm"] = device_2
-    device_map["lm_head"] = device_2
-
+def load_model_and_tokenizer(path, model_name, gpu_list):
+    # GPU list is already a list of integers
+    gpus = gpu_list
+    num_gpus = len(gpus)
+    
+    # Load tokenizer first
     tokenizer = AutoTokenizer.from_pretrained(path)
+    
+    # Load model config to get actual number of layers
+    config = AutoConfig.from_pretrained(path)
+    total_layers = config.num_hidden_layers
+    
+    # Create device map based on GPU count
+    device_map = {}
+    
+    # Multiple GPUs: distribute layers across GPUs
+    layers_per_gpu = total_layers // num_gpus
+    
+    # Distribute layers across GPUs
+    for i in range(total_layers):
+        gpu_idx = i // layers_per_gpu
+        device_map[f"model.layers.{i}"] = gpus[gpu_idx]
+    
+    # Place embedding and norm layers on first GPU
+    device_map["model.embed_tokens"] = gpus[0]
+    device_map["model.norm"] = gpus[-1]  # Last GPU
+    device_map["lm_head"] = gpus[-1]     # Last GPU
+
+    print(f"Device map: {device_map}")
+
     model = KVLlamaForCausalLM.from_pretrained(
         path,
         torch_dtype=torch.bfloat16,
@@ -91,8 +111,8 @@ if __name__ == '__main__':
     seed_everything(42)
     args = parse_args()
     
-    # Set device
-    device = torch.device(f'cuda:{args.gpu}' if torch.cuda.is_available() else 'cpu')
+    # GPU list is already a list of integers
+    gpus = args.gpus
     
     # Load configurations
     model2path = json.load(open("config/model2path.json", "r"))
@@ -101,8 +121,8 @@ if __name__ == '__main__':
     max_length = model2maxlen[model_name]
     
     # Load model and tokenizer once
-    print(f"Loading model and tokenizer for {model_name}...")
-    model, tokenizer = load_model_and_tokenizer(model2path[model_name], model_name, device)
+    print(f"Loading model and tokenizer for {model_name} on GPUs: {gpus}...")
+    model, tokenizer = load_model_and_tokenizer(model2path[model_name], model_name, args.gpus)
     print("Model and tokenizer loaded successfully!")
     
     # Define datasets

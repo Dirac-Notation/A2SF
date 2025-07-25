@@ -26,7 +26,7 @@ from transformers.models.opt.modeling_opt import (
     OPTForCausalLM
 )
 
-from .kv_cache import A2SFKVCache
+from .kv_cache import KVCache
 
 logger = logging.get_logger(__name__)
 
@@ -83,7 +83,7 @@ class OPTAttention(nn.Module):
         self.q_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
         
-        self.past_key_value = A2SFKVCache(self.num_heads)
+        self.past_key_value = KVCache(self.num_heads)
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
