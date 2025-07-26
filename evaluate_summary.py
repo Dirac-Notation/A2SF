@@ -77,8 +77,8 @@ def evaluate_model(
         for idx, input_data in enumerate(tqdm(inputs, desc=desc)):
             # Convert input data to proper format
             input_ids = input_data.input_ids.to(device)
-            attention_mask = input_data.attention_mask.to(device)
-
+            attention_mask = input_data.attention_mask.to(torch.bfloat16).to(device)
+            
             # Initialize cache if needed
             if init_cache_fn and compression_config:
                 init_cache_fn(compression_config)
