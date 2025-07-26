@@ -33,13 +33,18 @@ def get_pred(data, max_length, max_gen, prompt_format, dataset, model, tokenizer
             prompt = tokenizer.decode(tokenized_prompt[:half], skip_special_tokens=True)+tokenizer.decode(tokenized_prompt[-half:], skip_special_tokens=True)
         if dataset not in ["trec", "triviaqa", "samsum", "lsht", "lcc", "repobench-p"]:
             prompt = build_chat(tokenizer, prompt, args.model)
-        input = tokenizer(prompt, truncation=False, return_tensors="pt").to(model.device)
-        context_length = input.input_ids.shape[-1]
+        input = tokenizer(prompt, truncation=False, return_tensors="pt")
+        
+        input_ids = input.input_ids.to(model.device)
+        attention_mask = input.attention_mask.to(torch.bfloat16).to(model.device)
+        
+        context_length = input_ids.shape[-1]
         model.init_cache(load_configs(args.model, args.method, args.total_budget, tokenizer))
         with torch.inference_mode():
             if dataset == "samsum":
                 output = model.generate(
-                    **input,
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
                     max_new_tokens=max_gen,
                     num_beams=1,
                     do_sample=False,
@@ -49,7 +54,8 @@ def get_pred(data, max_length, max_gen, prompt_format, dataset, model, tokenizer
                 )[0]
             else:
                 output = model.generate(
-                    **input,
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
                     max_new_tokens=max_gen,
                     num_beams=1,
                     do_sample=False,

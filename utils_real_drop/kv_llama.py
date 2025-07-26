@@ -301,7 +301,8 @@ class LlamaModel(LlamaPreTrainedModel):
             inputs_embeds = self.embed_tokens(input_ids)
 
         self.set_forget(input_ids)
-        import pdb; pdb.set_trace()
+        
+        # attention_mask = attention_mask.to(inputs_embeds.dtype)
         if getattr(self.config, "_flash_attn_2_enabled", False):
             # 2d mask is passed through the layers
             attention_mask = attention_mask if (attention_mask is not None and 0 in attention_mask) else None
@@ -310,7 +311,7 @@ class LlamaModel(LlamaPreTrainedModel):
             attention_mask = _prepare_4d_causal_attention_mask(
                 attention_mask, (batch_size, seq_length), inputs_embeds, past_key_values_length
             )
-
+        
         # embed positions
         hidden_states = inputs_embeds
 

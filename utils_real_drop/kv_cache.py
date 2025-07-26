@@ -40,77 +40,48 @@ class KVCache():
         Returns:
             output: [batch_size, num_heads, seq_len_q, head_dim]
         """
-        # Cast to float32 for numerical stability
-        q = query.to(torch.float32)
-        k = key.to(torch.float32)
-        v = value.to(torch.float32)
+        # Use BFloat16 for all computations
+        batch_size, num_heads, seq_len_q, _ = query.shape
+        _, _, seq_len_k, _ = key.shape
         
-        batch_size, num_heads, seq_len_q, _ = q.shape
-        _, _, seq_len_k, _ = k.shape
+        # Scale factor (convert to same dtype as query)
+        sm_scale = torch.tensor(1.0 / math.sqrt(head_dim), device=query.device, dtype=query.dtype)
         
-        # Scale factor
-        sm_scale = 1.0 / math.sqrt(head_dim)
-        
-        # Initialize output and running statistics
-        output = torch.zeros_like(q)
-        running_max = torch.full((batch_size, num_heads, seq_len_q, 1), float('-inf'), device=q.device, dtype=torch.float32)
-        running_sum = torch.zeros((batch_size, num_heads, seq_len_q, 1), device=q.device, dtype=torch.float32)
+        # Initialize output and running statistics with BFloat16
+        output = torch.zeros_like(query)
+        running_max = torch.full((batch_size, num_heads, seq_len_q, 1), float('-inf'), device=query.device, dtype=query.dtype)
+        running_sum = torch.zeros((batch_size, num_heads, seq_len_q, 1), device=query.device, dtype=query.dtype)
         
         # Process key-value pairs in chunks
         for k_start in range(0, seq_len_k, block_size):
             k_end = min(k_start + block_size, seq_len_k)
             
             # Extract current chunk of key and value
-            k_chunk = k[:, :, k_start:k_end, :]  # [batch_size, num_heads, chunk_size, head_dim]
-            v_chunk = v[:, :, k_start:k_end, :]  # [batch_size, num_heads, chunk_size, head_dim]
+            k_chunk = key[:, :, k_start:k_end, :]  # [batch_size, num_heads, chunk_size, head_dim]
+            v_chunk = value[:, :, k_start:k_end, :]  # [batch_size, num_heads, chunk_size, head_dim]
             
             # Compute attention scores for this chunk
-            scores = torch.matmul(q, k_chunk.transpose(-2, -1))  # [batch_size, num_heads, seq_len_q, chunk_size]
-            scores = sm_scale * scores
+            scores = torch.matmul(query, k_chunk.transpose(-2, -1)).mul_(sm_scale)  # [batch_size, num_heads, seq_len_q, chunk_size]
             
-            # Apply causal mask for this chunk
-            if k_start == 0:  # Only need to compute causal mask once
-                row_idx = torch.arange(seq_len_q, device=q.device).unsqueeze(1)
-                col_idx = torch.arange(seq_len_k, device=q.device).unsqueeze(0)
-                col_offset = seq_len_q - seq_len_k
-                causal_mask = row_idx >= (col_offset + col_idx)
-            
-            # Apply causal mask to current chunk
-            chunk_causal_mask = causal_mask[:, k_start:k_end]  # [seq_len_q, chunk_size]
-            scores = scores.masked_fill(
-                torch.logical_not(chunk_causal_mask.unsqueeze(0).unsqueeze(0)), float('-inf')
-            )
-            
-            # Apply attention mask if provided
+            # Apply attention mask if provided (includes causal masking)
             if attn_mask is not None:
-                attn_mask_chunk = attn_mask[:, :, :, k_start:k_end]
-                scores = scores + attn_mask_chunk
+                scores.add_(attn_mask[:, :, :, k_start:k_end])
             
             # Update running statistics using flash attention algorithm
-            chunk_max = torch.max(scores, dim=-1, keepdim=True)[0]  # [batch_size, num_heads, seq_len_q, 1]
+            new_max = torch.maximum(running_max, torch.max(scores, dim=-1, keepdim=True)[0])
             
-            # Update running max
-            new_max = torch.maximum(running_max, chunk_max)
-            
-            # Compute exponential terms
-            exp_scores = torch.exp(scores - new_max)  # Subtract new_max for numerical stability
-            exp_scores_old = torch.exp(running_max - new_max)  # Scale old running sum
-            
-            # Update running sum
-            running_sum = exp_scores_old * running_sum + torch.sum(exp_scores, dim=-1, keepdim=True)
+            # Compute exponential terms and update running sum
+            scores.sub_(new_max).exp_()  # Subtract new_max and apply exp in-place
+            running_sum.mul_(torch.exp(running_max - new_max)).add_(torch.sum(scores, dim=-1, keepdim=True))
             
             # Update output
-            output_chunk = torch.matmul(exp_scores, v_chunk)  # [batch_size, num_heads, seq_len_q, head_dim]
-            output = output + exp_scores_old * output + output_chunk
+            output.mul_(torch.exp(running_max - new_max)).add_(torch.matmul(scores, v_chunk))
             
             # Update running max
-            running_max = new_max
+            running_max.copy_(new_max)
         
         # Final normalization
         output = output / running_sum
-        
-        # Cast back to original dtype
-        output = output.to(query.dtype)
         
         return output
 

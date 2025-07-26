@@ -12,6 +12,7 @@ peft
 pytablewriter
 ftfy
 rouge
+rouge_score
 py7zr
 jieba
 fuzzywuzzy
