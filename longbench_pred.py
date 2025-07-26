@@ -96,12 +96,12 @@ def load_model_and_tokenizer(path, model_name, gpu_list):
     # Distribute layers across GPUs
     for i in range(total_layers):
         gpu_idx = i // layers_per_gpu
-        device_map[f"model.layers.{i}"] = gpus[gpu_idx]
+        device_map[f"model.layers.{i}"] = f"cuda:{gpus[gpu_idx]}"
     
     # Place embedding and norm layers on first GPU
-    device_map["model.embed_tokens"] = gpus[0]
-    device_map["model.norm"] = gpus[-1]  # Last GPU
-    device_map["lm_head"] = gpus[-1]     # Last GPU
+    device_map["model.embed_tokens"] = f"cuda:{gpus[0]}"
+    device_map["model.norm"] = f"cuda:{gpus[-1]}"
+    device_map["lm_head"] = f"cuda:{gpus[-1]}"
 
     print(f"Device map: {device_map}")
 
