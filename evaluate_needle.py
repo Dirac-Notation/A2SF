@@ -2,15 +2,13 @@ import json
 import os
 import argparse
 from tqdm import tqdm
-from transformers import AutoTokenizer
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from collections import defaultdict
 import datetime
 
-from utils_real_drop import KVLlamaForCausalLM, KVOPTForCausalLM, OptimalLlamaForCausalLM, KVQwen2ForCausalLM, Qwen2Tokenizer
-from utils import load_configs
+from utils import load_configs, load_model
 
 
 def calculate_lcs_ratio(expected, predicted):
@@ -199,20 +197,10 @@ def main(args):
         model_path = model2path[model_name]
         
         # Prepare device, model, and tokenizer
-        device = f"cuda:{args.gpu}"
+        device = f"cuda:{args.gpus[0]}"  # Use first GPU for device reference
         
-        # Load appropriate model based on model name
-        if "llama" in model_name.lower():
-            model = (KVLlamaForCausalLM.from_pretrained(model_path).to(torch.bfloat16).to(device))
-            tokenizer = AutoTokenizer.from_pretrained(model_path)
-        elif "opt" in model_name.lower():
-            model = (KVOPTForCausalLM.from_pretrained(model_path).to(torch.bfloat16).to(device))
-            tokenizer = AutoTokenizer.from_pretrained(model_path)
-        elif "qwen" in model_name.lower():
-            model = (KVQwen2ForCausalLM.from_pretrained(model_path).to(torch.bfloat16).to(device))
-            tokenizer = Qwen2Tokenizer.from_pretrained(model_path)
-        else:
-            raise ValueError(f"Unsupported model: {model_name}. Only Llama, OPT, and Qwen2 models are supported.")
+        # Load model and tokenizer using the utility function
+        model, tokenizer = load_model(model_name, args.gpus)
 
         for dataset in datasets:
             dataset_name = os.path.basename(dataset).split('.')[0]
@@ -290,7 +278,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate Llama predictions with various budgets on needle-in-haystack task.")
-    parser.add_argument("--gpu", type=int, default=0)
+    parser.add_argument("--gpus", type=int, nargs='+', default=[0], help="List of GPU IDs (e.g., --gpus 0 1 2 3)")
     parser.add_argument("--model", type=str, nargs='+', default=["llama2"], choices=["llama", "llama2", "llama3", "qwen2"])
     parser.add_argument("--dataset", type=str, nargs='+', default=["datasets/needle_dataset.jsonl"])
     parser.add_argument("--budget", type=int, nargs='+', default=[100])

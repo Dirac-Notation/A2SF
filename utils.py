@@ -5,6 +5,8 @@ import numpy as np
 
 from datasets import load_dataset
 from dataclasses import dataclass
+from transformers import AutoTokenizer, AutoConfig
+from utils_real_drop import KVLlamaForCausalLM, KVOPTForCausalLM, KVQwen2ForCausalLM, Qwen2Tokenizer
 
 @dataclass
 class CompressionConfig:
@@ -94,6 +96,89 @@ def load_configs(model_name, method, total_budget, tokenizer=None):
     
     else:
         raise ValueError(f"Unsupported method: {method}. Supported methods: a2sf, h2o, streamingLLM, average, full")
+
+def load_model(model_name, gpu_list=None, model_path=None):
+    """
+    Load model and tokenizer based on model name and GPU configuration.
+    
+    Args:
+        model_name (str): Name of the model (e.g., 'llama2', 'llama3', 'opt', 'qwen2')
+        gpu_list (list): List of GPU IDs for multi-GPU setup. If None, uses single GPU.
+        model_path (str): Path to the model. If None, loads from config/model2path.json
+    
+    Returns:
+        tuple: (model, tokenizer)
+    """
+    # Load model path from config if not provided
+    if model_path is None:
+        with open("config/model2path.json", "r") as f:
+            model2path = json.load(f)
+        model_path = model2path[model_name]
+    
+    # Handle single GPU case
+    if gpu_list is None:
+        device = "cuda:0"
+        
+        if "llama" in model_name.lower():
+            model = KVLlamaForCausalLM.from_pretrained(model_path).to(torch.bfloat16).to(device)
+            tokenizer = AutoTokenizer.from_pretrained(model_path)
+        elif "opt" in model_name.lower():
+            model = KVOPTForCausalLM.from_pretrained(model_path).to(torch.bfloat16).to(device)
+            tokenizer = AutoTokenizer.from_pretrained(model_path)
+        elif "qwen" in model_name.lower():
+            model = KVQwen2ForCausalLM.from_pretrained(model_path).to(torch.bfloat16).to(device)
+            tokenizer = Qwen2Tokenizer.from_pretrained(model_path)
+        else:
+            raise ValueError(f"Unsupported model: {model_name}. Only Llama, OPT, and Qwen2 models are supported.")
+    
+    # Handle multi-GPU case
+    else:
+        num_gpus = len(gpu_list)
+        
+        # Load tokenizer first
+        if "qwen" in model_name.lower():
+            tokenizer = Qwen2Tokenizer.from_pretrained(model_path)
+        else:
+            tokenizer = AutoTokenizer.from_pretrained(model_path)
+        
+        # Load model config to get actual number of layers
+        config = AutoConfig.from_pretrained(model_path)
+        total_layers = config.num_hidden_layers
+        
+        # Create device map based on GPU count
+        device_map = {}
+        
+        # Multiple GPUs: distribute layers across GPUs
+        # Reserve last GPU for lm_head, distribute other layers across remaining GPUs
+        layers_per_gpu = total_layers // (num_gpus - 1) if num_gpus > 1 else total_layers
+        
+        # Distribute layers across GPUs (excluding the last GPU)
+        for i in range(total_layers):
+            if num_gpus == 1:
+                gpu_idx = 0
+            else:
+                gpu_idx = min(i // layers_per_gpu, num_gpus - 2)  # Use up to second-to-last GPU
+            device_map[f"model.layers.{i}"] = f"cuda:{gpu_list[gpu_idx]}"
+        
+        # Place embedding and norm layers on first GPU
+        device_map["model.embed_tokens"] = f"cuda:{gpu_list[0]}"
+        device_map["model.norm"] = f"cuda:{gpu_list[-1]}"
+        device_map["lm_head"] = f"cuda:{gpu_list[-1]}"
+
+        print(f"Device map: {device_map}")
+
+        # Load appropriate model based on model name
+        if "llama" in model_name.lower():
+            model = KVLlamaForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16, device_map=device_map)
+        elif "opt" in model_name.lower():
+            model = KVOPTForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16, device_map=device_map)
+        elif "qwen" in model_name.lower():
+            model = KVQwen2ForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16, device_map=device_map)
+        else:
+            raise ValueError(f"Unsupported model: {model_name}. Only Llama, OPT, and Qwen2 models are supported.")
+    
+    model = model.eval()
+    return model, tokenizer
 
 def get_prompt(index: int = 0):
     with open("datasets/cnn_dailymail-2shot.jsonl", "r") as f:

@@ -2,14 +2,12 @@ import os
 from datasets import load_dataset
 import torch
 import json
-from transformers import AutoTokenizer, AutoConfig
 from tqdm import tqdm
 import numpy as np
 import random
 import argparse
 
-from utils_real_drop import KVLlamaForCausalLM
-from utils import load_configs
+from utils import load_configs, load_model
 
 def parse_args(args=None):
     parser = argparse.ArgumentParser()
@@ -75,43 +73,7 @@ def seed_everything(seed):
     torch.backends.cudnn.deterministic = True
     torch.cuda.manual_seed_all(seed)
 
-def load_model_and_tokenizer(path, model_name, gpu_list):
-    # GPU list is already a list of integers
-    gpus = gpu_list
-    num_gpus = len(gpus)
-    
-    # Load tokenizer first
-    tokenizer = AutoTokenizer.from_pretrained(path)
-    
-    # Load model config to get actual number of layers
-    config = AutoConfig.from_pretrained(path)
-    total_layers = config.num_hidden_layers
-    
-    # Create device map based on GPU count
-    device_map = {}
-    
-    # Multiple GPUs: distribute layers across GPUs
-    layers_per_gpu = total_layers // num_gpus
-    
-    # Distribute layers across GPUs
-    for i in range(total_layers):
-        gpu_idx = i // layers_per_gpu
-        device_map[f"model.layers.{i}"] = f"cuda:{gpus[gpu_idx]}"
-    
-    # Place embedding and norm layers on first GPU
-    device_map["model.embed_tokens"] = f"cuda:{gpus[0]}"
-    device_map["model.norm"] = f"cuda:{gpus[-1]}"
-    device_map["lm_head"] = f"cuda:{gpus[-1]}"
-
-    print(f"Device map: {device_map}")
-
-    model = KVLlamaForCausalLM.from_pretrained(
-        path,
-        torch_dtype=torch.bfloat16,
-        device_map=device_map,
-    )
-    model = model.eval()
-    return model, tokenizer
+from utils import load_model
 
 if __name__ == '__main__':
     seed_everything(42)
@@ -128,7 +90,7 @@ if __name__ == '__main__':
     
     # Load model and tokenizer once
     print(f"Loading model and tokenizer for {model_name} on GPUs: {gpus}...")
-    model, tokenizer = load_model_and_tokenizer(model2path[model_name], model_name, args.gpus)
+    model, tokenizer = load_model(model_name, args.gpus)
     print("Model and tokenizer loaded successfully!")
     
     # Define datasets

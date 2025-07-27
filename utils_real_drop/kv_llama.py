@@ -26,6 +26,7 @@ from transformers.models.llama.modeling_llama import (
 )
 
 from .kv_cache import KVCache
+from .flash_attention import flash_attention
 
 # This makes `_prepare_4d_causal_attention_mask` a leaf function in the FX graph.
 # It means that the function will not be traced through and simply appear as a node in the graph.
@@ -110,7 +111,7 @@ class LlamaAttention(nn.Module):
 
         if True:
             # Use flash attention for efficient computation
-            attn_output = self.past_key_value.flash_attention(
+            attn_output = flash_attention(
                 query=query_states,
                 key=key_states,
                 value=value_states,
