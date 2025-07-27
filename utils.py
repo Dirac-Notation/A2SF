@@ -162,7 +162,7 @@ def load_model(model_name, gpu_list=None, model_path=None):
         
         # Place embedding and norm layers on first GPU
         device_map["model.embed_tokens"] = f"cuda:{gpu_list[0]}"
-        device_map["model.norm"] = f"cuda:{gpu_list[-1]}"
+        device_map["model.norm"] = f"cuda:{gpu_list[-2] if num_gpus > 1 else gpu_list[0]}"
         device_map["lm_head"] = f"cuda:{gpu_list[-1]}"
 
         print(f"Device map: {device_map}")
