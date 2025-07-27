@@ -1,5 +1,5 @@
 import torch
-from __init__ import BaseCache
+from . import BaseCache
 
 class H2OCache(BaseCache):
     """H2O cache implementation (forgetting_factor == 1)"""
@@ -20,11 +20,14 @@ class H2OCache(BaseCache):
         self.select_budget = self.total_budget - self.recent_budget
         self.score = None
     
-    def update(self, attn_scores):
+    def update(self, attn_scores=None):
         """Update cache using H2O method (forgetting_factor == 1)"""
-        if not (self.use_compression and self.seq_length > self.total_budget):
-            return
-        
+        # First prepare scores, then select
+        self.prepare_scores(attn_scores)
+        self.select()
+    
+    def prepare_scores(self, attn_scores):
+        """Prepare scores for H2O method (simple accumulation)"""
         attn_scores_shape = attn_scores.shape
         
         attn_scores = attn_scores.view(attn_scores_shape[0], self.num_key_value_heads, -1, *attn_scores_shape[2:]).sum(dim=2)
@@ -33,26 +36,7 @@ class H2OCache(BaseCache):
         current_score = attn_scores.sum(self.seq_dim)
         if self.score is not None:
             current_score[:,:,:-1] += self.score
-        self.score = current_score
-        
-        # Select tokens to keep
-        selected_indices = self.score[:,:,:-self.recent_budget].topk(self.select_budget, dim=-1).indices.sort().values
-        
-        # Update scores
-        self.score = torch.cat((
-            self.score.gather(self.seq_dim, selected_indices),
-            self.score[:,:,-self.recent_budget:]
-        ), dim=self.seq_dim)
-        
-        # Update key-value cache
-        selected_indices = selected_indices.unsqueeze(-1).expand(-1,-1,-1,self.key_data.size(-1))
-        
-        self.key_data = torch.cat((
-            self.key_data.gather(self.seq_dim, selected_indices),
-            self.key_data[:,:,-self.recent_budget:,:]
-        ), dim=self.seq_dim)
-        
-        self.value_data = torch.cat((
-            self.value_data.gather(self.seq_dim, selected_indices),
-            self.value_data[:,:,-self.recent_budget:,:]
-        ), dim=self.seq_dim) 
+        self.score = current_score 
+    
+    def flash_prepare_scores(self, attn_scores):
+        return attn_scores.sum(self.seq_dim)

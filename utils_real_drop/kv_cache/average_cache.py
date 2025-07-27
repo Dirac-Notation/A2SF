@@ -1,5 +1,5 @@
 import torch
-from __init__ import BaseCache
+from . import BaseCache
 
 class AverageCache(BaseCache):
     """Average-based selection cache implementation"""
@@ -26,9 +26,12 @@ class AverageCache(BaseCache):
     
     def update(self, attn_scores):
         """Update cache using average-based selection method"""
-        if not (self.use_compression and self.seq_length > self.total_budget):
-            return
-        
+        # First prepare scores, then select
+        self.prepare_scores(attn_scores)
+        self.select()
+    
+    def prepare_scores(self, attn_scores):
+        """Prepare scores for average-based selection method"""
         attn_scores_shape = attn_scores.shape
         
         attn_scores = attn_scores.view(attn_scores_shape[0], self.num_key_value_heads, -1, *attn_scores_shape[2:]).sum(dim=2)
@@ -50,31 +53,4 @@ class AverageCache(BaseCache):
         self.cumulative_count = self.cumulative_count.to(self.device)
         
         # Calculate average scores
-        average_score = self.score / self.cumulative_count
-        
-        # Select tokens to keep based on average scores
-        selected_indices = average_score[:,:,:-self.recent_budget].topk(self.select_budget, dim=-1).indices.sort().values
-        
-        # Update scores and counts
-        self.score = torch.cat((
-            self.score.gather(self.seq_dim, selected_indices),
-            self.score[:,:,-self.recent_budget:]
-        ), dim=self.seq_dim)
-        
-        self.cumulative_count = torch.cat((
-            self.cumulative_count.gather(self.seq_dim, selected_indices),
-            self.cumulative_count[:,:,-self.recent_budget:]
-        ), dim=self.seq_dim)
-        
-        # Update key-value cache
-        selected_indices = selected_indices.unsqueeze(-1).expand(-1,-1,-1,self.key_data.size(-1))
-        
-        self.key_data = torch.cat((
-            self.key_data.gather(self.seq_dim, selected_indices),
-            self.key_data[:,:,-self.recent_budget:,:]
-        ), dim=self.seq_dim)
-        
-        self.value_data = torch.cat((
-            self.value_data.gather(self.seq_dim, selected_indices),
-            self.value_data[:,:,-self.recent_budget:,:]
-        ), dim=self.seq_dim) 
+        self.score = self.score / self.cumulative_count 

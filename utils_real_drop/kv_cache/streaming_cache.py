@@ -1,5 +1,5 @@
 import torch
-from __init__ import BaseCache
+from . import BaseCache
 
 class StreamingCache(BaseCache):
     """Streaming LLM cache implementation"""
