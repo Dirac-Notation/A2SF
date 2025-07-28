@@ -65,7 +65,7 @@ def load_configs(model_name, method, total_budget, tokenizer=None):
             punctuation_ids=punctuation_ids
         )
     
-    elif method in ["h2o", "average", "snap"]:
+    elif method in ["h2o", "average", "snap", "pyramid"]:
         if method not in compression_configs:
             raise ValueError(f"Method '{method}' not found in compression configurations")
         config_data = compression_configs[method]
