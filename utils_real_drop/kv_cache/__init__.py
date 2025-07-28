@@ -1,9 +1,8 @@
 import torch
 import math
-from abc import ABC, abstractmethod
 
-class BaseCache(ABC):
-    """Abstract base class for cache implementations"""
+class KVCache:
+    """Main cache class with all common functionality"""
     
     def __init__(self, num_key_value_heads: int, seq_dim: int = 2):
         self.seq_dim = seq_dim
@@ -12,6 +11,11 @@ class BaseCache(ABC):
         self.value_data = None
         self.num_key_value_heads = num_key_value_heads
         self.device = None
+        self.use_compression = False
+        self.total_budget = 0
+        self.recent_budget = 0
+        self.select_budget = 0
+        self.score = None
     
     def len(self):
         return self.seq_length
@@ -31,14 +35,18 @@ class BaseCache(ABC):
         self.seq_length += L
         return self.key_data, self.value_data
     
-    @abstractmethod
     def init_cache(self, compression_config, layer_idx):
-        """Initialize cache with compression settings"""
-        pass
+        """Initialize cache with compression settings - to be overridden by subclasses"""
+        self.seq_length = 0
+        self.use_compression = compression_config.use_compression
+        if self.use_compression:
+            self.total_budget = max(round(compression_config.total_budget * compression_config.layerwise_ratio[layer_idx]), 2)
+            self.recent_budget = round(self.total_budget * 0.5)
+            self.select_budget = self.total_budget - self.recent_budget
+        self.score = None
     
     def update(self, attn_scores):
-        """Update cache based on attention scores"""
-        # Let each implementation handle its own update logic
+        """Update cache based on attention scores - to be overridden by subclasses"""
         pass
     
     def select(self):
@@ -75,7 +83,15 @@ class BaseCache(ABC):
         ), dim=self.seq_dim)
     
     def prepare_scores(self, attn_scores):
-        """Prepare scores for selection (implemented by each cache type)"""
+        """Prepare scores for selection - to be overridden by subclasses"""
+        pass
+
+    def flash_prepare_scores(self, attn_scores):
+        """Prepare scores for selection - to be overridden by subclasses"""
+        pass
+
+    def set_forget(self, forget, exponents):
+        """Set forget flag and exponents - to be overridden by subclasses"""
         pass
     
     def flash_attention(self, query, key, value, attn_mask, head_dim, block_size=1024):
@@ -102,8 +118,8 @@ class BaseCache(ABC):
         output = torch.zeros_like(query)
         running_max = torch.full((batch_size, num_heads, seq_len_q, 1), float('-inf'), device=query.device, dtype=query.dtype)
         running_sum = torch.zeros((batch_size, num_heads, seq_len_q, 1), device=query.device, dtype=query.dtype)
-        
-        self.score = torch.zeros((batch_size, num_heads, seq_len_k), dtype=query.dtype, device=query.device)
+
+        acc_score = torch.zeros((batch_size, num_heads, seq_len_k), dtype=query.dtype, device=query.device)
         
         # Process key-value pairs in chunks
         for k_start in range(0, seq_len_k, block_size):
@@ -127,8 +143,8 @@ class BaseCache(ABC):
             scores.sub_(new_max).exp_()  # Subtract new_max and apply exp in-place
             running_sum.mul_(torch.exp(running_max - new_max)).add_(torch.sum(scores, dim=-1, keepdim=True))
             
-            self.score.mul_(torch.exp(running_max - new_max).squeeze(-1))
-            self.score[:,:,k_start:k_end].add_(self.flash_prepare_scores(scores))
+            acc_score.mul_(torch.exp(running_max - new_max).squeeze(-1))
+            acc_score[:,:,k_start:k_end].add_(self.flash_prepare_scores(scores))
             
             # Update output
             output.mul_(torch.exp(running_max - new_max)).add_(torch.matmul(scores, v_chunk))
@@ -136,91 +152,19 @@ class BaseCache(ABC):
             # Update running max
             running_max.copy_(new_max)
         
-        self.score.div_(running_sum.squeeze(-1))
+        # GQA Aware Accumulation
+        acc_score.div_(running_sum.squeeze(-1))
+        acc_score = acc_score.view(acc_score.shape[0], self.num_key_value_heads, -1, *acc_score.shape[2:]).sum(dim=2)
+        if self.score is None:
+            self.score = acc_score
+        else:
+            acc_score[:,:,:-1] += self.score
+            self.score = acc_score
+        
         # Final normalization
         output = output / running_sum
         
         return output
 
-class KVCache(BaseCache):
-    """Main cache class that dispatches to specific implementations"""
-    
-    def __init__(self, num_key_value_heads: int, seq_dim: int = 2):
-        super().__init__(num_key_value_heads, seq_dim)
-        self.cache_impl = None
-        self.cache_type = None
-    
-    def init_cache(self, compression_config, layer_idx):
-        """Initialize cache with compression settings and create appropriate implementation"""
-        self.seq_length = 0
-        
-        # Determine cache type based on config
-        if compression_config.use_compression:
-            if compression_config.compression_method == "streamingLLM":
-                self.cache_type = 'streaming'
-                from .streaming_cache import StreamingCache
-                self.cache_impl = StreamingCache(self.num_key_value_heads, self.seq_dim)
-            elif compression_config.compression_method == "average":
-                self.cache_type = 'average'
-                from .average_cache import AverageCache
-                self.cache_impl = AverageCache(self.num_key_value_heads, self.seq_dim)
-            elif compression_config.compression_method == "h2o" or compression_config.compression_method == "a2sf":
-                # Check if it's H2O (forgetting_factor == 1) or A2SF
-                if compression_config.forgetting_factors and compression_config.forgetting_factors[layer_idx] == 1:
-                    self.cache_type = 'h2o'
-                    from .h2o_cache import H2OCache
-                    self.cache_impl = H2OCache(self.num_key_value_heads, self.seq_dim)
-                else:
-                    self.cache_type = 'a2sf'
-                    from .a2sf_cache import A2SFCache
-                    self.cache_impl = A2SFCache(self.num_key_value_heads, self.seq_dim)
-            else:
-                raise ValueError(f"Unsupported compression method: {compression_config.compression_method}")
-        else:
-            self.cache_type = 'none'
-            self.cache_impl = None
-        
-        # Initialize the specific implementation
-        if self.cache_impl:
-            self.cache_impl.init_cache(compression_config, layer_idx)
-    
-    def update(self, attn_scores):
-        """Update cache based on attention scores"""
-        if self.cache_impl:
-            self.cache_impl.update(attn_scores)
-    
-    def set_forget(self, forget, exponents):
-        """Set forgetting parameters for A2SF/H2O"""
-        if self.cache_impl and hasattr(self.cache_impl, 'set_forget'):
-            self.cache_impl.set_forget(forget, exponents)
-    
-    def prepare_scores(self, attn_scores):
-        """Delegate to cache implementation"""
-        if self.cache_impl and hasattr(self.cache_impl, 'prepare_scores'):
-            self.cache_impl.prepare_scores(attn_scores)
-    
-    def update(self, attn_scores):
-        """Delegate to cache implementation"""
-        if self.cache_impl:
-            self.cache_impl.update(attn_scores)
-    
-    def select(self):
-        """Delegate to cache implementation"""
-        if self.cache_impl and hasattr(self.cache_impl, 'select'):
-            self.cache_impl.select()
-    
-    def flash_attention(self, query, key, value, attn_mask, head_dim, block_size=1024):
-        """Delegate to cache implementation"""
-        if self.cache_impl and hasattr(self.cache_impl, 'flash_attention'):
-            return self.cache_impl.flash_attention(query, key, value, attn_mask, head_dim, block_size)
-        else:
-            return super().flash_attention(query, key, value, attn_mask, head_dim, block_size)
-    
-    # Delegate other methods to the implementation
-    def __getattr__(self, name):
-        if self.cache_impl and hasattr(self.cache_impl, name):
-            return getattr(self.cache_impl, name)
-        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
-
 # Export the main KVCache class
-__all__ = ["KVCache", "BaseCache"] 
+__all__ = ["KVCache"] 

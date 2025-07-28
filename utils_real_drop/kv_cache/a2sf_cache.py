@@ -1,29 +1,20 @@
 import torch
-from . import BaseCache
+from . import KVCache
 
-class A2SFCache(BaseCache):
+class A2SFCache(KVCache):
     """A2SF cache implementation (forgetting_factor != 1)"""
     
     def __init__(self, num_key_value_heads: int, seq_dim: int = 2):
         super().__init__(num_key_value_heads, seq_dim)
-        self.use_compression = False
-        self.total_budget = 0
-        self.recent_budget = 0
-        self.select_budget = 0
         self.forgetting_factor = None
-        self.score = None
         self.forget = None
         self.exponents = None
         self.input_ids = None
     
     def init_cache(self, compression_config, layer_idx):
         """Initialize A2SF cache settings"""
-        self.use_compression = True
-        self.total_budget = max(round(compression_config.total_budget * compression_config.layerwise_ratio[layer_idx]), 2)
-        self.recent_budget = round(self.total_budget * 0.5)
-        self.select_budget = self.total_budget - self.recent_budget
+        super().init_cache(compression_config, layer_idx)
         self.forgetting_factor = compression_config.forgetting_factors[layer_idx] if compression_config.forgetting_factors is not None else None
-        self.score = None
         self.input_ids = None
     
     def update(self, attn_scores):
@@ -52,6 +43,8 @@ class A2SFCache(BaseCache):
             self.score = current_score
             if self.forget:
                 self.score *= self.forgetting_factor
+        
+        self.score = self.score.view(attn_scores_shape[0], self.num_key_value_heads, -1, *attn_scores_shape[2:]).sum(dim=2)
     
     def flash_prepare_scores(self, attn_scores):
         seq_len = attn_scores.size(2)

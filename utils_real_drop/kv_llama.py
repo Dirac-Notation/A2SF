@@ -64,7 +64,7 @@ class LlamaAttention(nn.Module):
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=config.attention_bias)
         self._init_rope()
         
-        self.past_key_value = KVCache(self.num_key_value_heads)
+        self.past_key_value = None  # Will be initialized in init_cache
 
     def _init_rope(self):
         self.rotary_emb = LlamaRotaryEmbedding(
@@ -221,6 +221,31 @@ class LlamaModel(LlamaPreTrainedModel):
         self.compression_method = compression_config.compression_method
         self.punctuation_ids = compression_config.punctuation_ids
         for idx, layer in enumerate(self.layers):
+            # Create appropriate cache implementation based on compression method
+            if compression_config.use_compression:
+                if compression_config.compression_method == "streamingLLM":
+                    from .kv_cache.streaming_cache import StreamingCache
+                    layer.self_attn.past_key_value = StreamingCache(layer.self_attn.num_key_value_heads)
+                elif compression_config.compression_method == "average":
+                    from .kv_cache.average_cache import AverageCache
+                    layer.self_attn.past_key_value = AverageCache(layer.self_attn.num_key_value_heads)
+                elif compression_config.compression_method == "h2o" or compression_config.compression_method == "a2sf":
+                    # Check if it's H2O (forgetting_factor == 1) or A2SF
+                    if compression_config.forgetting_factors and compression_config.forgetting_factors[idx] == 1:
+                        from .kv_cache.h2o_cache import H2OCache
+                        layer.self_attn.past_key_value = H2OCache(layer.self_attn.num_key_value_heads)
+                    else:
+                        from .kv_cache.a2sf_cache import A2SFCache
+                        layer.self_attn.past_key_value = A2SFCache(layer.self_attn.num_key_value_heads)
+                elif compression_config.compression_method == "snap":
+                    from .kv_cache.snap_cache import SnapCache
+                    layer.self_attn.past_key_value = SnapCache(layer.self_attn.num_key_value_heads)
+                else:
+                    raise ValueError(f"Unsupported compression method: {compression_config.compression_method}")
+            else:
+                from .kv_cache import KVCache
+                layer.self_attn.past_key_value = KVCache(layer.self_attn.num_key_value_heads)
+            
             layer.self_attn.past_key_value.init_cache(compression_config, layer_idx=idx)
         
     def set_forget(self, input_ids):
