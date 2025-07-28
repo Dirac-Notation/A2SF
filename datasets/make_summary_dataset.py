@@ -25,7 +25,7 @@ tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-chat-hf")
 MAX_TOKENS = 1000  # Changed to 1000 tokens
 FEWSHOT_SAMPLES = 100  # Number of few-shot samples to create
 
-dataset_obj = (load_dataset(args.dataset, "2.0.0") if args.dataset == "abisee/cnn_dailymail" else load_dataset(args.dataset))
+dataset_obj = (load_dataset(args.dataset, "2.0.0", trust_remote_code=True) if args.dataset == "abisee/cnn_dailymail" else load_dataset(args.dataset, trust_remote_code=True))
 dataset = dataset_obj['test']
 
 prompts = []

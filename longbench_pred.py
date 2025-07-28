@@ -109,7 +109,7 @@ if __name__ == '__main__':
     # Process each dataset
     for dataset in datasets:
         print(f"\nProcessing dataset: {dataset}")
-        data = load_dataset('THUDM/LongBench', dataset, split='test')
+        data = load_dataset('THUDM/LongBench', dataset, split='test', trust_remote_code=True)
         output_dir = f"result_txt/pred/{model_name}_{args.method}_{args.total_budget}"
             
         if not os.path.exists(output_dir):
