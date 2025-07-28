@@ -11,7 +11,9 @@ class SnapCache(KVCache):
     def init_cache(self, compression_config, layer_idx):
         """Initialize Snap cache settings"""
         super().init_cache(compression_config, layer_idx)
-        self.observation_window = 16
+        self.total_budget = max(round(compression_config.total_budget * compression_config.layerwise_ratio[layer_idx]), 2)
+        self.recent_budget = 16
+        self.select_budget = self.total_budget - self.recent_budget
         self.prompt = False
     
     def update(self, attn_scores=None):
@@ -31,7 +33,7 @@ class SnapCache(KVCache):
         attn_scores = attn_scores.view(attn_scores_shape[0], self.num_key_value_heads, -1, *attn_scores_shape[2:]).sum(dim=2)
         
         # For H2O, simply sum attention scores without forgetting factor
-        current_score = attn_scores[:,:,-self.observation_window:].sum(self.seq_dim)
+        current_score = attn_scores[:,:,-self.recent_budget:].sum(self.seq_dim)
         
         if self.score is not None:
             current_score[:,:,:-1] += self.score
@@ -39,7 +41,7 @@ class SnapCache(KVCache):
     
     def flash_prepare_scores(self, attn_scores):
         if not self.prompt:
-            return attn_scores[:,:,-self.observation_window:].sum(self.seq_dim)
+            return attn_scores[:,:,-self.recent_budget:].sum(self.seq_dim)
         else:
             return torch.zeros_like(attn_scores.sum(self.seq_dim))
     
@@ -51,7 +53,7 @@ class SnapCache(KVCache):
             return
         
         # Select tokens to keep (common logic)
-        selected_indices = self.score.topk(self.total_budget, dim=-1).indices.sort().values
+        selected_indices = self.score[:,:,:-self.recent_budget].topk(self.select_budget, dim=-1).indices.sort().values
         
         # Update scores
         self.score = torch.cat((
