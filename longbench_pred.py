@@ -14,7 +14,7 @@ def parse_args(args=None):
     parser.add_argument('--gpus', type=int, nargs='+', default=[0], help="List of GPU IDs (e.g., --gpus 0 1 2 3)")
     parser.add_argument('--model', type=str, default=None, choices=["llama", "llama2", "llama3", "opt", "qwen2"])
     parser.add_argument('--method', type=str, default="a2sf")
-    parser.add_argument('--total_budget', type=int, default=100)
+    parser.add_argument('--budget', type=int, default=100)
     return parser.parse_args(args)
 
 def build_chat(tokenizer, prompt, model_name):
@@ -37,7 +37,7 @@ def get_pred(data, max_length, max_gen, prompt_format, dataset, model, tokenizer
         attention_mask = input.attention_mask.to(torch.bfloat16).to(model.device)
         
         context_length = input_ids.shape[-1]
-        model.init_cache(load_configs(args.model, args.method, args.total_budget, tokenizer))
+        model.init_cache(load_configs(args.model, args.method, args.budget, tokenizer))
         with torch.inference_mode():
             if dataset == "samsum":
                 output = model.generate(
@@ -110,7 +110,7 @@ if __name__ == '__main__':
     for dataset in datasets:
         print(f"\nProcessing dataset: {dataset}")
         data = load_dataset('THUDM/LongBench', dataset, split='test', trust_remote_code=True)
-        output_dir = f"result_txt/pred/{model_name}_{args.method}_{args.total_budget}"
+        output_dir = f"result_txt/pred/{model_name}_{args.method}_{args.budget}"
             
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)

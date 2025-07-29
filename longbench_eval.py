@@ -40,7 +40,7 @@ dataset2metric = {
 }
 
 data_group = {
-    "Code Complete": ["repobench-p"],
+    "Code Complete": ["repobench-p", "lcc"],
     "Few Shot": ["trec", "triviaqa", "samsum", "lsht"],
     "Single-doc QA": ["narrativeqa", "qasper", "multifieldqa_en", "multifieldqa_zh"],
     "Multi-doc QA": ["hotpotqa", "2wikimqa", "musique", "dureader"],
