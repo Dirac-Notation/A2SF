@@ -20,7 +20,7 @@ class PyramidCache(KVCache):
         
         step = (max_budget - min_budget) // 31
         self.total_budget = max_budget - step * layer_idx
-        print(f"layer {layer_idx} total budget: {self.total_budget}")
+        
         self.select_budget = self.total_budget - self.recent_budget
         self.score = None
         self.prompt = False
