@@ -10,10 +10,11 @@ class SnapCache(KVCache):
     
     def init_cache(self, compression_config, layer_idx):
         """Initialize Snap cache settings"""
-        super().init_cache(compression_config, layer_idx)
-        self.total_budget = max(round(compression_config.total_budget * compression_config.layerwise_ratio[layer_idx]), 2)
-        self.recent_budget = 16
+        self.seq_length = 0
+        self.total_budget = compression_config.total_budget
+        self.recent_budget = compression_config.recent_budget
         self.select_budget = self.total_budget - self.recent_budget
+        self.score = None
         self.prompt = False
     
     def update(self, attn_scores=None):

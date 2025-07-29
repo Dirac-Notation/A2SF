@@ -37,26 +37,14 @@ def get_pred(data, max_length, max_gen, prompt_format, dataset, model, tokenizer
         context_length = input_ids.shape[-1]
         model.init_cache(load_configs(args.model, args.method, args.budget, tokenizer))
         with torch.inference_mode():
-            if dataset == "samsum":
-                output = model.generate(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    max_new_tokens=max_gen,
-                    num_beams=1,
-                    do_sample=False,
-                    temperature=1.0,
-                    min_length=context_length+1,
-                    eos_token_id=[tokenizer.eos_token_id, tokenizer.encode("\n", add_special_tokens=False)[-1]],
-                )[0]
-            else:
-                output = model.generate(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    max_new_tokens=max_gen,
-                    num_beams=1,
-                    do_sample=False,
-                    temperature=1.0,
-                )[0]
+            output = model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=max_gen,
+                num_beams=1,
+                do_sample=False,
+                temperature=1.0,
+            )[0]
         pred = tokenizer.decode(output[context_length:], skip_special_tokens=True)
         with open(out_path, "a", encoding="utf-8") as f:
             json.dump({"pred": pred, "answers": json_obj["answers"], "all_classes": json_obj["all_classes"], "length": json_obj["length"]}, f, ensure_ascii=False)

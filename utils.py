@@ -1,101 +1,62 @@
 import torch
 import json
-import random
-import numpy as np
 
-from datasets import load_dataset
-from dataclasses import dataclass
 from transformers import AutoTokenizer, AutoConfig
 from utils_real_drop import KVLlamaForCausalLM, KVOPTForCausalLM, KVQwen2ForCausalLM, Qwen2Tokenizer
 
-@dataclass
-class CompressionConfig:
-    use_compression: bool = False
-    compression_method: str = None
-    total_budget: int = None
-    streaming_budget: int = None
-    layerwise_ratio: list = None
-    forgetting_factors: list = None
-    punctuation_ids: list = None
+class CompressionConfig(dict):
+    __getattr__ = dict.get
+    __setattr__ = dict.__setitem__
+    __delattr__ = dict.__delitem__
 
 def load_configs(model_name, method, total_budget, tokenizer=None):
-    """
-    Load compression configuration based on model name and method.
-    
-    Args:
-        model_name (str): Name of the model (e.g., 'llama2', 'llama3')
-        method (str): Compression method ('a2sf', 'h2o', 'streamingLLM', 'average', 'full')
-        total_budget (int): Total budget for compression
-        tokenizer: Tokenizer instance (required for a2sf method)
-    
-    Returns:
-        CompressionConfig: Configuration object for the specified method
-    """
-    import json
-    
-    # Load compression configurations from JSON file
     try:
         with open("config/compression_configs.json", "r") as f:
             compression_configs = json.load(f)
     except FileNotFoundError:
         raise FileNotFoundError("compression_configs.json not found in config/ directory")
     
-    # Validate method and get configuration
+    # Get configuration data
     if method == "a2sf":
         if model_name not in compression_configs:
             raise ValueError(f"Model '{model_name}' not found in compression configurations")
         config_data = compression_configs[model_name]
-        
-        # Validate a2sf method requires tokenizer
-        if tokenizer is None:
-            raise ValueError("Tokenizer is required for a2sf method")
-        
-        # Get punctuation IDs for a2sf method
+    elif method in ["h2o", "average", "snap", "pyramid", "streamingLLM"]:
+        if method not in compression_configs:
+            raise ValueError(f"Method '{method}' not found in compression configurations")
+        config_data = compression_configs[method]
+    elif method == "full":
+        return CompressionConfig({"use_compression": False})
+    else:
+        raise ValueError(f"Unsupported method: {method}. Supported methods: a2sf, h2o, streamingLLM, average, full")
+    
+    # Create base config dictionary
+    config_dict = {
+        "use_compression": True,
+        "compression_method": config_data["compression_method"],
+        "total_budget": total_budget,
+        "method": method
+    }
+    
+    # Add method-specific fields
+    if "layerwise_ratio" in config_data:
+        config_dict["layerwise_ratio"] = config_data["layerwise_ratio"]
+    if "forgetting_factors" in config_data:
+        config_dict["forgetting_factors"] = config_data["forgetting_factors"]
+    if "compression_ratio" in config_data:
+        config_dict["layerwise_ratio"] = config_data["compression_ratio"]
+    if "streaming_budget" in config_data:
+        config_dict["streaming_budget"] = config_data["streaming_budget"]
+    
+    # Add punctuation_ids for a2sf method if tokenizer is provided
+    if method == "a2sf" and tokenizer is not None:
         punctuation_ids = [
             tokenizer.encode(".", add_special_tokens=False)[0],
             tokenizer.encode(" .", add_special_tokens=False)[0],
         ]
-        
-        return CompressionConfig(
-            use_compression=True,
-            compression_method=config_data["compression_method"],
-            total_budget=total_budget,
-            layerwise_ratio=config_data["layerwise_ratio"],
-            forgetting_factors=config_data["forgetting_factors"],
-            punctuation_ids=punctuation_ids
-        )
+        config_dict["punctuation_ids"] = punctuation_ids
     
-    elif method in ["h2o", "average", "snap", "pyramid"]:
-        if method not in compression_configs:
-            raise ValueError(f"Method '{method}' not found in compression configurations")
-        config_data = compression_configs[method]
-        
-        return CompressionConfig(
-            use_compression=True,
-            compression_method=config_data["compression_method"],
-            total_budget=total_budget,
-            layerwise_ratio=config_data["layerwise_ratio"],
-            forgetting_factors=config_data["forgetting_factors"]
-        )
-    
-    elif method == "streamingLLM":
-        if method not in compression_configs:
-            raise ValueError(f"Method '{method}' not found in compression configurations")
-        config_data = compression_configs[method]
-        
-        return CompressionConfig(
-            use_compression=True,
-            compression_method=config_data["compression_method"],
-            total_budget=total_budget,
-            layerwise_ratio=config_data["compression_ratio"],
-            streaming_budget=config_data["streaming_budget"]
-        )
-    
-    elif method == "full":
-        return CompressionConfig(use_compression=False)
-    
-    else:
-        raise ValueError(f"Unsupported method: {method}. Supported methods: a2sf, h2o, streamingLLM, average, full")
+    return CompressionConfig(config_dict)
 
 def load_model(model_name, gpu_list=None, model_path=None):
     """
