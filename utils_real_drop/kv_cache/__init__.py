@@ -50,6 +50,9 @@ class KVCache:
         pass
     
     def select(self):
+        if self.prompt:
+            return
+        
         """Common selection logic for all cache implementations"""
         if not (self.use_compression and self.seq_length > self.total_budget):
             return

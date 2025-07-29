@@ -46,6 +46,9 @@ class SnapCache(KVCache):
             return torch.zeros_like(attn_scores.sum(self.seq_dim))
     
     def select(self):
+        if self.prompt:
+            return
+        
         if not (self.use_compression and self.seq_length > self.total_budget):
             return
         

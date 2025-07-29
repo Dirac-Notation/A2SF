@@ -113,7 +113,7 @@ class LlamaAttention(nn.Module):
             exit()
         if query_states.size(2) == 1:
             self.stop += 1
-        if False:
+        if True:
             # Use flash attention for efficient computation
             attn_output = self.past_key_value.flash_attention(
                 query=query_states,
