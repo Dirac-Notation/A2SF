@@ -20,33 +20,18 @@ def load_configs(model_name, method, total_budget, tokenizer=None):
     if method == "a2sf":
         if model_name not in compression_configs:
             raise ValueError(f"Model '{model_name}' not found in compression configurations")
-        config_data = compression_configs[model_name]
+        config = compression_configs[model_name]
     elif method in ["h2o", "average", "snap", "pyramid", "streamingLLM"]:
         if method not in compression_configs:
             raise ValueError(f"Method '{method}' not found in compression configurations")
-        config_data = compression_configs[method]
+        config = compression_configs[method]
     elif method == "full":
-        return CompressionConfig({"use_compression": False})
+        return CompressionConfig({"method": "full"})
     else:
         raise ValueError(f"Unsupported method: {method}. Supported methods: a2sf, h2o, streamingLLM, average, full")
     
-    # Create base config dictionary
-    config_dict = {
-        "use_compression": True,
-        "compression_method": config_data["compression_method"],
-        "total_budget": total_budget,
-        "method": method
-    }
-    
-    # Add method-specific fields
-    if "layerwise_ratio" in config_data:
-        config_dict["layerwise_ratio"] = config_data["layerwise_ratio"]
-    if "forgetting_factors" in config_data:
-        config_dict["forgetting_factors"] = config_data["forgetting_factors"]
-    if "compression_ratio" in config_data:
-        config_dict["layerwise_ratio"] = config_data["compression_ratio"]
-    if "streaming_budget" in config_data:
-        config_dict["streaming_budget"] = config_data["streaming_budget"]
+    config["total_budget"] = total_budget
+    config["method"] = method
     
     # Add punctuation_ids for a2sf method if tokenizer is provided
     if method == "a2sf" and tokenizer is not None:
@@ -54,9 +39,9 @@ def load_configs(model_name, method, total_budget, tokenizer=None):
             tokenizer.encode(".", add_special_tokens=False)[0],
             tokenizer.encode(" .", add_special_tokens=False)[0],
         ]
-        config_dict["punctuation_ids"] = punctuation_ids
+        config["punctuation_ids"] = punctuation_ids
     
-    return CompressionConfig(config_dict)
+    return CompressionConfig(config)
 
 def load_model(model_name, gpu_list=None, model_path=None):
     """

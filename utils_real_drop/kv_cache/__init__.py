@@ -47,7 +47,7 @@ class KVCache:
             return
         
         """Common selection logic for all cache implementations"""
-        if not (self.use_compression and self.seq_length > self.total_budget):
+        if self.seq_length <= self.total_budget:
             return
         
         # Select tokens to keep (common logic)
