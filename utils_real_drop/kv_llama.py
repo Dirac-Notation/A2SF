@@ -108,7 +108,7 @@ class LlamaAttention(nn.Module):
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-        if True:
+        if False:
             # Use flash attention for efficient computation
             attn_output = self.past_key_value.flash_attention(
                 query=query_states,
@@ -240,6 +240,9 @@ class LlamaModel(LlamaPreTrainedModel):
                 elif compression_config.compression_method == "snap":
                     from .kv_cache.snap_cache import SnapCache
                     layer.self_attn.past_key_value = SnapCache(layer.self_attn.num_key_value_heads)
+                elif compression_config.compression_method == "pyramid":
+                    from .kv_cache.pyramid_cache import PyramidCache
+                    layer.self_attn.past_key_value = PyramidCache(layer.self_attn.num_key_value_heads)
                 else:
                     raise ValueError(f"Unsupported compression method: {compression_config.compression_method}")
             else:

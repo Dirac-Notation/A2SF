@@ -43,8 +43,6 @@ class A2SFCache(KVCache):
             self.score = current_score
             if self.forget:
                 self.score *= self.forgetting_factor
-        
-        self.score = self.score.view(attn_scores_shape[0], self.num_key_value_heads, -1, *attn_scores_shape[2:]).sum(dim=2)
     
     def flash_prepare_scores(self, attn_scores):
         seq_len = attn_scores.size(2)

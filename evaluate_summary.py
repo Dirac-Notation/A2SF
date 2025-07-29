@@ -92,7 +92,7 @@ def evaluate_model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 max_new_tokens=output_indices[idx].numel(),
-                eos_token_id=eos_token_id,
+                eos_token_id=300000,
                 pad_token_id=pad_token_id,
                 do_sample=False
             )
