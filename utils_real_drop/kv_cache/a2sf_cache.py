@@ -10,18 +10,23 @@ class A2SFCache(KVCache):
         self.forget = None
         self.exponents = None
         self.input_ids = None
+        self.prompt = False
     
     def init_cache(self, compression_config, layer_idx):
         """Initialize A2SF cache settings"""
         super().init_cache(compression_config, layer_idx)
         self.forgetting_factor = compression_config.forgetting_factors[layer_idx] if compression_config.forgetting_factors is not None else None
         self.input_ids = None
-    
+        self.prompt = False
+
     def update(self, attn_scores):
         """Update cache using A2SF method (forgetting_factor != 1)"""
-        # First prepare scores, then select
-        self.prepare_scores(attn_scores)
-        self.select()
+        if not self.prompt:
+            self.prepare_scores(attn_scores)
+            self.select()
+            self.prompt = True
+        else:
+            return
     
     def prepare_scores(self, attn_scores):
         """Prepare scores for A2SF method (with forgetting factor)"""

@@ -107,7 +107,12 @@ class LlamaAttention(nn.Module):
 
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
-
+        if not hasattr(self, "stop"):
+            self.stop = 0
+        if self.stop == 2:
+            exit()
+        if query_states.size(2) == 1:
+            self.stop += 1
         if False:
             # Use flash attention for efficient computation
             attn_output = self.past_key_value.flash_attention(
@@ -119,16 +124,21 @@ class LlamaAttention(nn.Module):
             )
             self.past_key_value.select()
         else:
+            evt_start, evt_end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+            evt_start.record()
             attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
             if attention_mask is not None:
                 attn_weights = attn_weights + attention_mask[:,:,:,:attn_weights.size(-1)]
-
+ 
             attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-            
-            self.past_key_value.update(attn_weights)
-            
+          
             attn_output = torch.matmul(attn_weights, value_states)
+            evt_end.record()
+            torch.cuda.synchronize()
+            print(f"attn_weights time: {evt_start.elapsed_time(evt_end)} ms") 
+            self.past_key_value.update(attn_weights)
+
 
         attn_output = attn_output.transpose(1, 2).contiguous()
 
