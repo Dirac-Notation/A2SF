@@ -1,23 +1,23 @@
 import torch
 from . import KVCache
 
-class SnapCache(KVCache):
-    """Snap cache implementation"""
+class PyramidCache(KVCache):
+    """Pyramid cache implementation"""
     
     def __init__(self, num_key_value_heads: int, seq_dim: int = 2):
         super().__init__(num_key_value_heads, seq_dim)
         self.prompt = False
     
     def init_cache(self, compression_config, layer_idx):
-        """Initialize Snap cache settings"""
+        """Initialize Pyramid cache settings"""
         super().init_cache(compression_config, layer_idx)
         self.total_budget = max(round(compression_config.total_budget * compression_config.layerwise_ratio[layer_idx]), 2)
-        self.recent_budget = 16
+        self.recent_budget = 8 if self.total_budget > 8 else self.total_budget - 1
         self.select_budget = self.total_budget - self.recent_budget
         self.prompt = False
     
     def update(self, attn_scores=None):
-        """Update cache using Snap method"""
+        """Update cache using H2O method (forgetting_factor == 1)"""
         # First prepare scores, then select
         if not self.prompt:
             self.prepare_scores(attn_scores)
@@ -27,7 +27,7 @@ class SnapCache(KVCache):
             return
     
     def prepare_scores(self, attn_scores):
-        """Prepare scores for Snap method"""
+        """Prepare scores for H2O method (simple accumulation)"""
         attn_scores_shape = attn_scores.shape
         
         attn_scores = attn_scores.view(attn_scores_shape[0], self.num_key_value_heads, -1, *attn_scores_shape[2:]).sum(dim=2)
