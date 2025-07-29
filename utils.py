@@ -90,11 +90,11 @@ def load_model(model_name, gpu_list=None, model_path=None):
 
         # Load appropriate model based on model name
         if "llama" in model_name.lower():
-            model = KVLlamaForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16, device_map=device_map)
+            model = KVLlamaForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16, device_map="auto")
         elif "opt" in model_name.lower():
-            model = KVOPTForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16, device_map=device_map)
+            model = KVOPTForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16, device_map="auto")
         elif "qwen" in model_name.lower():
-            model = KVQwen2ForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16, device_map=device_map)
+            model = KVQwen2ForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16, device_map="auto")
         else:
             raise ValueError(f"Unsupported model: {model_name}. Only Llama, OPT, and Qwen2 models are supported.")
     
