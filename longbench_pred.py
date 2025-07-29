@@ -26,11 +26,9 @@ def get_pred(data, max_length, max_gen, prompt_format, dataset, model, tokenizer
     for json_obj in tqdm(data):
         prompt = prompt_format.format(**json_obj)
         tokenized_prompt = tokenizer(prompt, truncation=False, return_tensors="pt").input_ids[0]
-        if len(tokenized_prompt) > max_length:
-            half = int(max_length/2)
-            prompt = tokenizer.decode(tokenized_prompt[:half], skip_special_tokens=True)+tokenizer.decode(tokenized_prompt[-half:], skip_special_tokens=True)
-        if dataset not in ["trec", "triviaqa", "samsum", "lsht", "lcc", "repobench-p"]:
-            prompt = build_chat(tokenizer, prompt, args.model)
+        half = int(max_length/2)
+        prompt = tokenizer.decode(tokenized_prompt[:half], skip_special_tokens=True)+tokenizer.decode(tokenized_prompt[-half:], skip_special_tokens=True)
+        prompt = build_chat(tokenizer, prompt, args.model)
         input = tokenizer(prompt, truncation=False, return_tensors="pt")
         
         input_ids = input.input_ids.to(model.device)
@@ -94,9 +92,9 @@ if __name__ == '__main__':
     print("Model and tokenizer loaded successfully!")
     
     # Define datasets
-    datasets = ["narrativeqa", "qasper", "multifieldqa_en", "multifieldqa_zh", "hotpotqa", "2wikimqa", "musique", \
-                "dureader", "gov_report", "qmsum", "multi_news", "vcsum", "trec", "triviaqa", "samsum", "lsht", \
-                "passage_count", "passage_retrieval_en", "passage_retrieval_zh", "lcc", "repobench-p"]
+    datasets = ["narrativeqa", "qasper", "multifieldqa_en", "hotpotqa", "2wikimqa", "musique", \
+                "gov_report", "qmsum", "multi_news", "trec", "triviaqa", "samsum", \
+                "passage_count", "passage_retrieval_en", "lcc", "repobench-p"]
     
     # Load prompt and max length configurations
     dataset2prompt = json.load(open("config/dataset2prompt.json", "r"))
