@@ -10,7 +10,11 @@ class H2OCache(KVCache):
     
     def init_cache(self, compression_config, layer_idx):
         """Initialize H2O cache settings"""
-        super().init_cache(compression_config, layer_idx)
+        self.seq_length = 0
+        self.total_budget = compression_config.total_budget
+        self.recent_budget = round(self.total_budget * 0.5)
+        self.select_budget = self.total_budget - self.recent_budget
+        self.score = None
         self.prompt = False
     
     def update(self, attn_scores=None):
