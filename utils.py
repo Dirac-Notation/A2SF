@@ -1,5 +1,6 @@
 import torch
 import json
+import os
 
 from transformers import AutoTokenizer, AutoConfig
 from utils_real_drop import KVLlamaForCausalLM, KVOPTForCausalLM, KVQwen2ForCausalLM, Qwen2Tokenizer
@@ -79,39 +80,13 @@ def load_model(model_name, gpu_list=None, model_path=None):
     
     # Handle multi-GPU case
     else:
-        num_gpus = len(gpu_list)
+        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpu_list))
         
         # Load tokenizer first
         if "qwen" in model_name.lower():
             tokenizer = Qwen2Tokenizer.from_pretrained(model_path)
         else:
             tokenizer = AutoTokenizer.from_pretrained(model_path)
-        
-        # Load model config to get actual number of layers
-        config = AutoConfig.from_pretrained(model_path)
-        total_layers = config.num_hidden_layers
-        
-        # Create device map based on GPU count
-        device_map = {}
-        
-        # Multiple GPUs: distribute layers across GPUs
-        # Reserve last GPU for lm_head, distribute other layers across remaining GPUs
-        layers_per_gpu = total_layers // (num_gpus - 1) if num_gpus > 1 else total_layers
-        
-        # Distribute layers across GPUs (excluding the last GPU)
-        for i in range(total_layers):
-            if num_gpus == 1:
-                gpu_idx = 0
-            else:
-                gpu_idx = min(i // layers_per_gpu, num_gpus - 2)  # Use up to second-to-last GPU
-            device_map[f"model.layers.{i}"] = f"cuda:{gpu_list[gpu_idx]}"
-        
-        # Place embedding and norm layers on first GPU
-        device_map["model.embed_tokens"] = f"cuda:{gpu_list[0]}"
-        device_map["model.norm"] = f"cuda:{gpu_list[-2] if num_gpus > 1 else gpu_list[0]}"
-        device_map["lm_head"] = f"cuda:{gpu_list[-1]}"
-
-        print(f"Device map: {device_map}")
 
         # Load appropriate model based on model name
         if "llama" in model_name.lower():
