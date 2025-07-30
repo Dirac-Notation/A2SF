@@ -44,7 +44,7 @@ def load_configs(model_name, method, total_budget, tokenizer=None):
     
     return CompressionConfig(config)
 
-def load_model(model_name, gpu_list=None, model_path=None):
+def load_model(model_name, gpu_list=None):
     """
     Load model and tokenizer based on model name and GPU configuration.
     
@@ -62,47 +62,31 @@ def load_model(model_name, gpu_list=None, model_path=None):
             model2path = json.load(f)
         model_path = model2path[model_name]
     
-    # Handle single GPU case
-    if gpu_list is None:
-        device = "cuda:0"
-        
-        if "llama" in model_name.lower():
-            model = KVLlamaForCausalLM.from_pretrained(model_path).to(torch.bfloat16).to(device)
-            tokenizer = AutoTokenizer.from_pretrained(model_path)
-        elif "opt" in model_name.lower():
-            model = KVOPTForCausalLM.from_pretrained(model_path).to(torch.bfloat16).to(device)
-            tokenizer = AutoTokenizer.from_pretrained(model_path)
-        elif "qwen" in model_name.lower():
-            model = KVQwen2ForCausalLM.from_pretrained(model_path).to(torch.bfloat16).to(device)
-            tokenizer = Qwen2Tokenizer.from_pretrained(model_path)
-        else:
-            raise ValueError(f"Unsupported model: {model_name}. Only Llama, OPT, and Qwen2 models are supported.")
-    
-    # Handle multi-GPU case
-    else:
+    if gpu_list is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpu_list))
-        
-        # Load tokenizer first
-        if "qwen" in model_name.lower():
-            tokenizer = Qwen2Tokenizer.from_pretrained(model_path)
-        else:
-            tokenizer = AutoTokenizer.from_pretrained(model_path)
+    
+    # Load tokenizer first
+    if "qwen" in model_name.lower():
+        tokenizer = Qwen2Tokenizer.from_pretrained(model_path)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(model_path)
 
-        # Load appropriate model based on model name
-        if "llama" in model_name.lower():
-            model = KVLlamaForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16, device_map="auto")
-        elif "opt" in model_name.lower():
-            model = KVOPTForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16, device_map="auto")
-        elif "qwen" in model_name.lower():
-            model = KVQwen2ForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16, device_map="auto")
-        else:
-            raise ValueError(f"Unsupported model: {model_name}. Only Llama, OPT, and Qwen2 models are supported.")
+    # Load appropriate model based on model name
+    if "llama" in model_name.lower():
+        model = KVLlamaForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16, device_map="auto")
+    elif "opt" in model_name.lower():
+        model = KVOPTForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16, device_map="auto")
+    elif "qwen" in model_name.lower():
+        model = KVQwen2ForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16, device_map="auto")
+    else:
+        raise ValueError(f"Unsupported model: {model_name}. Only Llama, OPT, and Qwen2 models are supported.")
     
     model = model.eval()
+    
     return model, tokenizer
 
 def get_prompt(index: int = 0):
-    with open("datasets/cnn_dailymail-2shot.jsonl", "r") as f:
+    with open("datasets/converted_longbench/longbench_to_cnn_20250730_004054/hotpotqa_5samples.jsonl", "r") as f:
         articles = [json.loads(line)["article"] for line in f]
     return articles[index]
 

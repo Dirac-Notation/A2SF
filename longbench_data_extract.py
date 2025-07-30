@@ -81,12 +81,9 @@ def main():
     dummy_model = DummyModel()
     
     # Define datasets (same as in original code)
-    datasets = [
-        "narrativeqa", "qasper", "multifieldqa_en", "multifieldqa_zh", "hotpotqa", 
-        "2wikimqa", "musique", "dureader", "gov_report", "qmsum", "multi_news", 
-        "vcsum", "trec", "triviaqa", "samsum", "lsht", "passage_count", 
-        "passage_retrieval_en", "passage_retrieval_zh", "lcc", "repobench-p"
-    ]
+    datasets = ["narrativeqa", "qasper", "multifieldqa_en", "hotpotqa", "2wikimqa", "musique", \
+                "gov_report", "qmsum", "multi_news", "trec", "triviaqa", "samsum", \
+                "passage_count", "passage_retrieval_en", "lcc", "repobench-p"]
     
     # Load configurations
     dataset2prompt = json.load(open("config/dataset2prompt.json", "r"))
