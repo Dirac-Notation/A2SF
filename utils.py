@@ -56,11 +56,8 @@ def load_model(model_name, gpu_list=None):
     Returns:
         tuple: (model, tokenizer)
     """
-    # Load model path from config if not provided
-    if model_path is None:
-        with open("config/model2path.json", "r") as f:
-            model2path = json.load(f)
-        model_path = model2path[model_name]
+    model2path = json.load(open("config/model2path.json", "r"))
+    model_path = model2path[model_name]
     
     if gpu_list is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpu_list))
