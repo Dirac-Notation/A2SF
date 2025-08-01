@@ -12,7 +12,7 @@ from utils import load_configs, load_model
 def parse_args(args=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--gpus', type=int, nargs='+', default=[0], help="List of GPU IDs (e.g., --gpus 0 1 2 3)")
-    parser.add_argument('--model', type=str, default=None, choices=["llama", "llama2", "llama3", "opt", "qwen2"])
+    parser.add_argument('--model', type=str, default=None)
     parser.add_argument('--method', type=str, default="a2sf")
     parser.add_argument('--budget', type=int, default=100)
     return parser.parse_args(args)
@@ -110,6 +110,7 @@ if __name__ == '__main__':
     for dataset in datasets:
         print(f"\nProcessing dataset: {dataset}")
         data = load_dataset('THUDM/LongBench', dataset, split='test', trust_remote_code=True)
+        data = data.select(range(10))
         output_dir = f"result_txt/pred/{model_name}_{args.method}_{args.budget}"
             
         if not os.path.exists(output_dir):

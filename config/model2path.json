@@ -4,7 +4,6 @@
     "llama3": "meta-llama/Meta-Llama-3-8B-Instruct",
     "opt": "facebook/opt-6.7b",
     "qwen2": "Qwen/Qwen2-7B-Instruct",
-    "llama2_masked": "meta-llama/Llama-2-7b-chat-hf",
-    "llama2_ratio_fixed": "meta-llama/Llama-2-7b-chat-hf",
-    "llama2_factor_fixed": "meta-llama/Llama-2-7b-chat-hf"
+    "llama3_test": "meta-llama/Meta-Llama-3-8B-Instruct",
+    "llama3_grid": "meta-llama/Meta-Llama-3-8B-Instruct"
 }
