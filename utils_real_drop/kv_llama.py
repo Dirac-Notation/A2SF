@@ -259,9 +259,7 @@ class LlamaModel(LlamaPreTrainedModel):
         forget = False
         
         if self.compression_method == "a2sf":
-            if not self.input_ids:
-                self.input_ids = True
-                
+            if input_ids.size(1) > 1:
                 orig_shape = input_ids.shape
                 flattened_input_ids = input_ids.reshape(-1)
                 num_all = flattened_input_ids.size(0)

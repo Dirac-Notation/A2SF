@@ -62,7 +62,6 @@ def extract_data(data, prompt_format, dataset_name, dummy_model, out_path):
         # Save to file
         result = {
             "input_prompt": prompt,
-            "output": dummy_output,
             "answers": json_obj.get("answers", []),
             "all_classes": json_obj.get("all_classes", []),
             "length": json_obj.get("length", 0),

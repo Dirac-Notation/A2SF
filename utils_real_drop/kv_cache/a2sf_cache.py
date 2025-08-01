@@ -44,7 +44,11 @@ class A2SFCache(KVCache):
         if self.exponents is not None:
             forgetting = (self.forgetting_factor ** self.exponents.to(attn_scores.device)).view(1, 1, seq_len, 1)
             current_score = (forgetting * attn_scores).sum(dim=self.seq_dim)
-            self.score = current_score
+            if self.score is None:
+                self.score = current_score
+            else:
+                current_score[:,:,:-1] += self.score
+                self.score = current_score
         else:
             current_score = attn_scores.sum(self.seq_dim)
             if self.score is not None:
