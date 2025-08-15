@@ -22,14 +22,14 @@ def load_configs(model_name, method, total_budget, tokenizer=None):
         if model_name not in compression_configs:
             raise ValueError(f"Model '{model_name}' not found in compression configurations")
         config = compression_configs[model_name]
-    elif method in ["h2o", "average", "snap", "pyramid", "streamingLLM"]:
+    elif method in ["h2o", "average", "snap", "pyramid", "streamingLLM", "ssnap"]:
         if method not in compression_configs:
             raise ValueError(f"Method '{method}' not found in compression configurations")
         config = compression_configs[method]
     elif method == "full":
         return CompressionConfig({"method": "full"})
     else:
-        raise ValueError(f"Unsupported method: {method}. Supported methods: a2sf, h2o, streamingLLM, average, full")
+        raise ValueError(f"Unsupported method: {method}. Supported methods: a2sf, h2o, streamingLLM, average, snap, pyramid, full")
     
     config["total_budget"] = total_budget
     config["method"] = method

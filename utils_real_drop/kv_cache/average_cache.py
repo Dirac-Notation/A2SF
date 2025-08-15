@@ -18,7 +18,43 @@ class AverageCache(KVCache):
         self.score = None
         self.cumulative_count = None
         self.is_prefill = True
-    
+
+    def select(self):
+        if self.prompt:
+            return
+        
+        """Common selection logic for all cache implementations"""
+        if self.seq_length <= self.total_budget:
+            return
+        
+        # Select tokens to keep (common logic)
+        selected_indices = self.score[:,:,:-self.recent_budget].topk(self.select_budget, dim=-1).indices.sort().values
+        
+        # Update scores
+        self.score = torch.cat((
+            self.score.gather(self.seq_dim, selected_indices),
+            self.score[:,:,-self.recent_budget:]
+        ), dim=self.seq_dim)
+        
+        if getattr(self, "cumulative_count", None) is not None:
+            self.cumulative_count = torch.cat((
+                self.cumulative_count.gather(self.seq_dim, selected_indices),
+                self.cumulative_count[:,:,-self.recent_budget:]
+            ), dim=self.seq_dim)
+        
+        # Update key-value cache
+        selected_indices = selected_indices.unsqueeze(-1).expand(-1,-1,-1,self.key_data.size(-1))
+        
+        self.key_data = torch.cat((
+            self.key_data.gather(self.seq_dim, selected_indices),
+            self.key_data[:,:,-self.recent_budget:,:]
+        ), dim=self.seq_dim)
+        
+        self.value_data = torch.cat((
+            self.value_data.gather(self.seq_dim, selected_indices),
+            self.value_data[:,:,-self.recent_budget:,:]
+        ), dim=self.seq_dim)
+ 
     def update(self, attn_scores):
         """Update cache using average-based selection method"""
         # First prepare scores, then select
