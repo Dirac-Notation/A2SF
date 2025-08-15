@@ -110,7 +110,6 @@ if __name__ == '__main__':
     for dataset in datasets:
         print(f"\nProcessing dataset: {dataset}")
         data = load_dataset('THUDM/LongBench', dataset, split='test', trust_remote_code=True)
-        data = data.select(range(10))
         output_dir = f"result_txt/pred/{model_name}_{args.method}_{args.budget}"
             
         if not os.path.exists(output_dir):

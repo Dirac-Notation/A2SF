@@ -43,40 +43,7 @@ class KVCache:
         pass
     
     def select(self):
-        if self.prompt:
-            return
-        
-        """Common selection logic for all cache implementations"""
-        if self.seq_length <= self.total_budget:
-            return
-        
-        # Select tokens to keep (common logic)
-        selected_indices = self.score[:,:,:-self.recent_budget].topk(self.select_budget, dim=-1).indices.sort().values
-        
-        # Update scores
-        self.score = torch.cat((
-            self.score.gather(self.seq_dim, selected_indices),
-            self.score[:,:,-self.recent_budget:]
-        ), dim=self.seq_dim)
-        
-        if getattr(self, "cumulative_count", None) is not None:
-            self.cumulative_count = torch.cat((
-                self.cumulative_count.gather(self.seq_dim, selected_indices),
-                self.cumulative_count[:,:,-self.recent_budget:]
-            ), dim=self.seq_dim)
-        
-        # Update key-value cache
-        selected_indices = selected_indices.unsqueeze(-1).expand(-1,-1,-1,self.key_data.size(-1))
-        
-        self.key_data = torch.cat((
-            self.key_data.gather(self.seq_dim, selected_indices),
-            self.key_data[:,:,-self.recent_budget:,:]
-        ), dim=self.seq_dim)
-        
-        self.value_data = torch.cat((
-            self.value_data.gather(self.seq_dim, selected_indices),
-            self.value_data[:,:,-self.recent_budget:,:]
-        ), dim=self.seq_dim)
+        pass
     
     def prepare_scores(self, attn_scores):
         """Prepare scores for selection - to be overridden by subclasses"""
@@ -114,8 +81,6 @@ class KVCache:
         output = torch.zeros_like(query)
         running_max = torch.full((batch_size, num_heads, seq_len_q, 1), float('-inf'), device=query.device, dtype=query.dtype)
         running_sum = torch.zeros((batch_size, num_heads, seq_len_q, 1), device=query.device, dtype=query.dtype)
-
-        acc_score = torch.zeros((batch_size, num_heads, seq_len_k), dtype=query.dtype, device=query.device)
         
         # Process key-value pairs in chunks
         for k_start in range(0, seq_len_k, block_size):
@@ -139,23 +104,11 @@ class KVCache:
             scores.sub_(new_max).exp_()  # Subtract new_max and apply exp in-place
             running_sum.mul_(torch.exp(running_max - new_max)).add_(torch.sum(scores, dim=-1, keepdim=True))
             
-            acc_score.mul_(torch.exp(running_max - new_max).squeeze(-1))
-            acc_score[:,:,k_start:k_end].add_(self.flash_prepare_scores(scores))
-            
             # Update output
             output.mul_(torch.exp(running_max - new_max)).add_(torch.matmul(scores, v_chunk))
             
             # Update running max
             running_max.copy_(new_max)
-        
-        # GQA Aware Accumulation
-        acc_score.div_(running_sum.squeeze(-1))
-        acc_score = acc_score.view(acc_score.shape[0], self.num_key_value_heads, -1, *acc_score.shape[2:]).sum(dim=2)
-        if self.score is None:
-            self.score = acc_score
-        else:
-            acc_score[:,:,:-1] += self.score
-            self.score = acc_score
         
         # Final normalization
         output = output / running_sum
