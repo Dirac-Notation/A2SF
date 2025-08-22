@@ -185,9 +185,9 @@ def process_model(model_name, args):
     
     # Search space
     factor_step = 0.05
-    local_ratio_step = 0.1
-    local_ratios = [local_ratio_step*i for i in range(int(1/local_ratio_step)+1)]
-    # local_ratios = [0.125]
+    # local_ratio_step = 0.1
+    # local_ratios = [local_ratio_step*i for i in range(int(1/local_ratio_step)+1)]
+    local_ratios = [0.125]
     a2sf_factors = [factor_step*i for i in range(int(1/factor_step)+1)]
     
     all_grid = list(itertools.product(local_ratios, a2sf_factors))
