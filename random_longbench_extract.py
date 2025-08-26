@@ -8,14 +8,10 @@ def convert_longbench_to_cnn_format():
     # longbench 디렉토리 경로
     longbench_dir = Path("result_txt/longbench")
     
-    # 출력 파일 경로 - 별도 디렉토리에 저장
-    output_dir = Path("datasets/converted_longbench")
+    # 출력 파일 경로 - 단일 파일로 저장
+    output_dir = Path("datasets")
     output_dir.mkdir(exist_ok=True)
-    
-    # 타임스탬프를 포함한 디렉토리 생성
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    timestamp_dir = output_dir / f"longbench_to_cnn_{timestamp}"
-    timestamp_dir.mkdir(exist_ok=True)
+    output_file = output_dir / "calibration_dataset.jsonl"
     
     # longbench 파일들 목록
     longbench_files = list(longbench_dir.glob("*.jsonl"))
@@ -25,8 +21,10 @@ def convert_longbench_to_cnn_format():
         return
     
     print(f"발견된 LongBench 파일들: {[f.name for f in longbench_files]}")
-    print(f"출력 디렉토리: {timestamp_dir}")
+    print(f"출력 파일: {output_file}")
     
+    # 모든 변환된 데이터를 저장할 리스트
+    all_converted_data = []
     total_converted = 0
     
     for file_path in longbench_files:
@@ -50,15 +48,14 @@ def convert_longbench_to_cnn_format():
         
         print(f"  - {file_path.name}: {len(file_data)}개 데이터 발견")
         
-        if len(file_data) < 5:
-            print(f"  - {file_path.name}: 데이터가 5개 미만입니다. 모든 데이터를 사용합니다.")
+        if len(file_data) < 2:
+            print(f"  - {file_path.name}: 데이터가 2개 미만입니다. 모든 데이터를 사용합니다.")
             selected_data = file_data
         else:
-            # 랜덤으로 5개 선택
-            selected_data = random.sample(file_data, 5)
+            # 랜덤으로 2개 선택
+            selected_data = random.sample(file_data, 2)
         
         # CNN DailyMail 포맷으로 변환
-        converted_data = []
         for item in selected_data:
             # LongBench 데이터에서 필요한 필드 추출
             # LongBench 포맷: {"input_prompt": "...", "input": "...", "output": "..."}
@@ -91,23 +88,18 @@ def convert_longbench_to_cnn_format():
                 "source_file": file_path.name  # 원본 파일 정보 추가
             }
             
-            converted_data.append(converted_item)
+            all_converted_data.append(converted_item)
         
-        # 파일명 생성 (원본 파일명에서 확장자 제거하고 _5samples 추가)
-        original_name = file_path.stem  # 확장자 제거
-        output_filename = f"{original_name}_5samples.jsonl"
-        output_file = timestamp_dir / output_filename
-        
-        # 결과를 파일에 저장
-        with open(output_file, 'w', encoding='utf-8') as f:
-            for item in converted_data:
-                f.write(json.dumps(item, ensure_ascii=False) + '\n')
-        
-        print(f"  - 저장 완료: {output_filename} ({len(converted_data)}개)")
-        total_converted += len(converted_data)
+        print(f"  - {file_path.name}: {len(selected_data)}개 데이터 변환 완료")
+        total_converted += len(selected_data)
+    
+    # 모든 데이터를 하나의 파일에 저장
+    with open(output_file, 'w', encoding='utf-8') as f:
+        for item in all_converted_data:
+            f.write(json.dumps(item, ensure_ascii=False) + '\n')
     
     print(f"\n총 {total_converted}개의 데이터를 변환했습니다.")
-    print(f"모든 파일이 {timestamp_dir} 디렉토리에 저장되었습니다.")
+    print(f"모든 데이터가 {output_file} 파일에 저장되었습니다.")
 
 if __name__ == "__main__":
     convert_longbench_to_cnn_format() 

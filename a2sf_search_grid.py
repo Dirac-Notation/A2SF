@@ -186,6 +186,7 @@ def process_model(model_name, args):
     # Search space
     factor_step = 0.05
     # local_ratio_step = 0.1
+    
     # local_ratios = [local_ratio_step*i for i in range(int(1/local_ratio_step)+1)]
     local_ratios = [0.125]
     a2sf_factors = [factor_step*i for i in range(int(1/factor_step)+1)]
@@ -228,6 +229,10 @@ def process_model(model_name, args):
         max_idx = grid_score[layer_idx].index(max(grid_score[layer_idx]))
         layerwise_local_ratio[layer_idx] = all_grid[max_idx][0]
         layerwise_a2sf_factors[layer_idx] = all_grid[max_idx][1]
+
+    layerwise_budget_ratio = [round(ratio, 2) for ratio in layerwise_budget_ratio]
+    layerwise_a2sf_factors = [round(factor, 2) for factor in layerwise_a2sf_factors]
+    layerwise_local_ratio = [round(ratio, 2) for ratio in layerwise_local_ratio]
 
     return {
         "model": model_name,

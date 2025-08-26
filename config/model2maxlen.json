@@ -5,5 +5,6 @@
     "qwen2": 3500,
     "opt": 1500,
     "llama3_test": 8000,
-    "llama3_grid": 8000
+    "llama3_grid": 8000,
+    "llama3_grid_2": 8000
 }
