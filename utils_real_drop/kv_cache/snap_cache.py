@@ -16,7 +16,6 @@ class SnapCache(KVCache):
         self.recent_budget = compression_config.recent_budget
         self.select_budget = self.total_budget - self.recent_budget
         self.score = None
-        self.forgetting = (1e-10)**(1/self.recent_budget)
         self.prompt = False
     
     def update(self, attn_scores=None):
@@ -73,9 +72,9 @@ class SnapCache(KVCache):
     
     def flash_prepare_scores(self, attn_scores):
         if not self.prompt:
-            return (attn_scores[:,:,-self.recent_budget:] * self.forgetting**torch.arange(self.recent_budget-1, -1, -1, device=attn_scores.device, dtype=attn_scores.dtype)[None,None,:,None]).sum(self.seq_dim)
+            return attn_scores[:,:,-self.recent_budget:].sum(self.seq_dim)
         else:
-            return attn_scores.sum(self.seq_dim) * self.forgetting
+            return attn_scores.sum(self.seq_dim)
     
 
     def flash_attention(self, query, key, value, attn_mask, head_dim, block_size=1024):
