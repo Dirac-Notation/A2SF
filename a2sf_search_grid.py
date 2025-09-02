@@ -284,12 +284,12 @@ def process_model(model_name, args):
                 condition_maps[max_idx] = make_layerwise_a2sf_mask(attention_maps[max_idx], total_ids, layerwise_budget_ratio[max_idx], layerwise_a2sf_factors[max_idx], layerwise_local_ratio[max_idx], sentence_exp, puntuation_ids)
                 
                 condition_output = mul_att_value(condition_maps[:,:,:,PROMPT_LENGTH:,:], values, num_attention_heads, num_key_value_heads)
-                if FULL_SEARCH:
-                    for layer_idx in range(num_layers):
-                        condition_output[layer_idx] = model.model.layers[layer_idx].self_attn.o_proj(condition_output[layer_idx])
-                        condition_output[layer_idx] += hidden_states[layer_idx][:,PROMPT_LENGTH:,:].to(condition_output[layer_idx].device)
-                        condition_output[layer_idx] = model.model.layers[layer_idx].post_attention_layernorm(condition_output[layer_idx])
-                        condition_output[layer_idx] = model.model.layers[layer_idx].mlp(condition_output[layer_idx])
+                # if FULL_SEARCH:
+                #     for layer_idx in range(num_layers):
+                #         condition_output[layer_idx] = model.model.layers[layer_idx].self_attn.o_proj(condition_output[layer_idx])
+                #         condition_output[layer_idx] += hidden_states[layer_idx][:,PROMPT_LENGTH:,:].to(condition_output[layer_idx].device)
+                #         condition_output[layer_idx] = model.model.layers[layer_idx].post_attention_layernorm(condition_output[layer_idx])
+                #         condition_output[layer_idx] = model.model.layers[layer_idx].mlp(condition_output[layer_idx])
                 sim_score = F.cosine_similarity(original_output, condition_output.to("cuda:0"), dim=3).mean(dim=(1,2))
             
             del attention_maps, values, total_ids, sentence_exp, hidden_states, original_output, condition_maps, condition_output, sim_score
