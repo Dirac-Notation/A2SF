@@ -280,8 +280,8 @@ def process_model(model_name, args):
                 layerwise_budget_ratio[min_idx] += 0.01
                 layerwise_budget_ratio[max_idx] -= 0.01
                 
-                condition_maps[min_idx] = make_layerwise_a2sf_mask(attention_maps[min_idx], total_ids, layerwise_budget_ratio[min_idx], layerwise_a2sf_factors[min_idx], sentence_exp, puntuation_ids)
-                condition_maps[max_idx] = make_layerwise_a2sf_mask(attention_maps[max_idx], total_ids, layerwise_budget_ratio[max_idx], layerwise_a2sf_factors[max_idx], sentence_exp, puntuation_ids)
+                condition_maps[min_idx] = make_layerwise_a2sf_mask(attention_maps[min_idx], total_ids, layerwise_budget_ratio[min_idx], layerwise_a2sf_factors[min_idx], layerwise_local_ratio[min_idx], sentence_exp, puntuation_ids)
+                condition_maps[max_idx] = make_layerwise_a2sf_mask(attention_maps[max_idx], total_ids, layerwise_budget_ratio[max_idx], layerwise_a2sf_factors[max_idx], layerwise_local_ratio[max_idx], sentence_exp, puntuation_ids)
                 
                 condition_output = mul_att_value(condition_maps[:,:,:,PROMPT_LENGTH:,:], values, num_attention_heads, num_key_value_heads)
                 if FULL_SEARCH:
