@@ -8,6 +8,9 @@ import random
 import argparse
 
 from utils import load_configs, load_model
+from models_skew.skew_llama import skew_model
+
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 def parse_args(args=None):
     parser = argparse.ArgumentParser()
@@ -37,7 +40,8 @@ def get_pred(data, max_length, max_gen, prompt_format, dataset, model, tokenizer
         attention_mask = input.attention_mask.to(torch.bfloat16).to(model.device)
         
         context_length = input_ids.shape[-1]
-        model.init_cache(load_configs(args.model, args.method, args.budget, tokenizer))
+        if hasattr(model, "init_cache"):
+            model.init_cache(load_configs(args.model, args.method, args.budget, tokenizer))
         with torch.inference_mode():
             if dataset == "samsum":
                 output = model.generate(
@@ -81,6 +85,7 @@ if __name__ == '__main__':
     
     # GPU list is already a list of integers
     gpus = args.gpus
+    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpus))
     
     # Load configurations
     model2path = json.load(open("config/model2path.json", "r"))
@@ -90,7 +95,11 @@ if __name__ == '__main__':
     
     # Load model and tokenizer once
     print(f"Loading model and tokenizer for {model_name} on GPUs: {gpus}...")
-    model, tokenizer = load_model(model_name, args.gpus)
+    # model, tokenizer = load_model(model_name, args.gpus)
+    model_path = model2path[model_name]
+    model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16, device_map="auto")
+    skew_model(model)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
     print("Model and tokenizer loaded successfully!")
     
     # Define datasets
