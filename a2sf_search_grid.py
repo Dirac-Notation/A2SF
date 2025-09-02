@@ -115,7 +115,7 @@ def process_batch_prompts(model, tokenizer, prompts, model_name, puntuation_ids)
 
         # Prepare batch input
         batch_input_ids = []
-        for prompt in prompts:
+        for prompt in prompts[:BATCH_SIZE]:
             if "llama" in model_name.lower():
                 prompt = f"[INST]{prompt}[/INST]"
             input_ids = tokenizer(prompt, return_tensors="pt", add_special_tokens=True).input_ids
@@ -183,6 +183,11 @@ def process_model(model_name, args):
         
         torch.cuda.empty_cache()
     
+    num_layers = len(model.model.layers)
+    
+    del model, tokenizer
+    torch.cuda.empty_cache()
+    
     # Search space
     factor_step = 0.05
     # local_ratio_step = 0.1
@@ -193,12 +198,12 @@ def process_model(model_name, args):
     
     all_grid = list(itertools.product(local_ratios, a2sf_factors))
     
-    layerwise_budget_ratio = [1.0 for i in range(32)]
-    layerwise_local_ratio = [0.5 for i in range(32)]
-    layerwise_a2sf_factors = [1.0 for i in range(32)]
+    layerwise_budget_ratio = [1.0 for i in range(num_layers)]
+    layerwise_local_ratio = [0.5 for i in range(num_layers)]
+    layerwise_a2sf_factors = [1.0 for i in range(num_layers)]
     
     for _ in range(3):
-        grid_score = [[0.0 for _ in range(len(all_grid))] for _ in range(len(model.model.layers))]
+        grid_score = [[0.0 for _ in range(len(all_grid))] for _ in range(num_layers)]
         for prompt_idx in tqdm(range(len(prompts))):
             attention_maps = attention_map_buffer[prompt_idx].to("cuda:0")
             values = values_buffer[prompt_idx].to("cuda:0")
@@ -207,26 +212,26 @@ def process_model(model_name, args):
             hidden_states = hidden_states_buffer[prompt_idx].to("cuda:0")
             
             original_output = mul_att_value(attention_maps[:,:,:,PROMPT_LENGTH:,:], values, num_attention_heads, num_key_value_heads)
-            if FULL_SEARCH:
-                for layer_idx in range(attention_maps.size(0)):
-                    original_output[layer_idx] = model.model.layers[layer_idx].self_attn.o_proj(original_output[layer_idx])
-                    original_output[layer_idx] += hidden_states[layer_idx][:,PROMPT_LENGTH:,:]
-                    original_output[layer_idx] = model.model.layers[layer_idx].post_attention_layernorm(original_output[layer_idx])
-                    original_output[layer_idx] = model.model.layers[layer_idx].mlp(original_output[layer_idx])
+            # if FULL_SEARCH:
+            #     for layer_idx in range(attention_maps.size(0)):
+            #         original_output[layer_idx] = model.model.layers[layer_idx].self_attn.o_proj(original_output[layer_idx])
+            #         original_output[layer_idx] += hidden_states[layer_idx][:,PROMPT_LENGTH:,:]
+            #         original_output[layer_idx] = model.model.layers[layer_idx].post_attention_layernorm(original_output[layer_idx])
+            #         original_output[layer_idx] = model.model.layers[layer_idx].mlp(original_output[layer_idx])
 
-            for layer_idx in tqdm(range(len(model.model.layers))):
+            for layer_idx in tqdm(range(num_layers)):
                 layer_ratio = layerwise_budget_ratio[layer_idx]
                 for grid_idx, (local_ratio, a2sf_factor) in enumerate(all_grid):
                     condition_maps = make_layerwise_a2sf_mask(attention_maps[layer_idx], total_ids, layer_ratio, a2sf_factor, local_ratio, sentence_exp, puntuation_ids)
                     condition_output = mul_att_value(condition_maps[:,:,PROMPT_LENGTH:,:], values[layer_idx], num_attention_heads, num_key_value_heads)
-                    if FULL_SEARCH:
-                        condition_output = model.model.layers[layer_idx].self_attn.o_proj(condition_output)
-                        condition_output += hidden_states[layer_idx][:,PROMPT_LENGTH:,:].to(condition_output.device)
-                        condition_output = model.model.layers[layer_idx].post_attention_layernorm(condition_output)
-                        condition_output = model.model.layers[layer_idx].mlp(condition_output)
+                    # if FULL_SEARCH:
+                    #     condition_output = model.model.layers[layer_idx].self_attn.o_proj(condition_output)
+                    #     condition_output += hidden_states[layer_idx][:,PROMPT_LENGTH:,:].to(condition_output.device)
+                    #     condition_output = model.model.layers[layer_idx].post_attention_layernorm(condition_output)
+                    #     condition_output = model.model.layers[layer_idx].mlp(condition_output)
                     grid_score[layer_idx][grid_idx] += F.cosine_similarity(original_output[layer_idx], condition_output.to("cuda:0"), dim=2).mean().item()
             
-            for layer_idx in range(len(model.model.layers)):
+            for layer_idx in range(num_layers):
                 max_idx = grid_score[layer_idx].index(max(grid_score[layer_idx]))
                 layerwise_local_ratio[layer_idx] = all_grid[max_idx][0]
                 layerwise_a2sf_factors[layer_idx] = all_grid[max_idx][1]
@@ -241,8 +246,16 @@ def process_model(model_name, args):
             sentence_exp = sentence_exp_buffer[prompt_idx].to("cuda:0")
             hidden_states = hidden_states_buffer[prompt_idx].to("cuda:0")
 
+            original_output = mul_att_value(attention_maps[:,:,:,PROMPT_LENGTH:,:], values, num_attention_heads, num_key_value_heads)
+            # if FULL_SEARCH:
+            #     for layer_idx in range(attention_maps.size(0)):
+            #         original_output[layer_idx] = model.model.layers[layer_idx].self_attn.o_proj(original_output[layer_idx])
+            #         original_output[layer_idx] += hidden_states[layer_idx][:,PROMPT_LENGTH:,:]
+            #         original_output[layer_idx] = model.model.layers[layer_idx].post_attention_layernorm(original_output[layer_idx])
+            #         original_output[layer_idx] = model.model.layers[layer_idx].mlp(original_output[layer_idx])
+
             condition_maps = []
-            for layer_idx in range(attention_maps.size(0)):
+            for layer_idx in range(num_layers):
                 layer_a2sf_factor = layerwise_a2sf_factors[layer_idx]
                 layer_ratio = layerwise_budget_ratio[layer_idx]
                 
@@ -252,12 +265,12 @@ def process_model(model_name, args):
 
             condition_maps = torch.stack(condition_maps, dim=0)
             condition_output = mul_att_value(condition_maps[:,:,:,PROMPT_LENGTH:,:], values, num_attention_heads, num_key_value_heads)
-            if FULL_SEARCH:
-                for layer_idx in range(attention_maps.size(0)):
-                    condition_output[layer_idx] = model.model.layers[layer_idx].self_attn.o_proj(condition_output[layer_idx])
-                    condition_output[layer_idx] += hidden_states[layer_idx][:,PROMPT_LENGTH:,:].to(condition_output[layer_idx].device)
-                    condition_output[layer_idx] = model.model.layers[layer_idx].post_attention_layernorm(condition_output[layer_idx])
-                    condition_output[layer_idx] = model.model.layers[layer_idx].mlp(condition_output[layer_idx])
+            # if FULL_SEARCH:
+            #     for layer_idx in range(num_layers):
+            #         condition_output[layer_idx] = model.model.layers[layer_idx].self_attn.o_proj(condition_output[layer_idx])
+            #         condition_output[layer_idx] += hidden_states[layer_idx][:,PROMPT_LENGTH:,:].to(condition_output[layer_idx].device)
+            #         condition_output[layer_idx] = model.model.layers[layer_idx].post_attention_layernorm(condition_output[layer_idx])
+            #         condition_output[layer_idx] = model.model.layers[layer_idx].mlp(condition_output[layer_idx])
             sim_score = F.cosine_similarity(original_output, condition_output.to("cuda:0"), dim=3).mean(dim=(1,2))
             
             for _ in tqdm(range(100)):
@@ -272,7 +285,7 @@ def process_model(model_name, args):
                 
                 condition_output = mul_att_value(condition_maps[:,:,:,PROMPT_LENGTH:,:], values, num_attention_heads, num_key_value_heads)
                 if FULL_SEARCH:
-                    for layer_idx in range(attention_maps.size(0)):
+                    for layer_idx in range(num_layers):
                         condition_output[layer_idx] = model.model.layers[layer_idx].self_attn.o_proj(condition_output[layer_idx])
                         condition_output[layer_idx] += hidden_states[layer_idx][:,PROMPT_LENGTH:,:].to(condition_output[layer_idx].device)
                         condition_output[layer_idx] = model.model.layers[layer_idx].post_attention_layernorm(condition_output[layer_idx])
