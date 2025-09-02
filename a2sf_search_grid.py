@@ -188,47 +188,99 @@ def process_model(model_name, args):
     # local_ratio_step = 0.1
     
     # local_ratios = [local_ratio_step*i for i in range(int(1/local_ratio_step)+1)]
-    local_ratios = [0.125]
+    local_ratios = [0.5]
     a2sf_factors = [factor_step*i for i in range(int(1/factor_step)+1)]
     
     all_grid = list(itertools.product(local_ratios, a2sf_factors))
-    grid_score = [[0.0 for _ in range(len(all_grid))] for _ in range(len(model.model.layers))]
     
     layerwise_budget_ratio = [1.0 for i in range(32)]
     layerwise_local_ratio = [0.5 for i in range(32)]
     layerwise_a2sf_factors = [1.0 for i in range(32)]
     
-    for prompt_idx in tqdm(range(len(prompts))):
-        attention_maps = attention_map_buffer[prompt_idx].to("cuda:0")
-        values = values_buffer[prompt_idx].to("cuda:0")
-        total_ids = total_ids_buffer[prompt_idx].to("cuda:0")
-        sentence_exp = sentence_exp_buffer[prompt_idx].to("cuda:0")
-        hidden_states = hidden_states_buffer[prompt_idx].to("cuda:0")
-        
-        original_output = mul_att_value(attention_maps[:,:,:,PROMPT_LENGTH:,:], values, num_attention_heads, num_key_value_heads)
-        if FULL_SEARCH:
+    for _ in range(3):
+        grid_score = [[0.0 for _ in range(len(all_grid))] for _ in range(len(model.model.layers))]
+        for prompt_idx in tqdm(range(len(prompts))):
+            attention_maps = attention_map_buffer[prompt_idx].to("cuda:0")
+            values = values_buffer[prompt_idx].to("cuda:0")
+            total_ids = total_ids_buffer[prompt_idx].to("cuda:0")
+            sentence_exp = sentence_exp_buffer[prompt_idx].to("cuda:0")
+            hidden_states = hidden_states_buffer[prompt_idx].to("cuda:0")
+            
+            original_output = mul_att_value(attention_maps[:,:,:,PROMPT_LENGTH:,:], values, num_attention_heads, num_key_value_heads)
+            if FULL_SEARCH:
+                for layer_idx in range(attention_maps.size(0)):
+                    original_output[layer_idx] = model.model.layers[layer_idx].self_attn.o_proj(original_output[layer_idx])
+                    original_output[layer_idx] += hidden_states[layer_idx][:,PROMPT_LENGTH:,:]
+                    original_output[layer_idx] = model.model.layers[layer_idx].post_attention_layernorm(original_output[layer_idx])
+                    original_output[layer_idx] = model.model.layers[layer_idx].mlp(original_output[layer_idx])
+
+            for layer_idx in tqdm(range(len(model.model.layers))):
+                layer_ratio = layerwise_budget_ratio[layer_idx]
+                for grid_idx, (local_ratio, a2sf_factor) in enumerate(all_grid):
+                    condition_maps = make_layerwise_a2sf_mask(attention_maps[layer_idx], total_ids, layer_ratio, a2sf_factor, local_ratio, sentence_exp, puntuation_ids)
+                    condition_output = mul_att_value(condition_maps[:,:,PROMPT_LENGTH:,:], values[layer_idx], num_attention_heads, num_key_value_heads)
+                    if FULL_SEARCH:
+                        condition_output = model.model.layers[layer_idx].self_attn.o_proj(condition_output)
+                        condition_output += hidden_states[layer_idx][:,PROMPT_LENGTH:,:].to(condition_output.device)
+                        condition_output = model.model.layers[layer_idx].post_attention_layernorm(condition_output)
+                        condition_output = model.model.layers[layer_idx].mlp(condition_output)
+                    grid_score[layer_idx][grid_idx] += F.cosine_similarity(original_output[layer_idx], condition_output.to("cuda:0"), dim=2).mean().item()
+            
+            for layer_idx in range(len(model.model.layers)):
+                max_idx = grid_score[layer_idx].index(max(grid_score[layer_idx]))
+                layerwise_local_ratio[layer_idx] = all_grid[max_idx][0]
+                layerwise_a2sf_factors[layer_idx] = all_grid[max_idx][1]
+            
+            del attention_maps, values, total_ids, sentence_exp, hidden_states, original_output, condition_maps, condition_output
+            torch.cuda.empty_cache()
+
+        for prompt_idx in tqdm(range(len(prompts))):
+            attention_maps = attention_map_buffer[prompt_idx].to("cuda:0")
+            values = values_buffer[prompt_idx].to("cuda:0")
+            total_ids = total_ids_buffer[prompt_idx].to("cuda:0")
+            sentence_exp = sentence_exp_buffer[prompt_idx].to("cuda:0")
+            hidden_states = hidden_states_buffer[prompt_idx].to("cuda:0")
+
+            condition_maps = []
             for layer_idx in range(attention_maps.size(0)):
-                original_output[layer_idx] = model.model.layers[layer_idx].self_attn.o_proj(original_output[layer_idx])
-                original_output[layer_idx] += hidden_states[layer_idx][:,PROMPT_LENGTH:,:]
-                original_output[layer_idx] = model.model.layers[layer_idx].post_attention_layernorm(original_output[layer_idx])
-                original_output[layer_idx] = model.model.layers[layer_idx].mlp(original_output[layer_idx])
+                layer_a2sf_factor = layerwise_a2sf_factors[layer_idx]
+                layer_ratio = layerwise_budget_ratio[layer_idx]
+                
+                condition_maps.append(
+                    make_layerwise_a2sf_mask(attention_maps[layer_idx], total_ids, layer_ratio, layer_a2sf_factor, local_ratio, sentence_exp, puntuation_ids)
+                )
 
-        for layer_idx in tqdm(range(len(model.model.layers))):
-            layer_ratio = layerwise_budget_ratio[layer_idx]
-            for grid_idx, (local_ratio, a2sf_factor) in enumerate(all_grid):
-                condition_maps = make_layerwise_a2sf_mask(attention_maps[layer_idx], total_ids, layer_ratio, a2sf_factor, local_ratio, sentence_exp, puntuation_ids)
-                condition_output = mul_att_value(condition_maps[:,:,PROMPT_LENGTH:,:], values[layer_idx], num_attention_heads, num_key_value_heads)
+            condition_maps = torch.stack(condition_maps, dim=0)
+            condition_output = mul_att_value(condition_maps[:,:,:,PROMPT_LENGTH:,:], values, num_attention_heads, num_key_value_heads)
+            if FULL_SEARCH:
+                for layer_idx in range(attention_maps.size(0)):
+                    condition_output[layer_idx] = model.model.layers[layer_idx].self_attn.o_proj(condition_output[layer_idx])
+                    condition_output[layer_idx] += hidden_states[layer_idx][:,PROMPT_LENGTH:,:].to(condition_output[layer_idx].device)
+                    condition_output[layer_idx] = model.model.layers[layer_idx].post_attention_layernorm(condition_output[layer_idx])
+                    condition_output[layer_idx] = model.model.layers[layer_idx].mlp(condition_output[layer_idx])
+            sim_score = F.cosine_similarity(original_output, condition_output.to("cuda:0"), dim=3).mean(dim=(1,2))
+            
+            for _ in tqdm(range(100)):
+                min_idx = sim_score.argmin()
+                max_idx = sim_score.argmax()
+                
+                layerwise_budget_ratio[min_idx] += 0.01
+                layerwise_budget_ratio[max_idx] -= 0.01
+                
+                condition_maps[min_idx] = make_layerwise_a2sf_mask(attention_maps[min_idx], total_ids, layerwise_budget_ratio[min_idx], layerwise_a2sf_factors[min_idx], sentence_exp, puntuation_ids)
+                condition_maps[max_idx] = make_layerwise_a2sf_mask(attention_maps[max_idx], total_ids, layerwise_budget_ratio[max_idx], layerwise_a2sf_factors[max_idx], sentence_exp, puntuation_ids)
+                
+                condition_output = mul_att_value(condition_maps[:,:,:,PROMPT_LENGTH:,:], values, num_attention_heads, num_key_value_heads)
                 if FULL_SEARCH:
-                    condition_output = model.model.layers[layer_idx].self_attn.o_proj(condition_output)
-                    condition_output += hidden_states[layer_idx][:,PROMPT_LENGTH:,:].to(condition_output.device)
-                    condition_output = model.model.layers[layer_idx].post_attention_layernorm(condition_output)
-                    condition_output = model.model.layers[layer_idx].mlp(condition_output)
-                grid_score[layer_idx][grid_idx] += F.cosine_similarity(original_output[layer_idx], condition_output.to("cuda:0"), dim=2).mean().item()
-
-    for layer_idx in range(len(model.model.layers)):
-        max_idx = grid_score[layer_idx].index(max(grid_score[layer_idx]))
-        layerwise_local_ratio[layer_idx] = all_grid[max_idx][0]
-        layerwise_a2sf_factors[layer_idx] = all_grid[max_idx][1]
+                    for layer_idx in range(attention_maps.size(0)):
+                        condition_output[layer_idx] = model.model.layers[layer_idx].self_attn.o_proj(condition_output[layer_idx])
+                        condition_output[layer_idx] += hidden_states[layer_idx][:,PROMPT_LENGTH:,:].to(condition_output[layer_idx].device)
+                        condition_output[layer_idx] = model.model.layers[layer_idx].post_attention_layernorm(condition_output[layer_idx])
+                        condition_output[layer_idx] = model.model.layers[layer_idx].mlp(condition_output[layer_idx])
+                sim_score = F.cosine_similarity(original_output, condition_output.to("cuda:0"), dim=3).mean(dim=(1,2))
+            
+            del attention_maps, values, total_ids, sentence_exp, hidden_states, original_output, condition_maps, condition_output, sim_score
+            torch.cuda.empty_cache()
 
     layerwise_budget_ratio = [round(ratio, 2) for ratio in layerwise_budget_ratio]
     layerwise_a2sf_factors = [round(factor, 2) for factor in layerwise_a2sf_factors]

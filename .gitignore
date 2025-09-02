@@ -5,6 +5,7 @@
 *.jsonl
 *.json
 *.sh
+*.pt
 
 # Custom Directories
 
