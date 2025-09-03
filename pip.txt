@@ -16,6 +16,6 @@ rouge_score
 py7zr
 jieba
 fuzzywuzzy
-datasets
+datasets<4.0.0
 transformers==4.35.2
 urllib3
