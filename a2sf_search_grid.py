@@ -185,9 +185,6 @@ def process_model(model_name, args):
     
     num_layers = len(model.model.layers)
     
-    del model, tokenizer
-    torch.cuda.empty_cache()
-    
     # Search space
     factor_step = 0.05
     # local_ratio_step = 0.1
@@ -205,31 +202,31 @@ def process_model(model_name, args):
     for _ in range(3):
         grid_score = [[0.0 for _ in range(len(all_grid))] for _ in range(num_layers)]
         for prompt_idx in tqdm(range(len(prompts))):
-            attention_maps = attention_map_buffer[prompt_idx].to("cuda:0")
-            values = values_buffer[prompt_idx].to("cuda:0")
-            total_ids = total_ids_buffer[prompt_idx].to("cuda:0")
-            sentence_exp = sentence_exp_buffer[prompt_idx].to("cuda:0")
-            hidden_states = hidden_states_buffer[prompt_idx].to("cuda:0")
+            attention_maps = attention_map_buffer[prompt_idx].to("cuda")
+            values = values_buffer[prompt_idx].to("cuda")
+            total_ids = total_ids_buffer[prompt_idx].to("cuda")
+            sentence_exp = sentence_exp_buffer[prompt_idx].to("cuda")
+            hidden_states = hidden_states_buffer[prompt_idx].to("cuda")
             
             original_output = mul_att_value(attention_maps[:,:,:,PROMPT_LENGTH:,:], values, num_attention_heads, num_key_value_heads)
-            # if FULL_SEARCH:
-            #     for layer_idx in range(attention_maps.size(0)):
-            #         original_output[layer_idx] = model.model.layers[layer_idx].self_attn.o_proj(original_output[layer_idx])
-            #         original_output[layer_idx] += hidden_states[layer_idx][:,PROMPT_LENGTH:,:]
-            #         original_output[layer_idx] = model.model.layers[layer_idx].post_attention_layernorm(original_output[layer_idx])
-            #         original_output[layer_idx] = model.model.layers[layer_idx].mlp(original_output[layer_idx])
+            if FULL_SEARCH:
+                for layer_idx in range(attention_maps.size(0)):
+                    original_output[layer_idx] = model.model.layers[layer_idx].self_attn.o_proj(original_output[layer_idx])
+                    original_output[layer_idx] += hidden_states[layer_idx][:,PROMPT_LENGTH:,:]
+                    original_output[layer_idx] = model.model.layers[layer_idx].post_attention_layernorm(original_output[layer_idx])
+                    original_output[layer_idx] = model.model.layers[layer_idx].mlp(original_output[layer_idx])
 
             for layer_idx in tqdm(range(num_layers)):
                 layer_ratio = layerwise_budget_ratio[layer_idx]
                 for grid_idx, (local_ratio, a2sf_factor) in enumerate(all_grid):
                     condition_maps = make_layerwise_a2sf_mask(attention_maps[layer_idx], total_ids, layer_ratio, a2sf_factor, local_ratio, sentence_exp, puntuation_ids)
                     condition_output = mul_att_value(condition_maps[:,:,PROMPT_LENGTH:,:], values[layer_idx], num_attention_heads, num_key_value_heads)
-                    # if FULL_SEARCH:
-                    #     condition_output = model.model.layers[layer_idx].self_attn.o_proj(condition_output)
-                    #     condition_output += hidden_states[layer_idx][:,PROMPT_LENGTH:,:].to(condition_output.device)
-                    #     condition_output = model.model.layers[layer_idx].post_attention_layernorm(condition_output)
-                    #     condition_output = model.model.layers[layer_idx].mlp(condition_output)
-                    grid_score[layer_idx][grid_idx] += F.cosine_similarity(original_output[layer_idx], condition_output.to("cuda:0"), dim=2).mean().item()
+                    if FULL_SEARCH:
+                        condition_output = model.model.layers[layer_idx].self_attn.o_proj(condition_output)
+                        condition_output += hidden_states[layer_idx][:,PROMPT_LENGTH:,:].to(condition_output.device)
+                        condition_output = model.model.layers[layer_idx].post_attention_layernorm(condition_output)
+                        condition_output = model.model.layers[layer_idx].mlp(condition_output)
+                    grid_score[layer_idx][grid_idx] += F.cosine_similarity(original_output[layer_idx], condition_output.to("cuda"), dim=2).mean().item()
             
             for layer_idx in range(num_layers):
                 max_idx = grid_score[layer_idx].index(max(grid_score[layer_idx]))
@@ -240,19 +237,19 @@ def process_model(model_name, args):
             torch.cuda.empty_cache()
 
         for prompt_idx in tqdm(range(len(prompts))):
-            attention_maps = attention_map_buffer[prompt_idx].to("cuda:0")
-            values = values_buffer[prompt_idx].to("cuda:0")
-            total_ids = total_ids_buffer[prompt_idx].to("cuda:0")
-            sentence_exp = sentence_exp_buffer[prompt_idx].to("cuda:0")
-            hidden_states = hidden_states_buffer[prompt_idx].to("cuda:0")
+            attention_maps = attention_map_buffer[prompt_idx].to("cuda")
+            values = values_buffer[prompt_idx].to("cuda")
+            total_ids = total_ids_buffer[prompt_idx].to("cuda")
+            sentence_exp = sentence_exp_buffer[prompt_idx].to("cuda")
+            hidden_states = hidden_states_buffer[prompt_idx].to("cuda")
 
             original_output = mul_att_value(attention_maps[:,:,:,PROMPT_LENGTH:,:], values, num_attention_heads, num_key_value_heads)
-            # if FULL_SEARCH:
-            #     for layer_idx in range(attention_maps.size(0)):
-            #         original_output[layer_idx] = model.model.layers[layer_idx].self_attn.o_proj(original_output[layer_idx])
-            #         original_output[layer_idx] += hidden_states[layer_idx][:,PROMPT_LENGTH:,:]
-            #         original_output[layer_idx] = model.model.layers[layer_idx].post_attention_layernorm(original_output[layer_idx])
-            #         original_output[layer_idx] = model.model.layers[layer_idx].mlp(original_output[layer_idx])
+            if FULL_SEARCH:
+                for layer_idx in range(attention_maps.size(0)):
+                    original_output[layer_idx] = model.model.layers[layer_idx].self_attn.o_proj(original_output[layer_idx])
+                    original_output[layer_idx] += hidden_states[layer_idx][:,PROMPT_LENGTH:,:]
+                    original_output[layer_idx] = model.model.layers[layer_idx].post_attention_layernorm(original_output[layer_idx])
+                    original_output[layer_idx] = model.model.layers[layer_idx].mlp(original_output[layer_idx])
 
             condition_maps = []
             for layer_idx in range(num_layers):
@@ -265,13 +262,13 @@ def process_model(model_name, args):
 
             condition_maps = torch.stack(condition_maps, dim=0)
             condition_output = mul_att_value(condition_maps[:,:,:,PROMPT_LENGTH:,:], values, num_attention_heads, num_key_value_heads)
-            # if FULL_SEARCH:
-            #     for layer_idx in range(num_layers):
-            #         condition_output[layer_idx] = model.model.layers[layer_idx].self_attn.o_proj(condition_output[layer_idx])
-            #         condition_output[layer_idx] += hidden_states[layer_idx][:,PROMPT_LENGTH:,:].to(condition_output[layer_idx].device)
-            #         condition_output[layer_idx] = model.model.layers[layer_idx].post_attention_layernorm(condition_output[layer_idx])
-            #         condition_output[layer_idx] = model.model.layers[layer_idx].mlp(condition_output[layer_idx])
-            sim_score = F.cosine_similarity(original_output, condition_output.to("cuda:0"), dim=3).mean(dim=(1,2))
+            if FULL_SEARCH:
+                for layer_idx in range(num_layers):
+                    condition_output[layer_idx] = model.model.layers[layer_idx].self_attn.o_proj(condition_output[layer_idx])
+                    condition_output[layer_idx] += hidden_states[layer_idx][:,PROMPT_LENGTH:,:].to(condition_output[layer_idx].device)
+                    condition_output[layer_idx] = model.model.layers[layer_idx].post_attention_layernorm(condition_output[layer_idx])
+                    condition_output[layer_idx] = model.model.layers[layer_idx].mlp(condition_output[layer_idx])
+            sim_score = F.cosine_similarity(original_output, condition_output.to("cuda"), dim=3).mean(dim=(1,2))
             
             for _ in tqdm(range(100)):
                 min_idx = sim_score.argmin()
@@ -284,13 +281,13 @@ def process_model(model_name, args):
                 condition_maps[max_idx] = make_layerwise_a2sf_mask(attention_maps[max_idx], total_ids, layerwise_budget_ratio[max_idx], layerwise_a2sf_factors[max_idx], layerwise_local_ratio[max_idx], sentence_exp, puntuation_ids)
                 
                 condition_output = mul_att_value(condition_maps[:,:,:,PROMPT_LENGTH:,:], values, num_attention_heads, num_key_value_heads)
-                # if FULL_SEARCH:
-                #     for layer_idx in range(num_layers):
-                #         condition_output[layer_idx] = model.model.layers[layer_idx].self_attn.o_proj(condition_output[layer_idx])
-                #         condition_output[layer_idx] += hidden_states[layer_idx][:,PROMPT_LENGTH:,:].to(condition_output[layer_idx].device)
-                #         condition_output[layer_idx] = model.model.layers[layer_idx].post_attention_layernorm(condition_output[layer_idx])
-                #         condition_output[layer_idx] = model.model.layers[layer_idx].mlp(condition_output[layer_idx])
-                sim_score = F.cosine_similarity(original_output, condition_output.to("cuda:0"), dim=3).mean(dim=(1,2))
+                if FULL_SEARCH:
+                    for layer_idx in range(num_layers):
+                        condition_output[layer_idx] = model.model.layers[layer_idx].self_attn.o_proj(condition_output[layer_idx])
+                        condition_output[layer_idx] += hidden_states[layer_idx][:,PROMPT_LENGTH:,:].to(condition_output[layer_idx].device)
+                        condition_output[layer_idx] = model.model.layers[layer_idx].post_attention_layernorm(condition_output[layer_idx])
+                        condition_output[layer_idx] = model.model.layers[layer_idx].mlp(condition_output[layer_idx])
+                sim_score = F.cosine_similarity(original_output, condition_output.to("cuda"), dim=3).mean(dim=(1,2))
             
             del attention_maps, values, total_ids, sentence_exp, hidden_states, original_output, condition_maps, condition_output, sim_score
             torch.cuda.empty_cache()
