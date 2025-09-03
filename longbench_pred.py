@@ -95,11 +95,11 @@ if __name__ == '__main__':
     
     # Load model and tokenizer once
     print(f"Loading model and tokenizer for {model_name} on GPUs: {gpus}...")
-    # model, tokenizer = load_model(model_name, args.gpus)
-    model_path = model2path[model_name]
-    model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16, device_map="auto")
-    skew_model(model)
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    model, tokenizer = load_model(model_name, args.gpus)
+    # model_path = model2path[model_name]
+    # model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16, device_map="auto")
+    # skew_model(model)
+    # tokenizer = AutoTokenizer.from_pretrained(model_path)
     print("Model and tokenizer loaded successfully!")
     
     # Define datasets
