@@ -1,5 +1,4 @@
 import os
-from datasets import load_dataset
 import torch
 import json
 from tqdm import tqdm
@@ -10,30 +9,39 @@ import argparse
 from utils import load_configs, load_model
 from models_skew.skew_llama import skew_model
 
-from transformers import AutoModelForCausalLM, AutoTokenizer
+def load_jsonl_file(file_path):
+    """Load data from a JSONL file"""
+    data = []
+    with open(file_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            if line.strip():  # Skip empty lines
+                data.append(json.loads(line))
+    return data
 
 def parse_args(args=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--gpus', type=int, nargs='+', default=[0], help="List of GPU IDs (e.g., --gpus 0 1 2 3)")
-    parser.add_argument('--model', type=str, default=None)
-    parser.add_argument('--method', type=str, default="a2sf")
+    parser.add_argument('--model', type=str, default="llama3")
+    parser.add_argument('--method', type=str, default="full")
     parser.add_argument('--budget', type=int, default=100)
+    parser.add_argument('--task', type=str, choices=["Code Complete", "Few Shot", "Single-doc QA", "Multi-doc QA", "Summarization", "Passage Retrieval"])
     return parser.parse_args(args)
 
-def build_chat(tokenizer, prompt, model_name):
+def build_chat(prompt, model_name):
     if "llama" in model_name:
         prompt = f"[INST]{prompt}[/INST]"
     return prompt
 
-def get_pred(data, max_length, max_gen, prompt_format, dataset, model, tokenizer, out_path, args):
+def get_pred(data, max_length, max_gen, dataset, model, tokenizer, out_path, args):
     for json_obj in tqdm(data):
-        prompt = prompt_format.format(**json_obj)
+        # Use the already formatted prompt from the jsonl file
+        prompt = json_obj["input_prompt"]
         tokenized_prompt = tokenizer(prompt, truncation=False, return_tensors="pt").input_ids[0]
         if len(tokenized_prompt) > max_length:
             half = int(max_length/2)
             prompt = tokenizer.decode(tokenized_prompt[:half], skip_special_tokens=True)+tokenizer.decode(tokenized_prompt[-half:], skip_special_tokens=True)
         if dataset not in ["trec", "triviaqa", "samsum", "lsht", "lcc", "repobench-p"]:
-            prompt = build_chat(tokenizer, prompt, args.model)
+            prompt = build_chat(prompt, args.model)
         input = tokenizer(prompt, truncation=False, return_tensors="pt")
         
         input_ids = input.input_ids.to(model.device)
@@ -41,7 +49,7 @@ def get_pred(data, max_length, max_gen, prompt_format, dataset, model, tokenizer
         
         context_length = input_ids.shape[-1]
         if hasattr(model, "init_cache"):
-            model.init_cache(load_configs(args.model, args.method, args.budget, tokenizer))
+            model.init_cache(load_configs(args.model, args.method, args.task, args.budget))
         with torch.inference_mode():
             if dataset == "samsum":
                 output = model.generate(
@@ -50,7 +58,7 @@ def get_pred(data, max_length, max_gen, prompt_format, dataset, model, tokenizer
                     max_new_tokens=max_gen,
                     num_beams=1,
                     do_sample=False,
-                    temperature=1.0,
+                    temperature=0.0,
                     min_length=context_length+1,
                     eos_token_id=[tokenizer.eos_token_id, tokenizer.encode("\n", add_special_tokens=False)[-1]],
                 )[0]
@@ -61,7 +69,7 @@ def get_pred(data, max_length, max_gen, prompt_format, dataset, model, tokenizer
                     max_new_tokens=max_gen,
                     num_beams=1,
                     do_sample=False,
-                    temperature=1.0,
+                    temperature=0.0,
                 )[0]
         pred = tokenizer.decode(output[context_length:], skip_special_tokens=True)
         with open(out_path, "a", encoding="utf-8") as f:
@@ -96,19 +104,25 @@ if __name__ == '__main__':
     # Load model and tokenizer once
     print(f"Loading model and tokenizer for {model_name} on GPUs: {gpus}...")
     model, tokenizer = load_model(model_name, args.gpus)
-    # model_path = model2path[model_name]
-    # model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16, device_map="auto")
-    # skew_model(model)
-    # tokenizer = AutoTokenizer.from_pretrained(model_path)
     print("Model and tokenizer loaded successfully!")
+
+    data_group = {
+        "Code Complete": ["repobench-p", "lcc"],
+        "Few Shot": ["trec", "triviaqa", "samsum", "lsht"],
+        "Single-doc QA": ["narrativeqa", "qasper", "multifieldqa_en", "multifieldqa_zh"],
+        "Multi-doc QA": ["hotpotqa", "2wikimqa", "musique", "dureader"],
+        "Summarization": ["gov_report", "qmsum", "multi_news", "vcsum"],
+        "Passage Retrieval": ["passage_retrieval_en", "passage_retrieval_zh", "passage_count"],
+    }
     
-    # Define datasets
-    datasets = ["narrativeqa", "qasper", "multifieldqa_en", "hotpotqa", "2wikimqa", "musique", \
-                "gov_report", "qmsum", "multi_news", "trec", "triviaqa", "samsum", \
-                "passage_count", "passage_retrieval_en", "lcc", "repobench-p"]
+    datasets = data_group[args.task]
+
+    # # Define datasets
+    # datasets = ["narrativeqa", "qasper", "multifieldqa_en", "hotpotqa", "2wikimqa", "musique", \
+    #             "gov_report", "qmsum", "multi_news", "trec", "triviaqa", "samsum", \
+    #             "passage_count", "passage_retrieval_en", "lcc", "repobench-p"]
     
     # Load prompt and max length configurations
-    dataset2prompt = json.load(open("config/dataset2prompt.json", "r"))
     dataset2maxlen = json.load(open("config/dataset2maxlen.json", "r"))
     
     # Create output directory
@@ -118,15 +132,19 @@ if __name__ == '__main__':
     # Process each dataset
     for dataset in datasets:
         print(f"\nProcessing dataset: {dataset}")
-        data = load_dataset('THUDM/LongBench', dataset, split='test', trust_remote_code=True)
+        # Load data from local jsonl file
+        jsonl_path = f"datasets/longbench/{dataset}.jsonl"
+        if not os.path.exists(jsonl_path):
+            print(f"Warning: {jsonl_path} not found, skipping {dataset}")
+            continue
+        data = load_jsonl_file(jsonl_path)
         output_dir = f"result_txt/pred/{model_name}_{args.method}_{args.budget}"
             
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
         out_path = f"{output_dir}/{dataset}.jsonl"
         
-        prompt_format = dataset2prompt[dataset]
         max_gen = dataset2maxlen[dataset]
         
         # Process data using the pre-loaded model
-        get_pred(data, max_length, max_gen, prompt_format, dataset, model, tokenizer, out_path, args)
+        get_pred(data, max_length, max_gen, dataset, model, tokenizer, out_path, args)

@@ -24,7 +24,7 @@ def extract_data(data, prompt_format, dataset_name, out_path):
             "dataset": dataset_name
         }
         
-        with open(out_path, "a", encoding="utf-8") as f:
+        with open(out_path, "w", encoding="utf-8") as f:
             json.dump(result, f, ensure_ascii=False)
             f.write('\n')
         
@@ -43,7 +43,7 @@ def main():
     dataset2prompt = json.load(open("config/dataset2prompt.json", "r"))
     
     # Create output directory
-    output_dir = "result_txt/longbench"
+    output_dir = "datasets/longbench"
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
     
