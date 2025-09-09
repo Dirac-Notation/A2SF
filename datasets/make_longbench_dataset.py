@@ -4,6 +4,7 @@ import json
 from tqdm import tqdm
 import random
 import numpy as np
+import shutil
 
 def seed_everything(seed):
     random.seed(seed)
@@ -24,7 +25,7 @@ def extract_data(data, prompt_format, dataset_name, out_path):
             "dataset": dataset_name
         }
         
-        with open(out_path, "w", encoding="utf-8") as f:
+        with open(out_path, "a", encoding="utf-8") as f:
             json.dump(result, f, ensure_ascii=False)
             f.write('\n')
         
@@ -45,6 +46,9 @@ def main():
     # Create output directory
     output_dir = "datasets/longbench"
     if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    else:
+        shutil.rmtree(output_dir)
         os.makedirs(output_dir)
     
     # Process each dataset
