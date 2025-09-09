@@ -28,7 +28,7 @@ def extract_data(data, prompt_format, dataset_name, out_path):
             json.dump(result, f, ensure_ascii=False)
             f.write('\n')
         
-        print(f"Results saved to: {out_path}")
+    print(f"Results saved to: {out_path}")
 
 def main():
     # Set random seed for reproducibility
