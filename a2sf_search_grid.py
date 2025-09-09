@@ -5,6 +5,7 @@ import torch.nn.functional as F
 import json
 import random
 import itertools
+import matplotlib.pyplot as plt
 
 from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -19,18 +20,18 @@ if torch.cuda.is_available():
     torch.cuda.manual_seed_all(seed)
 
 # Constants (replacing argparse arguments)
-PROMPT_LENGTH = 900
-GENERATION_LENGTH = 1
-TOTAL_BUDGET = 128
+PROMPT_LENGTH = 990
+GENERATION_LENGTH = 10
+TOTAL_BUDGET = 100
 BATCH_SIZE = 2
 FULL_SEARCH = True
 
-def get_prompt(data_group):
+def get_prompt(task):
     with open("datasets/calibration_dataset.jsonl", "r") as f:
         articles = []
         for line in f:
             line_data = json.loads(line)
-            if line_data["group"] != data_group:
+            if line_data["group"] != task:
                 continue
             article = line_data["article"]
             if len(article) > PROMPT_LENGTH:
@@ -130,7 +131,7 @@ def process_batch_prompts(model, tokenizer, prompts):
 
         return attention_maps, values, hidden_states
 
-def process_model(model, tokenizer, prompts):    
+def process_model(model, tokenizer, prompts, task):    
     attention_map_buffer = []
     values_buffer = []
     hidden_states_buffer = []
@@ -149,7 +150,7 @@ def process_model(model, tokenizer, prompts):
     num_layers = model.config.num_hidden_layers
     
     # Search space
-    factor_step = 0.05
+    factor_step = 0.01
     # local_ratio_step = 0.1
     
     # local_ratios = [local_ratio_step*i for i in range(int(1/local_ratio_step)+1)]
@@ -190,11 +191,21 @@ def process_model(model, tokenizer, prompts):
                 
                 del attention_maps, values, hidden_states, original_output, condition_maps, condition_output
                 torch.cuda.empty_cache()
-                
+            
+            os.makedirs(f'plots/a2sf_search_grid/{task}', exist_ok=True)
+            
             for layer_idx in range(num_layers):
                 max_idx = grid_score[layer_idx].index(max(grid_score[layer_idx]))
                 layerwise_local_ratio[layer_idx] = all_grid[max_idx][0]
                 layerwise_a2sf_factors[layer_idx] = all_grid[max_idx][1]
+            
+                plt.plot(a2sf_factors, [score/len(prompts) for score in grid_score[layer_idx]])
+                plt.xlabel('Forgetting Factor')
+                plt.ylabel('Similarity Score')
+                plt.title(f'Layer {layer_idx}')
+                plt.tight_layout()
+                plt.savefig(f'plots/a2sf_search_grid/{task}/layer_{layer_idx}.png')
+                plt.close()
 
             # for prompt_idx in tqdm(range(len(prompts))):
             #     attention_maps = attention_map_buffer[prompt_idx].to("cuda")
@@ -253,25 +264,26 @@ def process_model(model, tokenizer, prompts):
 
 def main(args):
 
-    data_groups = ["Code Complete", "Few Shot", "Single-doc QA", "Multi-doc QA", "Summarization", "Passage Retrieval"]
+    tasks = ["Code Complete", "Few Shot", "Single-doc QA", "Multi-doc QA", "Summarization", "Passage Retrieval"]
   
     model, tokenizer = load_model_and_tokenizer(args.model)
 
-    for data_group in data_groups:
-        prompts = get_prompt(data_group)
+    for task in tasks:
+        prompts = get_prompt(task)
         prompts = [prompts[batch_start:batch_start+BATCH_SIZE] for batch_start in range(0, len(prompts), BATCH_SIZE)]
 
         results = []
         result = process_model(
             model = model,
             tokenizer = tokenizer,
-            prompts = prompts
+            prompts = prompts,
+            task = task
         )
         results.append(result)
 
         print("\nSearch Results")
         print("=" * 50)
-        print(f"Data Group: {data_group}")
+        print(f"Task: {task}")
         print(f'''\n\"layerwise_ratios\": {result['layerwise_ratios']},\n\"forgetting_factors\": {result['forgetting_factors']},\n\"local_ratios\": {result['local_ratios']}\n''')
         print("-" * 50)
 
