@@ -32,7 +32,7 @@ def build_chat(prompt, model_name):
         prompt = f"[INST]{prompt}[/INST]"
     return prompt
 
-def get_pred(data, max_length, max_gen, dataset, model, tokenizer, out_path, args):
+def get_pred(data, max_length, max_gen, dataset, model, tokenizer, out_path, args, task):
     for json_obj in tqdm(data):
         # Use the already formatted prompt from the jsonl file
         prompt = json_obj["input_prompt"]
@@ -49,7 +49,7 @@ def get_pred(data, max_length, max_gen, dataset, model, tokenizer, out_path, arg
         
         context_length = input_ids.shape[-1]
         if hasattr(model, "init_cache"):
-            model.init_cache(load_configs(args.model, args.method, args.task, args.budget))
+            model.init_cache(load_configs(args.model, args.method, task, args.budget))
         with torch.inference_mode():
             if dataset == "samsum":
                 output = model.generate(
@@ -143,4 +143,4 @@ if __name__ == '__main__':
             max_gen = dataset2maxlen[dataset]
             
             # Process data using the pre-loaded model
-            get_pred(data, max_length, max_gen, dataset, model, tokenizer, out_path, args)
+            get_pred(data, max_length, max_gen, dataset, model, tokenizer, out_path, args, task)
