@@ -24,7 +24,7 @@ def parse_args(args=None):
     parser.add_argument('--model', type=str, default="llama3")
     parser.add_argument('--method', type=str, default="full")
     parser.add_argument('--budget', type=int, default=100)
-    parser.add_argument('--task', type=str, choices=["Code Complete", "Few Shot", "Single-doc QA", "Multi-doc QA", "Summarization", "Passage Retrieval"])
+    parser.add_argument('--task', type=str, nargs='+', choices=["Code Complete", "Few Shot", "Single-doc QA", "Multi-doc QA", "Summarization", "Passage Retrieval"])
     return parser.parse_args(args)
 
 def build_chat(prompt, model_name):
@@ -58,7 +58,7 @@ def get_pred(data, max_length, max_gen, dataset, model, tokenizer, out_path, arg
                     max_new_tokens=max_gen,
                     num_beams=1,
                     do_sample=False,
-                    temperature=0.0,
+                    temperature=1.0,
                     min_length=context_length+1,
                     eos_token_id=[tokenizer.eos_token_id, tokenizer.encode("\n", add_special_tokens=False)[-1]],
                 )[0]
@@ -69,7 +69,7 @@ def get_pred(data, max_length, max_gen, dataset, model, tokenizer, out_path, arg
                     max_new_tokens=max_gen,
                     num_beams=1,
                     do_sample=False,
-                    temperature=0.0,
+                    temperature=1.0,
                 )[0]
         pred = tokenizer.decode(output[context_length:], skip_special_tokens=True)
         with open(out_path, "a", encoding="utf-8") as f:
@@ -110,41 +110,37 @@ if __name__ == '__main__':
         "Code Complete": ["repobench-p", "lcc"],
         "Few Shot": ["trec", "triviaqa", "samsum", "lsht"],
         "Single-doc QA": ["narrativeqa", "qasper", "multifieldqa_en", "multifieldqa_zh"],
-        "Multi-doc QA": ["hotpotqa", "2wikimqa", "musique", "dureader"],
+        "Multi-doc QA": ["hotpotqa", "2wikimqa", "musique"],
         "Summarization": ["gov_report", "qmsum", "multi_news", "vcsum"],
         "Passage Retrieval": ["passage_retrieval_en", "passage_retrieval_zh", "passage_count"],
     }
     
-    datasets = data_group[args.task]
-
-    # # Define datasets
-    # datasets = ["narrativeqa", "qasper", "multifieldqa_en", "hotpotqa", "2wikimqa", "musique", \
-    #             "gov_report", "qmsum", "multi_news", "trec", "triviaqa", "samsum", \
-    #             "passage_count", "passage_retrieval_en", "lcc", "repobench-p"]
-    
-    # Load prompt and max length configurations
-    dataset2maxlen = json.load(open("config/dataset2maxlen.json", "r"))
-    
-    # Create output directory
-    if not os.path.exists("result_txt/pred"):
-        os.makedirs("result_txt/pred")
-    
-    # Process each dataset
-    for dataset in datasets:
-        print(f"\nProcessing dataset: {dataset}")
-        # Load data from local jsonl file
-        jsonl_path = f"datasets/longbench/{dataset}.jsonl"
-        if not os.path.exists(jsonl_path):
-            print(f"Warning: {jsonl_path} not found, skipping {dataset}")
-            continue
-        data = load_jsonl_file(jsonl_path)
-        output_dir = f"result_txt/pred/{model_name}_{args.method}_{args.budget}"
+    for task in args.task:
+        datasets = data_group[task]
+        
+        # Load prompt and max length configurations
+        dataset2maxlen = json.load(open("config/dataset2maxlen.json", "r"))
+        
+        # Create output directory
+        if not os.path.exists("result_txt/pred"):
+            os.makedirs("result_txt/pred")
+        
+        # Process each dataset
+        for dataset in datasets:
+            print(f"\nProcessing dataset: {dataset}")
+            # Load data from local jsonl file
+            jsonl_path = f"datasets/longbench/{dataset}.jsonl"
+            if not os.path.exists(jsonl_path):
+                print(f"Warning: {jsonl_path} not found, skipping {dataset}")
+                continue
+            data = load_jsonl_file(jsonl_path)
+            output_dir = f"result_txt/pred/{model_name}_{args.method}_{args.budget}"
+                
+            if not os.path.exists(output_dir):
+                os.makedirs(output_dir)
+            out_path = f"{output_dir}/{dataset}.jsonl"
             
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
-        out_path = f"{output_dir}/{dataset}.jsonl"
-        
-        max_gen = dataset2maxlen[dataset]
-        
-        # Process data using the pre-loaded model
-        get_pred(data, max_length, max_gen, dataset, model, tokenizer, out_path, args)
+            max_gen = dataset2maxlen[dataset]
+            
+            # Process data using the pre-loaded model
+            get_pred(data, max_length, max_gen, dataset, model, tokenizer, out_path, args)
