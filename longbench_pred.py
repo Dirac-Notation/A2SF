@@ -14,7 +14,7 @@ def load_jsonl_file(file_path):
     data = []
     with open(file_path, 'r', encoding='utf-8') as f:
         for line in f:
-            if line.strip():  # Skip empty lines
+            if line.strip():
                 data.append(json.loads(line))
     return data
 
