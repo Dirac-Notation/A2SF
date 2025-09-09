@@ -8,7 +8,6 @@ class A2SFCache(KVCache):
     def __init__(self, num_key_value_heads: int, seq_dim: int = 2):
         super().__init__(num_key_value_heads, seq_dim)
         self.forgetting_factor = None
-        self.forget = None
         self.exponents = None
         self.input_ids = None
         self.prompt = False
@@ -91,9 +90,8 @@ class A2SFCache(KVCache):
             if self.score is not None:
                 current_score[:,:,:-1] += self.score
             self.score = current_score
-            if self.forget:
-                self.score *= self.forgetting_factor
-    
+            self.score *= self.forgetting_factor
+
     def flash_prepare_scores(self, attn_scores):
         seq_len = attn_scores.size(2)
         
@@ -102,10 +100,8 @@ class A2SFCache(KVCache):
             return (forgetting * attn_scores).sum(dim=self.seq_dim)
         else:
             current_score = attn_scores.sum(self.seq_dim)
-            if self.forget:
-                self.score *= self.forgetting_factor
-                return current_score*self.forgetting_factor
-            return current_score
+            self.score *= self.forgetting_factor
+            return current_score*self.forgetting_factor
 
     def flash_attention(self, query, key, value, attn_mask, head_dim, block_size=1024):
         """
@@ -178,8 +174,3 @@ class A2SFCache(KVCache):
         output = output / running_sum
         
         return output
-    
-    def set_forget(self, forget, exponents):
-        """Set forgetting parameters for A2SF"""
-        self.forget = forget
-        self.exponents = exponents

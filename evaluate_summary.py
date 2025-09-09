@@ -171,7 +171,7 @@ def main(args):
         for cur_budget in budget_list:
             for cur_method in methods:
                 cur_idx += 1
-                config = load_configs(args.model, cur_method, cur_budget, tokenizer)
+                config = load_configs(args.model, cur_method, cur_budget)
 
                 # Evaluate with current configuration
                 results = evaluate_model(

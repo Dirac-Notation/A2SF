@@ -2,7 +2,7 @@ import torch
 import json
 import os
 
-from transformers import AutoTokenizer, AutoConfig
+from transformers import AutoTokenizer
 from utils_real_drop import KVLlamaForCausalLM, KVOPTForCausalLM, KVQwen2ForCausalLM, Qwen2Tokenizer
 
 class CompressionConfig(dict):
@@ -10,7 +10,7 @@ class CompressionConfig(dict):
     __setattr__ = dict.__setitem__
     __delattr__ = dict.__delitem__
 
-def load_configs(model_name, method, total_budget, tokenizer=None):
+def load_configs(model_name, method, task, total_budget):
     try:
         with open("config/compression_configs.json", "r") as f:
             compression_configs = json.load(f)
@@ -21,7 +21,7 @@ def load_configs(model_name, method, total_budget, tokenizer=None):
     if method == "a2sf":
         if model_name not in compression_configs:
             raise ValueError(f"Model '{model_name}' not found in compression configurations")
-        config = compression_configs[model_name]
+        config = compression_configs[model_name][task]
     elif method in ["h2o", "average", "snap", "pyramid", "streamingLLM", "ssnap"]:
         if method not in compression_configs:
             raise ValueError(f"Method '{method}' not found in compression configurations")
@@ -33,14 +33,6 @@ def load_configs(model_name, method, total_budget, tokenizer=None):
     
     config["total_budget"] = total_budget
     config["method"] = method
-    
-    # Add punctuation_ids for a2sf method if tokenizer is provided
-    if method == "a2sf" and tokenizer is not None:
-        punctuation_ids = [
-            tokenizer.encode(".", add_special_tokens=False)[0],
-            tokenizer.encode(" .", add_special_tokens=False)[0],
-        ]
-        config["punctuation_ids"] = punctuation_ids
     
     return CompressionConfig(config)
 

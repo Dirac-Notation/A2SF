@@ -52,10 +52,6 @@ class KVCache:
     def flash_prepare_scores(self, attn_scores):
         """Prepare scores for selection - to be overridden by subclasses"""
         pass
-
-    def set_forget(self, forget, exponents):
-        """Set forget flag and exponents - to be overridden by subclasses"""
-        pass
     
     def flash_attention(self, query, key, value, attn_mask, head_dim, block_size=1024):
         """

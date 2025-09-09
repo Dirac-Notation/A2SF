@@ -220,7 +220,6 @@ class LlamaModel(LlamaPreTrainedModel):
     def init_cache(self, compression_config):
         self.input_ids = False
         self.compression_method = compression_config.compression_method
-        self.punctuation_ids = compression_config.punctuation_ids
         for idx, layer in enumerate(self.layers):
             # Create appropriate cache implementation based on compression method
             if compression_config.method != "full":
@@ -256,31 +255,15 @@ class LlamaModel(LlamaPreTrainedModel):
         
     def set_forget(self, input_ids):
         exponents = None
-        forget = False
         
         if self.compression_method == "a2sf":
             if input_ids.size(1) > 1:
                 orig_shape = input_ids.shape
-                # flattened_input_ids = input_ids.reshape(-1)
-                # num_all = flattened_input_ids.size(0)
-
-                # pos = torch.isin(flattened_input_ids, torch.tensor(self.punctuation_ids, device=input_ids.device)).nonzero(as_tuple=True)[0].tolist()
-                # num_t = len(pos)
-
-                # starts = [0] + [p + 1 for p in pos]
-                # ends   = pos + [num_all - 1]
-
-                # exponents = torch.empty_like(flattened_input_ids)
-                # for i, (s, e) in enumerate(zip(starts, ends)): exponents[s : e + 1] = num_t - i
-                # exponents = exponents.view(orig_shape[0], 1, orig_shape[1])
                 exponents = torch.arange(orig_shape[1]-1, -1, -1, device=input_ids.device).view(orig_shape[0], 1, orig_shape[1])
-            else:
-                # forget = input_ids.item() in self.punctuation_ids
-                forget = True
 
         for layer in self.layers:
             device = layer.self_attn.q_proj.weight.device
-            layer.self_attn.past_key_value.set_forget(forget, exponents.to(device) if exponents is not None else None)
+            layer.self_attn.past_key_value.exponents = exponents.to(device) if exponents is not None else None
 
     def get_input_embeddings(self):
         return self.embed_tokens
