@@ -154,7 +154,7 @@ def process_model(model, tokenizer, prompts, task):
     
     # local_ratios = [local_ratio_step*i for i in range(int(1/local_ratio_step)+1)]
     local_ratios = [0.5]
-    a2sf_factors = [factor_step*i for i in range(int(1/factor_step)+1)]
+    a2sf_factors = [factor_step*i for i in range(int(1/factor_step))]
     
     all_grid = list(itertools.product(local_ratios, a2sf_factors))
     
@@ -178,7 +178,7 @@ def process_model(model, tokenizer, prompts, task):
                 if FULL_SEARCH:
                     for layer_idx in range(attention_maps.size(0)):
                         original_output[layer_idx] = mul_out_residual_mlp(original_output[layer_idx], hidden_states[layer_idx][:,PROMPT_LENGTH:,:], model, layer_idx)
-
+                import pdb; pdb.set_trace()
                 for layer_idx in tqdm(range(num_layers)):
                     layer_ratio = layerwise_budget_ratio[layer_idx]
                     for grid_idx, (local_ratio, a2sf_factor) in enumerate(all_grid):
@@ -186,7 +186,7 @@ def process_model(model, tokenizer, prompts, task):
                         condition_output = mul_att_value(condition_maps[:,:,PROMPT_LENGTH:,:], values[layer_idx], num_attention_heads, num_key_value_heads)
                         if FULL_SEARCH:
                             condition_output = mul_out_residual_mlp(condition_output, hidden_states[layer_idx][:,PROMPT_LENGTH:,:], model, layer_idx)
-                        grid_score[layer_idx][grid_idx] += F.cosine_similarity(original_output[layer_idx], condition_output.to("cuda"), dim=2).mean().item()
+                        grid_score[layer_idx][grid_idx] += torch.norm(original_output[layer_idx] - condition_output.to("cuda"), dim=2).mean().item()
                 
                 del attention_maps, values, hidden_states, original_output, condition_maps, condition_output
                 torch.cuda.empty_cache()
@@ -230,7 +230,7 @@ def process_model(model, tokenizer, prompts, task):
             #     if FULL_SEARCH:
             #         for layer_idx in range(num_layers):
             #             condition_output[layer_idx] = mul_out_residual_mlp(condition_output[layer_idx], hidden_states[layer_idx][:,PROMPT_LENGTH:,:], model, layer_idx)
-            #     sim_score = F.cosine_similarity(original_output, condition_output.to("cuda"), dim=3).mean(dim=(1,2))
+            #     sim_score = torch.norm(original_output - condition_output.to("cuda"), dim=3).mean(dim=(1,2))
                 
             #     for _ in tqdm(range(100)):
             #         min_idx = sim_score.argmin()
@@ -246,7 +246,7 @@ def process_model(model, tokenizer, prompts, task):
             #         if FULL_SEARCH:
             #             for layer_idx in range(num_layers):
             #                 condition_output[layer_idx] = mul_out_residual_mlp(condition_output[layer_idx], hidden_states[layer_idx][:,PROMPT_LENGTH:,:], model, layer_idx)
-            #         sim_score = F.cosine_similarity(original_output, condition_output.to("cuda"), dim=3).mean(dim=(1,2))
+            #         sim_score = torch.norm(original_output - condition_output.to("cuda"), dim=3).mean(dim=(1,2))
                 
             #     del attention_maps, values, hidden_states, original_output, condition_maps, condition_output, sim_score
             #     torch.cuda.empty_cache()
@@ -270,7 +270,7 @@ def main(args):
     results = {}
     for task in tasks:
         prompts = get_prompt(task)
-        batch_size = 4 if len(prompts)%4 == 0 else 2
+        batch_size = len(prompts)
         prompts = [prompts[batch_start:batch_start+batch_size] for batch_start in range(0, len(prompts), batch_size)]
         
         results[task] = process_model(
