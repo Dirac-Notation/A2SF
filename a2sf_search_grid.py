@@ -20,8 +20,8 @@ if torch.cuda.is_available():
     torch.cuda.manual_seed_all(seed)
 
 # Constants (replacing argparse arguments)
-PROMPT_LENGTH = 999
-GENERATION_LENGTH = 1
+PROMPT_LENGTH = 990
+GENERATION_LENGTH = 10
 TOTAL_BUDGET = 100
 FULL_SEARCH = True
 
@@ -178,7 +178,7 @@ def process_model(model, tokenizer, prompts, task):
                 if FULL_SEARCH:
                     for layer_idx in range(attention_maps.size(0)):
                         original_output[layer_idx] = mul_out_residual_mlp(original_output[layer_idx], hidden_states[layer_idx][:,PROMPT_LENGTH:,:], model, layer_idx)
-                import pdb; pdb.set_trace()
+                
                 for layer_idx in tqdm(range(num_layers)):
                     layer_ratio = layerwise_budget_ratio[layer_idx]
                     for grid_idx, (local_ratio, a2sf_factor) in enumerate(all_grid):
@@ -194,9 +194,9 @@ def process_model(model, tokenizer, prompts, task):
             os.makedirs(f'plots/a2sf_search_grid/{task}', exist_ok=True)
             
             for layer_idx in range(num_layers):
-                max_idx = grid_score[layer_idx].index(max(grid_score[layer_idx]))
-                layerwise_local_ratio[layer_idx] = all_grid[max_idx][0]
-                layerwise_a2sf_factors[layer_idx] = all_grid[max_idx][1]
+                min_idx = grid_score[layer_idx].index(min(grid_score[layer_idx]))
+                layerwise_local_ratio[layer_idx] = all_grid[min_idx][0]
+                layerwise_a2sf_factors[layer_idx] = all_grid[min_idx][1]
             
                 plt.plot(a2sf_factors, [score/len(prompts) for score in grid_score[layer_idx]])
                 plt.xlabel('Forgetting Factor')
