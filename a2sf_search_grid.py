@@ -20,10 +20,9 @@ if torch.cuda.is_available():
     torch.cuda.manual_seed_all(seed)
 
 # Constants (replacing argparse arguments)
-PROMPT_LENGTH = 990
-GENERATION_LENGTH = 10
+PROMPT_LENGTH = 999
+GENERATION_LENGTH = 1
 TOTAL_BUDGET = 100
-BATCH_SIZE = 2
 FULL_SEARCH = True
 
 def get_prompt(task):
@@ -107,7 +106,7 @@ def process_batch_prompts(model, tokenizer, prompts):
 
         # Prepare batch input
         batch_input_ids = []
-        for prompt in prompts[:BATCH_SIZE]:
+        for prompt in prompts:
             if "llama" in model.config.model_type.lower():
                 prompt = f"[INST]{prompt}[/INST]"
             input_ids = tokenizer(prompt, return_tensors="pt", add_special_tokens=True).input_ids
@@ -268,23 +267,24 @@ def main(args):
   
     model, tokenizer = load_model_and_tokenizer(args.model)
 
+    results = {}
     for task in tasks:
         prompts = get_prompt(task)
-        prompts = [prompts[batch_start:batch_start+BATCH_SIZE] for batch_start in range(0, len(prompts), BATCH_SIZE)]
-
-        results = []
-        result = process_model(
+        batch_size = 4 if len(prompts)%4 == 0 else 2
+        prompts = [prompts[batch_start:batch_start+batch_size] for batch_start in range(0, len(prompts), batch_size)]
+        
+        results[task] = process_model(
             model = model,
             tokenizer = tokenizer,
             prompts = prompts,
             task = task
         )
-        results.append(result)
 
-        print("\nSearch Results")
+    print("\nSearch Results")
+    for task in tasks:
         print("=" * 50)
         print(f"Task: {task}")
-        print(f'''\n\"layerwise_ratios\": {result['layerwise_ratios']},\n\"forgetting_factors\": {result['forgetting_factors']},\n\"local_ratios\": {result['local_ratios']}\n''')
+        print(f'''\n\"layerwise_ratios\": {results[task]['layerwise_ratios']},\n\"forgetting_factors\": {results[task]['forgetting_factors']},\n\"local_ratios\": {results[task]['local_ratios']}\n''')
         print("-" * 50)
 
 if __name__ == "__main__":
