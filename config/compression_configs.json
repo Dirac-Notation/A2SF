@@ -13,10 +13,6 @@
     "compression_method": "snap",
     "recent_budget": 16
   },
-  "ssnap": {
-    "compression_method": "snap",
-    "recent_budget": 16
-  },
   "pyramid": {
     "compression_method": "pyramid",
     "beta": 20,
