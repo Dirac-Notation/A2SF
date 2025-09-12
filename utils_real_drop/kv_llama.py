@@ -233,7 +233,7 @@ class LlamaModel(LlamaPreTrainedModel):
                     from .kv_cache.h2o_cache import H2OCache
                     layer.self_attn.past_key_value = H2OCache(layer.self_attn.num_key_value_heads)
                 elif compression_config.compression_method == "a2sf":
-                    if compression_config.forgetting_factors[idx] == 1:
+                    if compression_config.forgetting_factors[idx] == 1.0:
                         from .kv_cache.h2o_cache import H2OCache
                         layer.self_attn.past_key_value = H2OCache(layer.self_attn.num_key_value_heads)
                     else:
