@@ -6,8 +6,7 @@ import numpy as np
 import random
 import argparse
 
-from utils import load_configs, get_model_config, load_model
-from models_skew.skew_llama import skew_model
+from utils import load_configs, load_model
 
 def load_jsonl_file(file_path):
     """Load data from a JSONL file"""
@@ -96,9 +95,9 @@ if __name__ == '__main__':
     os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpus))
     
     # Load configurations
-
     model_name = args.model
-    max_length = model2maxlen[model_name]
+    model_name = model_name.split("_")[0].lower()
+    max_length = json.load(open("config/model2maxlen.json", "r"))[model_name]
     
     # Load model and tokenizer once
     print(f"Loading model and tokenizer for {model_name} on GPUs: {gpus}...")
