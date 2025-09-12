@@ -169,7 +169,7 @@ def process_model(model, tokenizer, prompts, task):
     num_key_value_heads = model.config.num_key_value_heads if hasattr(model.config, 'num_key_value_heads') else num_attention_heads
 
     with torch.no_grad():
-        for _ in range(3):
+        for _ in range(1):
             grid_score = [[0.0 for _ in range(len(all_grid))] for _ in range(num_layers)]
             for prompt_idx in tqdm(range(len(prompts))):
                 attention_maps = attention_map_buffer[prompt_idx].to("cuda")
@@ -230,47 +230,47 @@ def process_model(model, tokenizer, prompts, task):
                 plt.savefig(f'plots/a2sf_search_grid/{task}/layer_{layer_idx}.png', dpi=300, bbox_inches='tight')
                 plt.close()
 
-            for prompt_idx in tqdm(range(len(prompts))):
-                attention_maps = attention_map_buffer[prompt_idx].to("cuda")
-                values = values_buffer[prompt_idx].to("cuda")
-                hidden_states = hidden_states_buffer[prompt_idx].to("cuda")
+            # for prompt_idx in tqdm(range(len(prompts))):
+            #     attention_maps = attention_map_buffer[prompt_idx].to("cuda")
+            #     values = values_buffer[prompt_idx].to("cuda")
+            #     hidden_states = hidden_states_buffer[prompt_idx].to("cuda")
 
-                original_output = mul_att_value(attention_maps[:,:,:,PROMPT_LENGTH:,:], values, num_attention_heads, num_key_value_heads)
-                if FULL_SEARCH:
-                    for layer_idx in range(attention_maps.size(0)):
-                        original_output[layer_idx] = mul_out_residual_mlp(original_output[layer_idx], hidden_states[layer_idx][:,PROMPT_LENGTH:,:], model, layer_idx)
+            #     original_output = mul_att_value(attention_maps[:,:,:,PROMPT_LENGTH:,:], values, num_attention_heads, num_key_value_heads)
+            #     if FULL_SEARCH:
+            #         for layer_idx in range(attention_maps.size(0)):
+            #             original_output[layer_idx] = mul_out_residual_mlp(original_output[layer_idx], hidden_states[layer_idx][:,PROMPT_LENGTH:,:], model, layer_idx)
 
-                condition_maps = []
-                for layer_idx in range(num_layers):
-                    layer_a2sf_factor = layerwise_a2sf_factors[layer_idx]
-                    layer_ratio = layerwise_budget_ratio[layer_idx]
-                    condition_maps.append(make_layerwise_a2sf_mask(attention_maps[layer_idx], layer_ratio, layer_a2sf_factor, local_ratio))
+            #     condition_maps = []
+            #     for layer_idx in range(num_layers):
+            #         layer_a2sf_factor = layerwise_a2sf_factors[layer_idx]
+            #         layer_ratio = layerwise_budget_ratio[layer_idx]
+            #         condition_maps.append(make_layerwise_a2sf_mask(attention_maps[layer_idx], layer_ratio, layer_a2sf_factor, local_ratio))
 
-                condition_maps = torch.stack(condition_maps, dim=0)
-                condition_output = mul_att_value(condition_maps[:,:,:,PROMPT_LENGTH:,:], values, num_attention_heads, num_key_value_heads)
-                if FULL_SEARCH:
-                    for layer_idx in range(num_layers):
-                        condition_output[layer_idx] = mul_out_residual_mlp(condition_output[layer_idx], hidden_states[layer_idx][:,PROMPT_LENGTH:,:], model, layer_idx)
-                sim_score = torch.norm(original_output - condition_output.to("cuda"), dim=3).mean(dim=(1,2))
+            #     condition_maps = torch.stack(condition_maps, dim=0)
+            #     condition_output = mul_att_value(condition_maps[:,:,:,PROMPT_LENGTH:,:], values, num_attention_heads, num_key_value_heads)
+            #     if FULL_SEARCH:
+            #         for layer_idx in range(num_layers):
+            #             condition_output[layer_idx] = mul_out_residual_mlp(condition_output[layer_idx], hidden_states[layer_idx][:,PROMPT_LENGTH:,:], model, layer_idx)
+            #     sim_score = torch.norm(original_output - condition_output.to("cuda"), dim=3).mean(dim=(1,2))
                 
-                for _ in tqdm(range(100)):
-                    min_idx = sim_score.argmin()
-                    max_idx = sim_score.argmax()
+            #     for _ in tqdm(range(100)):
+            #         min_idx = sim_score.argmin()
+            #         max_idx = sim_score.argmax()
                     
-                    layerwise_budget_ratio[min_idx] -= 0.01
-                    layerwise_budget_ratio[max_idx] += 0.01
+            #         layerwise_budget_ratio[min_idx] -= 0.01
+            #         layerwise_budget_ratio[max_idx] += 0.01
                     
-                    condition_maps[min_idx] = make_layerwise_a2sf_mask(attention_maps[min_idx], layerwise_budget_ratio[min_idx], layerwise_a2sf_factors[min_idx], layerwise_local_ratio[min_idx])
-                    condition_maps[max_idx] = make_layerwise_a2sf_mask(attention_maps[max_idx], layerwise_budget_ratio[max_idx], layerwise_a2sf_factors[max_idx], layerwise_local_ratio[max_idx])
+            #         condition_maps[min_idx] = make_layerwise_a2sf_mask(attention_maps[min_idx], layerwise_budget_ratio[min_idx], layerwise_a2sf_factors[min_idx], layerwise_local_ratio[min_idx])
+            #         condition_maps[max_idx] = make_layerwise_a2sf_mask(attention_maps[max_idx], layerwise_budget_ratio[max_idx], layerwise_a2sf_factors[max_idx], layerwise_local_ratio[max_idx])
                     
-                    condition_output = mul_att_value(condition_maps[:,:,:,PROMPT_LENGTH:,:], values, num_attention_heads, num_key_value_heads)
-                    if FULL_SEARCH:
-                        for layer_idx in range(num_layers):
-                            condition_output[layer_idx] = mul_out_residual_mlp(condition_output[layer_idx], hidden_states[layer_idx][:,PROMPT_LENGTH:,:], model, layer_idx)
-                    sim_score = torch.norm(original_output - condition_output.to("cuda"), dim=3).mean(dim=(1,2))
+            #         condition_output = mul_att_value(condition_maps[:,:,:,PROMPT_LENGTH:,:], values, num_attention_heads, num_key_value_heads)
+            #         if FULL_SEARCH:
+            #             for layer_idx in range(num_layers):
+            #                 condition_output[layer_idx] = mul_out_residual_mlp(condition_output[layer_idx], hidden_states[layer_idx][:,PROMPT_LENGTH:,:], model, layer_idx)
+            #         sim_score = torch.norm(original_output - condition_output.to("cuda"), dim=3).mean(dim=(1,2))
                 
-                del attention_maps, values, hidden_states, original_output, condition_maps, condition_output, sim_score
-                torch.cuda.empty_cache()
+            #     del attention_maps, values, hidden_states, original_output, condition_maps, condition_output, sim_score
+            #     torch.cuda.empty_cache()
 
     layerwise_budget_ratio = [round(ratio, 2) for ratio in layerwise_budget_ratio]
     layerwise_a2sf_factors = [round(factor, 2) for factor in layerwise_a2sf_factors]
@@ -303,10 +303,12 @@ def main(args):
 
     print("\nSearch Results")
     for task in tasks:
-        print("=" * 50)
-        print(f"Task: {task}")
-        print(f'''\n\"layerwise_ratios\": {results[task]['layerwise_ratios']},\n\"forgetting_factors\": {results[task]['forgetting_factors']},\n\"local_ratios\": {results[task]['local_ratios']}\n''')
-        print("-" * 50)
+        print(f"""\t\t{task}: {{
+            \"compression_method\": \"a2sf\",
+            \"layerwise_ratios\": {results[task]['layerwise_ratios']},
+            \"forgetting_factors\": {results[task]['forgetting_factors']},
+            \"local_ratios\": {results[task]['local_ratios']}
+        }},""")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
