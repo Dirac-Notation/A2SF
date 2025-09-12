@@ -36,6 +36,25 @@ def load_configs(model_name, method, task, total_budget):
     
     return CompressionConfig(config)
 
+def get_model_config(model_name):
+    model2path = json.load(open("config/model2path.json", "r"))
+    model2maxlen = json.load(open("config/model2maxlen.json", "r"))
+    
+    if "llama1" in model_name.lower():
+        return model2path["llama1"], model2maxlen["llama1"]
+    elif "llama2" in model_name.lower():
+        return model2path["llama2"], model2maxlen["llama2"]
+    elif "llama3" in model_name.lower():
+        return model2path["llama3"], model2maxlen["llama3"]
+    elif "opt" in model_name.lower():
+        return model2path["opt"], model2maxlen["opt"]
+    elif "qwen2" in model_name.lower():
+        return model2path["qwen2"], model2maxlen["qwen2"]
+    else:
+        raise ValueError(f"Unsupported model: {model_name}. Only Llama1, Llama2, Llama3, OPT, and Qwen2 models are supported.")
+    
+    
+
 def load_model(model_name, gpu_list=None):
     """
     Load model and tokenizer based on model name and GPU configuration.
