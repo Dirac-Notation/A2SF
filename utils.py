@@ -1,40 +1,43 @@
 import torch
 import json
 import os
+import numpy as np
+import random
 
 from transformers import AutoTokenizer
-from utils_real_drop import KVLlamaForCausalLM, KVOPTForCausalLM, KVQwen2ForCausalLM, Qwen2Tokenizer
+from utils_real_drop import KVLlamaForCausalLM, KVOPTForCausalLM
 
 class CompressionConfig(dict):
     __getattr__ = dict.get
     __setattr__ = dict.__setitem__
     __delattr__ = dict.__delitem__
 
-def load_configs(model_name, method, task, total_budget):
-    try:
-        with open("config/compression_configs.json", "r") as f:
-            compression_configs = json.load(f)
-    except FileNotFoundError:
-        raise FileNotFoundError("compression_configs.json not found in config/ directory")
+def load_configs(config_file, method, total_budget, task):
+    with open(config_file, "r") as f:
+        compression_configs = json.load(f)
     
-    # Get configuration data
-    if method == "a2sf":
-        if model_name not in compression_configs:
-            raise ValueError(f"Model '{model_name}' not found in compression configurations")
-        config = compression_configs[model_name][task]
-    elif method in ["h2o", "average", "snap", "pyramid", "streamingLLM", "ssnap"]:
+    if method == "full":
+        config = CompressionConfig({"method": "full"})
+    elif method == "a2sf":
+        config = CompressionConfig(compression_configs[method][task])
+    else:
         if method not in compression_configs:
             raise ValueError(f"Method '{method}' not found in compression configurations")
-        config = compression_configs[method]
-    elif method == "full":
-        return CompressionConfig({"method": "full"})
-    else:
-        raise ValueError(f"Unsupported method: {method}. Supported methods: a2sf, h2o, streamingLLM, average, snap, pyramid, full")
-    
+        config = CompressionConfig(compression_configs[method])
+        
     config["total_budget"] = total_budget
     config["method"] = method
-    
-    return CompressionConfig(config)
+
+    return config
+
+def set_seed(seed):
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    torch.cuda.manual_seed_all(seed)
 
 def load_model(model_name, gpu_list=None):
     """
@@ -55,20 +58,15 @@ def load_model(model_name, gpu_list=None):
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpu_list))
     
     # Load tokenizer first
-    if "qwen" in model_name.lower():
-        tokenizer = Qwen2Tokenizer.from_pretrained(model_path)
-    else:
-        tokenizer = AutoTokenizer.from_pretrained(model_path)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
 
     # Load appropriate model based on model name
     if "llama" in model_name.lower():
         model = KVLlamaForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16, device_map="auto")
     elif "opt" in model_name.lower():
         model = KVOPTForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16, device_map="auto")
-    elif "qwen" in model_name.lower():
-        model = KVQwen2ForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16, device_map="auto")
     else:
-        raise ValueError(f"Unsupported model: {model_name}. Only Llama, OPT, and Qwen2 models are supported.")
+        raise ValueError(f"Unsupported model: {model_name}. Only Llama and OPT models are supported.")
     
     model = model.eval()
     

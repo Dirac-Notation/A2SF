@@ -18,9 +18,9 @@ if torch.cuda.is_available():
     torch.cuda.manual_seed_all(seed)
 
 # Constants (replacing argparse arguments)
-PROMPT_LENGTH = 990
-GENERATION_LENGTH = 10
-TOTAL_BUDGET = 100
+PROMPT_LENGTH = 4095
+GENERATION_LENGTH = 1
+TOTAL_BUDGET = 64
 
 def get_prompt(task):
     with open("datasets/calibration_dataset.jsonl", "r") as f:
@@ -88,8 +88,6 @@ def mul_out_residual_mlp(hidden_states, residual, model, layer_idx):
     return hidden_states
 
 def load_model_and_tokenizer(model_name):
-    """Load model and tokenizer based on model name."""
-    
     model2path = json.load(open("config/model2path.json", "r"))
     model_path = model2path[model_name]
     
@@ -98,10 +96,7 @@ def load_model_and_tokenizer(model_name):
     return model, tokenizer
 
 def process_batch_prompts(model, tokenizer, prompts):
-    """Process a batch of prompts and return attention maps and values."""
     with torch.inference_mode():
-
-        # Prepare batch input
         batch_input_ids = []
         for prompt in prompts:
             if "llama" in model.config.model_type.lower():
@@ -146,12 +141,11 @@ def process_model(model, tokenizer, prompts, task):
     num_layers = model.config.num_hidden_layers
     
     # Search space
-    factor_step = 0.01
     # local_ratio_step = 0.1
     
     # local_ratios = [local_ratio_step*i for i in range(int(1/local_ratio_step)+1)]
     local_ratios = [0.125]
-    a2sf_factors = [factor_step*i for i in range(int(1/factor_step+1))]
+    a2sf_factors = [i/10 for i in range(8)] + [0.80+i/20 for i in range(2)] + [0.90+i/100 for i in range(8)] + [0.9800+i/10000 for i in range(201)]
     
     all_grid = list(itertools.product(local_ratios, a2sf_factors))
     
@@ -164,7 +158,7 @@ def process_model(model, tokenizer, prompts, task):
     num_key_value_heads = model.config.num_key_value_heads if hasattr(model.config, 'num_key_value_heads') else num_attention_heads
 
     with torch.no_grad():
-        for _ in range(3):
+        for _ in range(1):
             grid_score = [[0.0 for _ in range(len(all_grid))] for _ in range(num_layers)]
             for prompt_idx in tqdm(range(len(prompts))):
                 attention_maps = attention_map_buffer[prompt_idx].to("cuda")
@@ -191,48 +185,48 @@ def process_model(model, tokenizer, prompts, task):
                 layerwise_local_ratio[layer_idx] = all_grid[min_idx][0]
                 layerwise_a2sf_factors[layer_idx] = all_grid[min_idx][1]
                 
-            for prompt_idx in tqdm(range(len(prompts))):
-                attention_maps = attention_map_buffer[prompt_idx].to("cuda")
-                values = values_buffer[prompt_idx].to("cuda")
-                hidden_states = hidden_states_buffer[prompt_idx].to("cuda")
+            # for prompt_idx in tqdm(range(len(prompts))):
+            #     attention_maps = attention_map_buffer[prompt_idx].to("cuda")
+            #     values = values_buffer[prompt_idx].to("cuda")
+            #     hidden_states = hidden_states_buffer[prompt_idx].to("cuda")
 
-                original_output = mul_att_value(attention_maps[:,:,:,PROMPT_LENGTH:,:], values, num_attention_heads, num_key_value_heads)
-                for layer_idx in range(attention_maps.size(0)):
-                    original_output[layer_idx] = mul_out_residual_mlp(original_output[layer_idx], hidden_states[layer_idx][:,PROMPT_LENGTH:,:], model, layer_idx)
+            #     original_output = mul_att_value(attention_maps[:,:,:,PROMPT_LENGTH:,:], values, num_attention_heads, num_key_value_heads)
+            #     for layer_idx in range(attention_maps.size(0)):
+            #         original_output[layer_idx] = mul_out_residual_mlp(original_output[layer_idx], hidden_states[layer_idx][:,PROMPT_LENGTH:,:], model, layer_idx)
 
-                condition_maps = []
-                for layer_idx in range(num_layers):
-                    layer_a2sf_factor = layerwise_a2sf_factors[layer_idx]
-                    layer_ratio = layerwise_budget_ratio[layer_idx]
-                    condition_maps.append(make_layerwise_a2sf_mask(attention_maps[layer_idx], layer_ratio, layer_a2sf_factor, local_ratio))
+            #     condition_maps = []
+            #     for layer_idx in range(num_layers):
+            #         layer_a2sf_factor = layerwise_a2sf_factors[layer_idx]
+            #         layer_ratio = layerwise_budget_ratio[layer_idx]
+            #         condition_maps.append(make_layerwise_a2sf_mask(attention_maps[layer_idx], layer_ratio, layer_a2sf_factor, local_ratio))
 
-                condition_maps = torch.stack(condition_maps, dim=0)
-                condition_output = mul_att_value(condition_maps[:,:,:,PROMPT_LENGTH:,:], values, num_attention_heads, num_key_value_heads)
-                for layer_idx in range(num_layers):
-                    condition_output[layer_idx] = mul_out_residual_mlp(condition_output[layer_idx], hidden_states[layer_idx][:,PROMPT_LENGTH:,:], model, layer_idx)
-                sim_score = torch.norm(original_output - condition_output.to("cuda"), dim=3).mean(dim=(1,2))
+            #     condition_maps = torch.stack(condition_maps, dim=0)
+            #     condition_output = mul_att_value(condition_maps[:,:,:,PROMPT_LENGTH:,:], values, num_attention_heads, num_key_value_heads)
+            #     for layer_idx in range(num_layers):
+            #         condition_output[layer_idx] = mul_out_residual_mlp(condition_output[layer_idx], hidden_states[layer_idx][:,PROMPT_LENGTH:,:], model, layer_idx)
+            #     sim_score = torch.norm(original_output - condition_output.to("cuda"), dim=3).mean(dim=(1,2))
                 
-                for _ in tqdm(range(100)):
-                    min_idx = sim_score.argmin()
-                    max_idx = sim_score.argmax()
+            #     for _ in tqdm(range(100)):
+            #         min_idx = sim_score.argmin()
+            #         max_idx = sim_score.argmax()
                     
-                    layerwise_budget_ratio[min_idx] -= 0.01
-                    layerwise_budget_ratio[max_idx] += 0.01
+            #         layerwise_budget_ratio[min_idx] -= 0.01
+            #         layerwise_budget_ratio[max_idx] += 0.01
                     
-                    condition_maps[min_idx] = make_layerwise_a2sf_mask(attention_maps[min_idx], layerwise_budget_ratio[min_idx], layerwise_a2sf_factors[min_idx], layerwise_local_ratio[min_idx])
-                    condition_maps[max_idx] = make_layerwise_a2sf_mask(attention_maps[max_idx], layerwise_budget_ratio[max_idx], layerwise_a2sf_factors[max_idx], layerwise_local_ratio[max_idx])
+            #         condition_maps[min_idx] = make_layerwise_a2sf_mask(attention_maps[min_idx], layerwise_budget_ratio[min_idx], layerwise_a2sf_factors[min_idx], layerwise_local_ratio[min_idx])
+            #         condition_maps[max_idx] = make_layerwise_a2sf_mask(attention_maps[max_idx], layerwise_budget_ratio[max_idx], layerwise_a2sf_factors[max_idx], layerwise_local_ratio[max_idx])
                     
-                    condition_output = mul_att_value(condition_maps[:,:,:,PROMPT_LENGTH:,:], values, num_attention_heads, num_key_value_heads)
-                    for layer_idx in range(num_layers):
-                        condition_output[layer_idx] = mul_out_residual_mlp(condition_output[layer_idx], hidden_states[layer_idx][:,PROMPT_LENGTH:,:], model, layer_idx)
-                    sim_score = torch.norm(original_output - condition_output.to("cuda"), dim=3).mean(dim=(1,2))
+            #         condition_output = mul_att_value(condition_maps[:,:,:,PROMPT_LENGTH:,:], values, num_attention_heads, num_key_value_heads)
+            #         for layer_idx in range(num_layers):
+            #             condition_output[layer_idx] = mul_out_residual_mlp(condition_output[layer_idx], hidden_states[layer_idx][:,PROMPT_LENGTH:,:], model, layer_idx)
+            #         sim_score = torch.norm(original_output - condition_output.to("cuda"), dim=3).mean(dim=(1,2))
                 
-                del attention_maps, values, hidden_states, original_output, condition_maps, condition_output, sim_score
-                torch.cuda.empty_cache()
+            #     del attention_maps, values, hidden_states, original_output, condition_maps, condition_output, sim_score
+            #     torch.cuda.empty_cache()
 
-    layerwise_budget_ratio = [round(ratio, 2) for ratio in layerwise_budget_ratio]
-    layerwise_a2sf_factors = [round(factor, 2) for factor in layerwise_a2sf_factors]
-    layerwise_local_ratio = [round(ratio, 2) for ratio in layerwise_local_ratio]
+    layerwise_budget_ratio = [round(ratio, 4) for ratio in layerwise_budget_ratio]
+    layerwise_a2sf_factors = [round(factor, 4) for factor in layerwise_a2sf_factors]
+    layerwise_local_ratio = [round(ratio, 4) for ratio in layerwise_local_ratio]
 
     return {
         "layerwise_ratios": layerwise_budget_ratio,
@@ -241,7 +235,6 @@ def process_model(model, tokenizer, prompts, task):
     }
 
 def main(args):
-
     tasks = ["Code Complete", "Few Shot", "Single-doc QA", "Multi-doc QA", "Summarization", "Passage Retrieval"]
   
     model, tokenizer = load_model_and_tokenizer(args.model)
@@ -249,9 +242,8 @@ def main(args):
     results = {}
     for task in tasks:
         prompts = get_prompt(task)
-        batch_size = len(prompts)
-        prompts = [prompts[batch_start:batch_start+batch_size] for batch_start in range(0, len(prompts), batch_size)]
-        
+        batch_size = 1
+        prompts = [prompts[i:i+batch_size] for i in range(0, len(prompts), batch_size)]
         results[task] = process_model(
             model = model,
             tokenizer = tokenizer,
@@ -260,11 +252,17 @@ def main(args):
         )
 
     print("\nSearch Results")
+    print(f"{{")
+    print(f"\"a2sf\": {{")
     for task in tasks:
-        print("=" * 50)
-        print(f"Task: {task}")
-        print(f'''\n\"layerwise_ratios\": {results[task]['layerwise_ratios']},\n\"forgetting_factors\": {results[task]['forgetting_factors']},\n\"local_ratios\": {results[task]['local_ratios']}\n''')
-        print("-" * 50)
+        print(f"\"{task}\" : {{")
+        print(f"\"compression_method\": \"a2sf\",")
+        print(f"\"layerwise_ratios\": {results[task]['layerwise_ratios']},")
+        print(f"\"forgetting_factors\": {results[task]['forgetting_factors']},")
+        print(f"\"local_ratios\": {results[task]['local_ratios']}")
+        print(f"}}{"," if task != tasks[-1] else ""}")
+    print(f"}}")
+    print(f"}}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
