@@ -1,23 +1,4 @@
 {
-  "streamingLLM": {
-    "compression_method": "streamingLLM",
-    "streaming_budget": 4
-  },
-  "h2o": {
-    "compression_method": "h2o"
-  },
-  "average": {
-    "compression_method": "average"
-  },
-  "snap": {
-    "compression_method": "snap",
-    "recent_budget": 16
-  },
-  "pyramid": {
-    "compression_method": "pyramid",
-    "beta": 20,
-    "recent_budget": 8
-  },
   "llama3": {
     "Code Complete": {
       "compression_method": "a2sf",
