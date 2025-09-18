@@ -18,8 +18,8 @@ if torch.cuda.is_available():
     torch.cuda.manual_seed_all(seed)
 
 # Constants (replacing argparse arguments)
-PROMPT_LENGTH = 4095
-GENERATION_LENGTH = 1
+GENERATION_LENGTH = 64
+PROMPT_LENGTH = 4096 - GENERATION_LENGTH
 TOTAL_BUDGET = 64
 
 def get_prompt(task):

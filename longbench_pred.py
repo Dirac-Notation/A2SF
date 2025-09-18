@@ -87,7 +87,7 @@ if __name__ == '__main__':
 
     data_group = {
         "Code Complete": ["repobench-p", "lcc"],
-        "Few Shot": ["trec", "triviaqa", "samsum", "lsht"],
+        "Few Shot": ["trec", "triviaqa", "samsum"],
         "Single-doc QA": ["narrativeqa", "qasper", "multifieldqa_en"],
         "Multi-doc QA": ["hotpotqa", "2wikimqa", "musique"],
         "Summarization": ["gov_report", "qmsum", "multi_news"],

@@ -1,30 +1,47 @@
 {
-"snap1": {
-"compression_method": "snap",
-"recent_budget": 1
-},
-"snap4": {
-"compression_method": "snap",
-"recent_budget": 4
-},
-"snap16": {
-"compression_method": "snap",
-"recent_budget": 16
-},
-"snap64": {
-"compression_method": "snap",
-"recent_budget": 64
-},
-"snap256": {
-"compression_method": "snap",
-"recent_budget": 256
-},
-"snap1024": {
-"compression_method": "snap",
-"recent_budget": 1024
-},
-"snap4096": {
-"compression_method": "snap",
-"recent_budget": 4096
-}
-}
+    "snap1": {
+    "compression_method": "snap",
+    "recent_budget": 1
+    },
+    "snap16": {
+    "compression_method": "snap",
+    "recent_budget": 16
+    },
+    "snap256": {
+    "compression_method": "snap",
+    "recent_budget": 256
+    },
+    "snap512": {
+    "compression_method": "snap",
+    "recent_budget": 512
+    },
+    "snap1024": {
+    "compression_method": "snap",
+    "recent_budget": 1024
+    },
+    "snap2048": {
+    "compression_method": "snap",
+    "recent_budget": 2048
+    },
+    "snap3072": {
+    "compression_method": "snap",
+    "recent_budget": 3072
+    },
+    "snap4096": {
+    "compression_method": "snap",
+    "recent_budget": 4096
+    },
+    "snap5120": {
+    "compression_method": "snap",
+    "recent_budget": 5120
+    },
+    "snap6144": {
+    "compression_method": "snap",
+    "recent_budget": 6144
+    },
+    "snap7168": {
+    "compression_method": "snap",
+    "recent_budget": 7168
+    }
+    }
+    
