@@ -212,9 +212,6 @@ class LlamaModel(LlamaPreTrainedModel):
                 if compression_config.compression_method == "streamingLLM":
                     from .kv_cache.streaming_cache import StreamingCache
                     layer.self_attn.past_key_value = StreamingCache(layer.self_attn.num_key_value_heads)
-                elif compression_config.compression_method == "average":
-                    from .kv_cache.average_cache import AverageCache
-                    layer.self_attn.past_key_value = AverageCache(layer.self_attn.num_key_value_heads)
                 elif compression_config.compression_method == "h2o":
                     from .kv_cache.h2o_cache import H2OCache
                     layer.self_attn.past_key_value = H2OCache(layer.self_attn.num_key_value_heads)
