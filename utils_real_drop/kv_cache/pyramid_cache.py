@@ -121,7 +121,7 @@ class PyramidCache(KVCache):
         return output
 
     def flash_attention(self, query, key, value, attn_mask, head_dim, block_size=1024):
-        if self.prompt:
+        if not self.prompt:
             self.prompt = True
             return self.prompt_flash_attention(query, key, value, attn_mask, head_dim, block_size)
         else:
