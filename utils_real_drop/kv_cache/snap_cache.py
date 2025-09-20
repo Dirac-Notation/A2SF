@@ -13,8 +13,9 @@ class SnapCache(KVCache):
         """Initialize Snap cache settings"""
         self.seq_length = 0
         self.total_budget = compression_config.total_budget
-        self.recent_budget = compression_config.recent_budget
+        self.recent_budget = int(self.total_budget * 0.125)
         self.select_budget = self.total_budget - self.recent_budget
+        self.observation_window = compression_config.observation_window
         self.prompt = False
 
     def select(self, scores):
@@ -35,7 +36,7 @@ class SnapCache(KVCache):
         ), dim=self.seq_dim)
     
     def flash_prepare_scores(self, attn_scores):
-        return attn_scores[:,:,-self.recent_budget:].sum(self.seq_dim)
+        return attn_scores[:,:,-self.observation_window:].sum(self.seq_dim)
 
     def prompt_flash_attention(self, query, key, value, attn_mask, head_dim, block_size=1024):
         """

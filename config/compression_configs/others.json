@@ -11,11 +11,11 @@
 },
 "snap": {
 "compression_method": "snap",
-"recent_budget": 16
+"observation_window": 16
 },
 "pyramid": {
 "compression_method": "pyramid",
 "beta": 20,
-"recent_budget": 8
+"observation_window": 8
 }
 }
