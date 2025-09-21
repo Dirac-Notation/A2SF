@@ -23,7 +23,6 @@ class A2SFCache(KVCache):
         self.prompt = False
 
     def select(self, scores):
-        """Common selection logic for all cache implementations"""
         if self.seq_length <= self.total_budget:
             return
         

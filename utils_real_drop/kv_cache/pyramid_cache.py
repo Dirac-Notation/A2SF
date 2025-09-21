@@ -26,16 +26,11 @@ class PyramidCache(KVCache):
         self.prompt = False
     
     def select(self, scores):
-        if self.prompt:
-            return
-        
         if self.seq_length <= self.total_budget:
             return
         
-        # Select tokens to keep (common logic)
         selected_indices = scores[:,:,:-self.recent_budget].topk(self.select_budget, dim=-1).indices.sort().values
         
-        # Update key-value cache
         selected_indices = selected_indices.unsqueeze(-1).expand(-1,-1,-1,self.key_data.size(-1))
         
         self.key_data = torch.cat((
