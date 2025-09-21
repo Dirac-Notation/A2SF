@@ -13,7 +13,7 @@ class H2OCache(KVCache):
         """Initialize H2O cache settings"""
         self.seq_length = 0
         self.total_budget = compression_config.total_budget
-        self.recent_budget = round(self.total_budget * 0.5)
+        self.recent_budget = round(self.total_budget * 0.125)
         self.select_budget = self.total_budget - self.recent_budget
         self.prompt = False
     
