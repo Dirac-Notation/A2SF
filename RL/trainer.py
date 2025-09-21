@@ -5,7 +5,6 @@ import random
 import torch
 import torch.optim as optim
 from typing import List, Dict, Any
-from tqdm import tqdm
 
 import sys
 import os
@@ -19,140 +18,143 @@ from .runner import A2SFRunner
 from .features import ContextEncoder
 
 class A2SFTrainer:
-    """Trainer for A2SF RL agent"""
-    
     def __init__(self, config: A2SFRLConfig):
         self.config = config
         self.device = torch.device(config.device if torch.cuda.is_available() else "cpu")
         
-        # Set random seeds
         torch.manual_seed(config.seed)
         random.seed(config.seed)
         
-        # Initialize components
         self.runner = A2SFRunner(config)
         self.env = A2SFEnv(self.runner, config)
         
-        # Load training data
+        # Load all data for both training and evaluation
         self.training_data = self.runner.load_training_data(config.max_samples_per_task)
-        print(f"Loaded {len(self.training_data)} training samples")
         
-        # Initialize policy network
-        # Calculate state dimension
+        # Use fixed random indices for evaluation to test generalization across tasks
+        random.seed(42)  # Fixed seed for consistent evaluation data selection
+        eval_size = min(config.eval_samples, len(self.training_data))
+        all_indices = list(range(len(self.training_data)))
+        self.eval_indices = random.sample(all_indices, eval_size)  # Random but fixed indices
+        
+        print(f"Loaded {len(self.training_data)} total samples")
+        print(f"Using {len(self.eval_indices)} samples for evaluation")
+        
+        # Log evaluation task distribution for verification
+        eval_tasks = [self.training_data[i]["task"] for i in self.eval_indices]
+        task_counts = {}
+        for task in eval_tasks:
+            task_counts[task] = task_counts.get(task, 0) + 1
+        print(f"Evaluation task distribution: {task_counts}")
+        
+        # Reset random seed for training
+        random.seed(config.seed)
+        
         context_encoder = ContextEncoder(config.sentence_transformer_model)
-        context_dim = context_encoder.embedding_dim
-        state_dim = context_dim
+        state_dim = context_encoder.embedding_dim
         
         self.policy = A2SFPolicy(state_dim, config.action_min, config.action_max).to(self.device)
         self.optimizer = optim.Adam(self.policy.parameters(), lr=config.lr)
-        
-        # Initialize buffer
         self.buffer = RolloutBuffer(device=self.device)
         
-        # Create save directory
         os.makedirs(config.save_dir, exist_ok=True)
         
-        # Training statistics
         self.training_stats = {
-            "iterations": [],
             "rewards": [],
-            "accuracy_scores": [],
-            "losses": []
+            "accuracy_scores": []
         }
     
     def train(self, num_iterations: int = 1000):
-        """
-        Main training loop
-        
-        Args:
-            num_iterations: Number of training iterations
-        """
         print(f"Starting training for {num_iterations} iterations")
         
         for iteration in range(num_iterations):
             start_time = time.time()
             
-            # Collect experiences
             self._collect_experiences()
             
-            # Update policy
             if self.buffer.size() > 0:
                 loss_stats = ppo_update(self.policy, self.buffer, self.config, self.optimizer)
+                
+                for key, value in loss_stats.items():
+                    if torch.isnan(torch.tensor(value)) or torch.isinf(torch.tensor(value)):
+                        print(f"Warning: {key} is {value}, setting to 0.0")
+                        loss_stats[key] = 0.0
+                
                 self.buffer.clear()
             else:
-                loss_stats = {"policy_loss": 0.0, "value_loss": 0.0}
+                loss_stats = {"policy_loss": 0.0, "value_loss": 0.0, "entropy": 0.0}
             
-            # Log progress
             if iteration % self.config.log_frequency == 0:
                 self._log_progress(iteration, loss_stats, time.time() - start_time)
             
-            # Save checkpoint
             if iteration % 50 == 0 and iteration > 0:
                 self._save_checkpoint(iteration)
             
-            # Evaluate
             if iteration % self.config.eval_frequency == 0 and iteration > 0:
                 self._evaluate(iteration)
     
     def _collect_experiences(self):
-        """Collect experiences for PPO update"""
-        # Sample random episodes
-        episodes = random.sample(self.training_data, min(self.config.episodes_per_update, len(self.training_data)))
+        episodes = random.sample(
+            self.training_data,
+            min(self.config.episodes_per_update, len(self.training_data))
+        )
 
         for episode_data in episodes:
-            # Reset environment
-            answers = episode_data.get("answers", [])
-            if not answers:
-                print(f"Warning: No answers found for episode, skipping...")
-                continue
-                
             state = self.env.reset(
-                prompt=episode_data["prompt"],
+                prompt=episode_data["input_prompt"],
                 task=episode_data["task"],
-                tokens=episode_data["prompt"].split(),  # Simple tokenization
-                answers=answers
+                tokens=episode_data["input_prompt"].split(),
+                answers=episode_data["answers"],
+                dataset=episode_data.get("dataset", None)
             )
             
-            # Get action from policy
+            if isinstance(state, torch.Tensor):
+                state = state.to(self.device)
+
             action, log_prob, value = self.policy.act(state)
-            
-            # Take step
             next_state, reward, done, info = self.env.step(action)
+
+            if not isinstance(reward, torch.Tensor):
+                reward = torch.tensor(reward, device=self.device, dtype=value.dtype)
+            else:
+                reward = reward.to(self.device).to(value.dtype)
+
+            self.buffer.add(state, action, log_prob, reward, value)
             
-            # Store experience
-            self.buffer.add(state, action, log_prob, reward, value, torch.tensor(done))
-            
-            # Store statistics
-            self.training_stats["rewards"].append(reward.item())
-            self.training_stats["accuracy_scores"].append(info["accuracy_score"])
+            self.training_stats["rewards"].append(float(reward.item()))
+            self.training_stats["accuracy_scores"].append(float(info["accuracy_score"]))
     
     def _log_progress(self, iteration: int, loss_stats: Dict[str, float], iteration_time: float):
-        """Log training progress"""
         if not self.training_stats["rewards"]:
             return
         
-        # Compute statistics
-        recent_rewards = self.training_stats["rewards"][-self.config.episodes_per_update:]
-        recent_accuracy = self.training_stats["accuracy_scores"][-self.config.episodes_per_update:]
+        n = min(self.config.episodes_per_update, len(self.training_stats["rewards"]))
+        recent_rewards = self.training_stats["rewards"][-n:]
+        recent_accuracy = self.training_stats["accuracy_scores"][-n:]
         
         avg_reward = sum(recent_rewards) / len(recent_rewards)
         avg_accuracy = sum(recent_accuracy) / len(recent_accuracy)
         
+        policy_loss = loss_stats.get("policy_loss", 0.0)
+        value_loss = loss_stats.get("value_loss", 0.0)
+        entropy = loss_stats.get("entropy", 0.0)
+        
         print(f"Iteration {iteration}:")
-        print(f"  Avg Reward: {avg_reward:.4f}")
-        print(f"  Avg Accuracy: {avg_accuracy:.4f}")
-        print(f"  Policy Loss: {loss_stats['policy_loss']:.4f}")
-        print(f"  Value Loss: {loss_stats['value_loss']:.4f}")
-        print(f"  Time: {iteration_time:.2f}s")
+        print(f"  Avg Reward:  {avg_reward:.4f}")
+        print(f"  Avg Accuracy:{avg_accuracy:.4f}")
+        print(f"  Policy Loss: {policy_loss:.4f}")
+        print(f"  Value  Loss: {value_loss:.4f}")
+        print(f"  Entropy:     {entropy:.4f}")
+        print(f"  Time:        {iteration_time:.2f}s")
         print()
         
-        # Save to progress file
         progress_data = {
             "iteration": iteration,
             "avg_reward": avg_reward,
             "avg_accuracy": avg_accuracy,
-            "policy_loss": loss_stats["policy_loss"],
-            "value_loss": loss_stats["value_loss"],
+            "policy_loss": policy_loss,
+            "value_loss": value_loss,
+            "entropy": entropy,
             "iteration_time": iteration_time
         }
         
@@ -160,7 +162,6 @@ class A2SFTrainer:
             f.write(json.dumps(progress_data) + "\n")
     
     def _save_checkpoint(self, iteration: int):
-        """Save model checkpoint"""
         checkpoint_path = os.path.join(self.config.save_dir, f"policy_{iteration}.pt")
         torch.save({
             "iteration": iteration,
@@ -173,49 +174,46 @@ class A2SFTrainer:
         print(f"Saved checkpoint: {checkpoint_path}")
     
     def _evaluate(self, iteration: int):
-        """Evaluate policy on validation set"""
         print(f"Evaluating at iteration {iteration}")
         
-        # Sample evaluation episodes
-        eval_episodes = random.sample(self.training_data, min(self.config.eval_samples, len(self.training_data)))
+        # Use fixed evaluation data by indices (no random sampling)
+        eval_episodes = [self.training_data[i] for i in self.eval_indices]
         
         eval_rewards = []
         eval_accuracy = []
         
         for episode_data in eval_episodes:
-            # Reset environment
-            answers = episode_data.get("answers", [])
-            if not answers:
-                print(f"Warning: No answers found for evaluation episode, skipping...")
-                continue
-                
             state = self.env.reset(
-                prompt=episode_data["prompt"],
+                prompt=episode_data["input_prompt"],
                 task=episode_data["task"],
-                tokens=episode_data["prompt"].split(),
-                answers=answers
+                tokens=episode_data["input_prompt"].split(),
+                answers=episode_data["answers"],
+                dataset=episode_data.get("dataset", None)
             )
-            
-            # Get action from policy (no exploration during evaluation)
+            if isinstance(state, torch.Tensor):
+                state = state.to(self.device)
+
             with torch.no_grad():
-                action, _, _ = self.policy.act(state)
-            
-            # Take step
+                out = self.policy(state)
+                alpha, beta = out["alpha"], out["beta"]
+                a01 = (alpha / (alpha + beta)).clamp(1e-6, 1 - 1e-6)
+                action = self.policy.action_min + a01 * (self.policy.action_max - self.policy.action_min)
+
             _, reward, _, info = self.env.step(action)
-            
-            eval_rewards.append(reward.item())
-            eval_accuracy.append(info["accuracy_score"])
+
+            if not isinstance(reward, torch.Tensor):
+                reward = torch.tensor(reward, device=self.device, dtype=torch.float32)
+            eval_rewards.append(float(reward.item()))
+            eval_accuracy.append(float(info["accuracy_score"]))
         
-        # Compute evaluation statistics
-        avg_eval_reward = sum(eval_rewards) / len(eval_rewards)
-        avg_eval_accuracy = sum(eval_accuracy) / len(eval_accuracy)
+        avg_eval_reward = sum(eval_rewards) / len(eval_rewards) if eval_rewards else 0.0
+        avg_eval_accuracy = sum(eval_accuracy) / len(eval_accuracy) if eval_accuracy else 0.0
         
-        print(f"Evaluation Results:")
-        print(f"  Avg Reward: {avg_eval_reward:.4f}")
+        print("Evaluation Results:")
+        print(f"  Avg Reward:   {avg_eval_reward:.4f}")
         print(f"  Avg Accuracy: {avg_eval_accuracy:.4f}")
         print()
         
-        # Save evaluation results
         eval_data = {
             "iteration": iteration,
             "eval_avg_reward": avg_eval_reward,
@@ -228,12 +226,10 @@ class A2SFTrainer:
             f.write(json.dumps(eval_data) + "\n")
     
     def load_checkpoint(self, checkpoint_path: str):
-        """Load model from checkpoint"""
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
         
         self.policy.load_state_dict(checkpoint["policy_state_dict"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         
         print(f"Loaded checkpoint from iteration {checkpoint['iteration']}")
-        
         return checkpoint["iteration"]

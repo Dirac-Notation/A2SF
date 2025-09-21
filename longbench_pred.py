@@ -54,7 +54,6 @@ def get_pred(data, max_length, max_gen, dataset, model, tokenizer, out_path, mod
                     max_new_tokens=max_gen,
                     num_beams=1,
                     do_sample=False,
-                    temperature=1.0,
                     min_length=context_length+1,
                     eos_token_id=[tokenizer.eos_token_id, tokenizer.encode("\n", add_special_tokens=False)[-1]],
                 )[0]
@@ -65,7 +64,6 @@ def get_pred(data, max_length, max_gen, dataset, model, tokenizer, out_path, mod
                     max_new_tokens=max_gen,
                     num_beams=1,
                     do_sample=False,
-                    temperature=1.0,
                 )[0]
         pred = tokenizer.decode(output[context_length:], skip_special_tokens=True)
         with open(out_path, "a", encoding="utf-8") as f:

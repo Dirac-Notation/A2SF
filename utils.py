@@ -4,7 +4,7 @@ import os
 import numpy as np
 import random
 
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, AutoModelForCausalLM
 from utils_real_drop import KVLlamaForCausalLM, KVOPTForCausalLM
 
 class CompressionConfig(dict):
