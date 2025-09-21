@@ -11,7 +11,7 @@ python RL/run_training.py \
     --model llama3 \
     --gpus 0 \
     --iterations 200 \
-    --episodes_per_update 4 \
+    --episodes_per_update 1 \
     --lr 3e-4 \
     --accuracy_weight 1.0 \
     --max_samples_per_task 10 \
