@@ -193,9 +193,7 @@ if __name__ == '__main__':
         rl_config.context_window = args.context_window
     
     print(f"RL Policy loaded successfully")
-    print(f"Action range: [{rl_config.action_min}, {rl_config.action_max}]")
-    print(f"Context window: {rl_config.context_window}")
-    print(f"Sentence transformer: {rl_config.sentence_transformer_model}")
+    print(f"Config: {rl_config}")
 
     data_group = {
         "Code Complete": ["repobench-p", "lcc"],
