@@ -11,7 +11,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from utils import load_configs, load_model, set_seed
 from RL.config import A2SFRLConfig
 from RL.policy import A2SFPolicy
-from RL.features import ContextEncoder, build_state_from_context
+from RL.features import ContextEncoder
 
 def parse_args(args=None):
     parser = argparse.ArgumentParser(description="LongBench evaluation with RL-trained A2SF model")
