@@ -10,7 +10,7 @@ from .policy import A2SFPolicy
 from .env import A2SFEnv
 from .runner import A2SFRunner
 from .trainer import A2SFTrainer
-from .features import ContextEncoder, build_state_from_context
+from .features import ContextEncoder
 from .buffer import RolloutBuffer
 
 __version__ = "1.0.0"
@@ -21,6 +21,5 @@ __all__ = [
     "A2SFRunner",
     "A2SFTrainer",
     "ContextEncoder",
-    "build_state_from_context",
     "RolloutBuffer"
 ]
