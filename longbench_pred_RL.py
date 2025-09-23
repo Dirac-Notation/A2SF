@@ -60,18 +60,13 @@ def load_rl_policy(checkpoint_path, device):
     # Initialize context encoder
     context_encoder = ContextEncoder(
         model_name=config.sentence_transformer_model,
-        device=device
+        device=device,
+        context_window=config.context_window,
+        max_context=config.max_context
     )
     
-    # Calculate state dimension
-    state_dim = context_encoder.embedding_dim
-    
     # Initialize policy
-    policy = A2SFPolicy(
-        state_dim=state_dim,
-        action_min=config.action_min,
-        action_max=config.action_max
-    ).to(device)
+    policy = A2SFPolicy(state_dim=config.max_context).to(device)
     
     # Load policy weights
     if "policy_state_dict" in checkpoint:
