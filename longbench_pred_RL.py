@@ -84,19 +84,13 @@ def load_rl_policy(checkpoint_path, device):
     
     return policy, context_encoder, config
 
-def get_rl_action(policy, context_encoder, prompt, dataset, model_name, device, context_window=64):
+def get_rl_action(policy, context_encoder, prompt, dataset, model_name, device):
     """Get RL action (forgetting factor) for given prompt"""
-    # Simple tokenization for context encoding
-    tokens = prompt.split()
-    
     # Encode context
-    context_embedding = context_encoder.encode_context(
-        tokens, max_tokens=context_window
-    )
+    context_embedding = context_encoder.encode_context(prompt)
     
     # Build state
-    state = build_state_from_context(context_embedding)
-    state = state.to(device)
+    state = context_embedding.to(device, dtype=torch.float32)
     
     # Get action from policy (no exploration during inference)
     with torch.no_grad():
@@ -109,6 +103,12 @@ def get_pred_rl(data, max_length, max_gen, dataset, model, tokenizer, out_path, 
     """Generate predictions using RL-determined compression parameters"""
     for json_obj in tqdm(data):
         prompt = json_obj["input_prompt"]
+
+        # Get RL action (forgetting factor) for this prompt
+        forgetting_factor = get_rl_action(
+            rl_policy, context_encoder, prompt, dataset, model_name, device
+        )
+
         tokenized_prompt = tokenizer(prompt, truncation=False, return_tensors="pt").input_ids[0]
         
         if len(tokenized_prompt) > max_length:
@@ -119,11 +119,6 @@ def get_pred_rl(data, max_length, max_gen, dataset, model, tokenizer, out_path, 
         if dataset not in ["trec", "triviaqa", "samsum", "lsht", "lcc", "repobench-p"]:
             if "llama" in model_name:
                 prompt = f"[INST]{prompt}[/INST]"
-        
-        # Get RL action (forgetting factor) for this prompt
-        forgetting_factor = get_rl_action(
-            rl_policy, context_encoder, prompt, dataset, model_name, device, rl_config.context_window
-        )
         
         input = tokenizer(prompt, truncation=False, return_tensors="pt")
         
@@ -140,7 +135,7 @@ def get_pred_rl(data, max_length, max_gen, dataset, model, tokenizer, out_path, 
         config.layerwise_ratios = [1.0 for i in range(32)]
         config.local_ratios = 0.125
         config.forgetting_factors = [forgetting_factor for i in range(32)]
-        print(forgetting_factor)
+        
         model.init_cache(config)
         
         with torch.inference_mode():

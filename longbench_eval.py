@@ -52,7 +52,7 @@ def parse_args(args=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--model', type=str, default=None)
     parser.add_argument('--method', type=str, nargs='+', default=["a2sf"])
-    parser.add_argument('--budget', type=int, default=100)
+    parser.add_argument('--budget', type=str, default="100")
     return parser.parse_args(args)
 
 def scorer(dataset, predictions, answers, all_classes):
