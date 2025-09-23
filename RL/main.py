@@ -7,7 +7,6 @@ import argparse
 import os
 import json
 import torch
-from typing import List
 
 from .config import A2SFRLConfig
 from .trainer import A2SFTrainer
@@ -17,53 +16,27 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Train A2SF RL Agent")
     
     # Model configuration
-    parser.add_argument('--model', type=str, default="llama2", 
-                       choices=["llama", "llama2", "llama3", "opt"],
-                       help="Model name")
-    parser.add_argument('--gpus', type=int, nargs='+', default=[0],
-                       help="List of GPU IDs")
+    parser.add_argument('--model', type=str, default="llama3", choices=["llama", "llama2", "llama3", "opt"], help="Model name")
+    parser.add_argument('--gpus', type=int, nargs='+', default=[0], help="List of GPU IDs")
     
     # Training configuration
-    parser.add_argument('--iterations', type=int, default=1000,
-                       help="Number of training iterations")
-    parser.add_argument('--episodes_per_update', type=int, default=256,
-                       help="Number of episodes per PPO update")
-    parser.add_argument('--lr', type=float, default=3e-4,
-                       help="Learning rate")
-    parser.add_argument('--batch_size', type=int, default=128,
-                       help="Minibatch size")
-    
-    # Dataset configuration
-    parser.add_argument('--tasks', type=str, nargs='+', 
-                       default=["Code Complete", "Few Shot", "Single-doc QA", 
-                               "Multi-doc QA", "Passage Retrieval", "Summarization"],
-                       help="Tasks to train on")
-    parser.add_argument('--max_samples_per_task', type=int, default=100,
-                       help="Maximum samples per task")
-    
-    # Reward configuration
-    parser.add_argument('--accuracy_weight', type=float, default=1.0,
-                       help="Weight for accuracy-based reward")
+    parser.add_argument('--iterations', type=int, default=1000, help="Number of training iterations")
+    parser.add_argument('--episodes_per_update', type=int, default=128, help="Number of episodes per PPO update")
+    parser.add_argument('--lr', type=float, default=3e-4, help="Learning rate")
+    parser.add_argument('--minibatch_size', type=int, default=64, help="Minibatch size")
     
     # Evaluation configuration
-    parser.add_argument('--eval_frequency', type=int, default=10,
-                       help="Evaluation frequency")
-    parser.add_argument('--eval_samples', type=int, default=50,
-                       help="Number of samples for evaluation")
+    parser.add_argument('--eval_frequency', type=int, default=100, help="Evaluation frequency")
+    parser.add_argument('--eval_samples', type=int, default=50, help="Number of samples for evaluation")
     
     # Logging and saving
-    parser.add_argument('--save_dir', type=str, default="runs/a2sf_rl",
-                       help="Directory to save checkpoints and logs")
-    parser.add_argument('--log_frequency', type=int, default=5,
-                       help="Logging frequency")
+    parser.add_argument('--save_dir', type=str, default="runs/a2sf_rl", help="Directory to save checkpoints and logs")
+    parser.add_argument('--log_frequency', type=int, default=5, help="Logging frequency")
     
     # Misc
-    parser.add_argument('--seed', type=int, default=42,
-                       help="Random seed")
-    parser.add_argument('--device', type=str, default="cuda",
-                       help="Device to use")
-    parser.add_argument('--resume', type=str, default=None,
-                       help="Path to checkpoint to resume from")
+    parser.add_argument('--seed', type=int, default=42, help="Random seed")
+    parser.add_argument('--device', type=str, default="cuda", help="Device to use")
+    parser.add_argument('--resume', type=str, default=None, help="Path to checkpoint to resume from")
     
     return parser.parse_args()
 
@@ -78,14 +51,7 @@ def create_config_from_args(args) -> A2SFRLConfig:
     # Training configuration
     config.episodes_per_update = args.episodes_per_update
     config.lr = args.lr
-    config.minibatch_size = args.batch_size
-    
-    # Dataset configuration
-    config.tasks = args.tasks
-    config.max_samples_per_task = args.max_samples_per_task
-    
-    # Reward configuration
-    config.accuracy_weight = args.accuracy_weight
+    config.minibatch_size = args.minibatch_size
     
     # Evaluation configuration
     config.eval_frequency = args.eval_frequency
@@ -112,10 +78,8 @@ def main():
     print("A2SF RL Training Configuration:")
     print(f"  Model: {config.model_name}")
     print(f"  GPUs: {config.gpus}")
-    print(f"  Tasks: {config.tasks}")
     print(f"  Episodes per update: {config.episodes_per_update}")
     print(f"  Learning rate: {config.lr}")
-    print(f"  Accuracy weight: {config.accuracy_weight}")
     print(f"  Save directory: {config.save_dir}")
     print()
     
