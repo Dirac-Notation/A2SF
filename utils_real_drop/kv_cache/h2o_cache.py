@@ -62,7 +62,6 @@ class H2OCache(KVCache):
         output = torch.zeros_like(query)
         
         acc_score = torch.zeros((batch_size, num_heads, seq_len_k), dtype=query.dtype, device=query.device)
-        observation_point = self.seq_length - self.observation_window
         
         # Process key-value pairs in chunks
         for q_start in range(0, seq_len_q, block_size):
