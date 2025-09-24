@@ -61,48 +61,35 @@ class SnapCache(KVCache):
         
         # Initialize output and running statistics with BFloat16
         output = torch.zeros_like(query)
-        running_max = torch.full((batch_size, num_heads, seq_len_q, 1), float('-inf'), device=query.device, dtype=query.dtype)
-        running_sum = torch.zeros((batch_size, num_heads, seq_len_q, 1), device=query.device, dtype=query.dtype)
         
         acc_score = torch.zeros((batch_size, num_heads, seq_len_k), dtype=query.dtype, device=query.device)
+        observation_point = self.seq_length - self.observation_window
         
         # Process key-value pairs in chunks
-        for k_start in range(0, seq_len_k, block_size):
-            k_end = min(k_start + block_size, seq_len_k)
+        for q_start in range(0, seq_len_q, block_size):
+            q_end = min(q_start + block_size, seq_len_k)
             
             # Extract current chunk of key and value
-            k_chunk = key[:, :, k_start:k_end, :]  # [batch_size, num_heads, chunk_size, head_dim]
-            v_chunk = value[:, :, k_start:k_end, :]  # [batch_size, num_heads, chunk_size, head_dim]
+            q_chunk = query[:, :, q_start:q_end, :]  # [batch_size, num_heads, chunk_size, head_dim]
             
             # Compute attention scores for this chunk
-            scores = torch.matmul(query, k_chunk.transpose(-2, -1)).mul_(sm_scale)  # [batch_size, num_heads, seq_len_q, chunk_size]
+            scores = torch.matmul(q_chunk, key.transpose(2, 3)).mul_(sm_scale)  # [batch_size, num_heads, seq_len_q, chunk_size]
             
             # Apply attention mask if provided (includes causal masking)
             if attn_mask is not None:
-                scores.add_(attn_mask[:, :, :, k_start:k_end])
+                scores.add_(attn_mask[:, :, q_start:q_end, :])
             
-            # Update running statistics using flash attention algorithm
-            new_max = torch.maximum(running_max, torch.max(scores, dim=-1, keepdim=True)[0])
+            scores = torch.softmax(scores, dim=-1)
             
-            # Compute exponential terms and update running sum
-            scores.sub_(new_max).exp_()  # Subtract new_max and apply exp in-place
-            running_sum.mul_(torch.exp(running_max - new_max)).add_(torch.sum(scores, dim=-1, keepdim=True))
-            
-            acc_score.mul_(torch.exp(running_max - new_max).squeeze(-1))
-            acc_score[:,:,k_start:k_end].add_(self.flash_prepare_scores(scores))
-            
-            # Update output
-            output.mul_(torch.exp(running_max - new_max)).add_(torch.matmul(scores, v_chunk))
-            
-            # Update running max
-            running_max.copy_(new_max)
+            output[:,:,q_start:q_end] = torch.matmul(scores, value)
+
+            if q_start <= observation_point and q_end > observation_point:
+                acc_score.add_(self.flash_prepare_scores(scores[:,:,observation_point:q_end:]))
+            elif q_start >= observation_point:
+                acc_score.add_(self.flash_prepare_scores(scores))
         
         # GQA Aware Accumulation
-        acc_score.div_(running_sum.squeeze(-1))
         acc_score = acc_score.view(acc_score.shape[0], self.num_key_value_heads, -1, *acc_score.shape[2:]).sum(dim=2)
-        
-        # Final normalization
-        output = output / running_sum
         
         self.select(acc_score)
         
