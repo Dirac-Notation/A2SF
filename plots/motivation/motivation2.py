@@ -41,7 +41,7 @@ def get_prompt(task, data_group):
             print(f"Warning: Dataset file {file_path} not found")
             continue
     
-    return random.sample(articles, 100)
+    return random.sample(articles, 10)
 
 def load_model_and_tokenizer(model_name):
     model2path = json.load(open("config/model2path.json", "r"))
@@ -93,9 +93,9 @@ def process_model(model, tokenizer, prompts, task):
         
         prev_ratio = 0
         for b_idx, b in enumerate(bounds):
-            # cur_ratio = ((selected_indices < b).sum(dim=2) / SELECT_BUDGET).mean() - prev_ratio
-            # prev_ratio += cur_ratio
-            cur_ratio = ((selected_indices < b).sum(dim=2) / SELECT_BUDGET).mean()
+            cur_ratio = ((selected_indices < b).sum(dim=2) / SELECT_BUDGET).mean() - prev_ratio
+            prev_ratio += cur_ratio
+            # cur_ratio = ((selected_indices < b).sum(dim=2) / SELECT_BUDGET).mean()
             window_results[b_idx] += cur_ratio
     
     window_results /= len(prompts)
@@ -124,9 +124,9 @@ def create_combined_plot(all_results):
     bar_width = 0.8 / num_tasks  # 바 너비 조정
     
     for i, (task, results) in enumerate(all_results.items()):
-        # x_pos = [pos + (i - num_tasks/2 + 0.5) * bar_width for pos in x]
-        # plt.bar(x_pos, results, bar_width, label=task, color=colors[i], alpha=0.8)
-        plt.plot(x, results, label=task, color=colors[i], linewidth=2.5)
+        x_pos = [pos + (i - num_tasks/2 + 0.5) * bar_width for pos in x]
+        plt.bar(x_pos, results, bar_width, label=task, color=colors[i], alpha=0.8)
+        # plt.plot(x, results, label=task, color=colors[i], linewidth=2.5)
     
     plt.xticks(x, [f"~{10*b+10}%" for b in range(NUM_BOUNDS)])
     plt.ylim(0, 1)
@@ -170,7 +170,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--gpus", type=int, nargs='+', default=[0], help="List of GPU IDs (e.g., --gpus 0 1 2 3)")
-    parser.add_argument("--model", type=str, default="llama2", choices=["llama", "llama2", "llama3", "opt", "qwen2"])
+    parser.add_argument("--model", type=str, default="llama3", choices=["llama", "llama2", "llama3", "opt", "qwen2"])
     args = parser.parse_args()
     
     gpu_list = ",".join(str(gpu) for gpu in args.gpus)

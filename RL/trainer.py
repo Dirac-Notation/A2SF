@@ -4,6 +4,7 @@ import random
 import torch
 import torch.optim as optim
 from typing import Dict
+from tqdm import tqdm
 
 import sys
 import os
@@ -66,10 +67,10 @@ class A2SFTrainer:
     def _collect_experiences(self):
         episodes = random.sample(self.training_data, self.config.episodes_per_update)
 
-        for episode_data in episodes:
+        for episode_data in tqdm(episodes):
             state = self.env.reset(
                 prompt=episode_data["input_prompt"],
-                answers=episode_data["answers"],
+                selected_indices=episode_data["selected_indices"],
                 dataset=episode_data["dataset"],
             )
             
@@ -131,7 +132,7 @@ class A2SFTrainer:
         for episode_data in self.eval_episodes:
             state = self.env.reset(
                 prompt=episode_data["input_prompt"],
-                answers=episode_data["answers"],
+                selected_indices=episode_data["selected_indices"],
                 dataset=episode_data["dataset"],
             )
             state = state.to(self.device)
@@ -143,7 +144,7 @@ class A2SFTrainer:
 
             reward, info = self.env.step(action)
 
-            eval_rewards.append(reward)
+            eval_rewards.append(reward.item())
         
         avg_eval_reward = sum(eval_rewards) / len(eval_rewards) if eval_rewards else 0.0
         

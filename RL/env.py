@@ -32,17 +32,17 @@ class A2SFEnv:
         # Current episode cache
         self.current_prompt = None
         self.current_dataset = None
-        self.current_answers = None
+        self.current_selected_indices = None
     
     def _encode_to_state(self, prompt: str) -> torch.Tensor:
         context_embedding = self.context_encoder.encode_context(prompt)
         
         return context_embedding.to(self.device, dtype=torch.float32)
     
-    def reset(self, prompt: str, answers: list, dataset: str = None) -> torch.Tensor:
+    def reset(self, prompt: str, selected_indices: list, dataset: str = None) -> torch.Tensor:
         self.current_prompt = prompt
         self.current_dataset = dataset
-        self.current_answers = answers
+        self.current_selected_indices = selected_indices
         
         state = self._encode_to_state(prompt)
         
@@ -55,16 +55,15 @@ class A2SFEnv:
             result = self.runner.run_with_compression(
                 prompt=self.current_prompt,
                 forgetting_factor=forgetting_factor,
-                answers=self.current_answers,
+                selected_indices=self.current_selected_indices,
                 dataset=self.current_dataset
             )
         
-        reward = torch.tensor(float(result.accuracy_score), device=self.device)
+        reward = torch.tensor(float(result.reward), device=self.device)
         
         info = {
-            "accuracy_score": result.accuracy_score,
             "forgetting_factor": forgetting_factor,
-            "metrics": result.metrics
+            "reward": result.reward
         }
         
         return reward, info

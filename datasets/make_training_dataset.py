@@ -15,6 +15,12 @@ from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import numpy as np
 
+from tqdm import tqdm
+
+PROMPT_LENGTH = 7500
+TOTAL_BUDGET = 128
+GENERATION_LENGTH = int(TOTAL_BUDGET * 0.125)
+
 def set_seed(seed):
     """Set random seed for reproducibility"""
     torch.manual_seed(seed)
@@ -24,16 +30,6 @@ def set_seed(seed):
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
     torch.cuda.manual_seed_all(seed)
-
-def load_dataset_configs():
-    """Load dataset configurations"""
-    with open('/root/A2SF/config/dataset2maxlen.json', 'r') as f:
-        dataset2maxlen = json.load(f)
-    
-    with open('/root/A2SF/config/dataset2prompt.json', 'r') as f:
-        dataset2prompt = json.load(f)
-    
-    return dataset2maxlen, dataset2prompt
 
 def load_model_for_generation(model_name, gpu_list=None):
     """Load model and tokenizer directly"""
@@ -61,14 +57,17 @@ def load_model_for_generation(model_name, gpu_list=None):
     
     return model, tokenizer
 
-def generate_answer(model, tokenizer, prompt: str, max_gen: int, dataset: str, model_name: str, max_length: int) -> str:
+def logits_to_tokens(logits):
+    return torch.argmax(logits[:, -1, :], dim=-1).unsqueeze(-1)
+
+def generate_answer(model, tokenizer, prompt: str, dataset: str, model_name: str) -> str:
     """Generate answer using model following longbench_pred.py approach"""
     # Tokenize prompt without truncation first
     tokenized_prompt = tokenizer(prompt, truncation=False, return_tensors="pt").input_ids[0]
     
     # Handle truncation like longbench_pred.py
-    if len(tokenized_prompt) > max_length:
-        half = int(max_length/2)
+    if len(tokenized_prompt) > PROMPT_LENGTH:
+        half = int(PROMPT_LENGTH/2)
         prompt = tokenizer.decode(tokenized_prompt[:half], skip_special_tokens=True) + tokenizer.decode(tokenized_prompt[-half:], skip_special_tokens=True)
     
     # Add [INST] tags for llama models (except specific datasets)
@@ -79,155 +78,96 @@ def generate_answer(model, tokenizer, prompt: str, max_gen: int, dataset: str, m
     # Tokenize final prompt
     input = tokenizer(prompt, truncation=False, return_tensors="pt")
     input_ids = input.input_ids.to(model.device)
-    attention_mask = input.attention_mask.to(torch.bfloat16).to(model.device)
     
-    context_length = input_ids.shape[-1]
-    
+    attention_maps = []
     # Generate following longbench_pred.py approach (deterministic)
-    with torch.inference_mode():
-        if dataset == "samsum":
-            output = model.generate(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                max_new_tokens=max_gen,
-                num_beams=1,
-                do_sample=False,
-                min_length=context_length+1,
-                eos_token_id=[tokenizer.eos_token_id, tokenizer.encode("\n", add_special_tokens=False)[-1]],
-            )[0]
-        else:
-            output = model.generate(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                max_new_tokens=max_gen,
-                num_beams=1,
-                do_sample=False,
-            )[0]
+    with torch.no_grad():
+        input_ids = input_ids.to(model.device)
+        outputs = model(input_ids)
+        input_ids = logits_to_tokens(outputs.logits)
+        for _ in range(GENERATION_LENGTH):
+            outputs = model(input_ids, past_key_values=outputs.past_key_values, output_attentions=True)
+            attention_maps.append(torch.stack([attention.cpu().squeeze(0) for attention in outputs.attentions], dim=0))
     
-    # Decode only the generated part
-    answer = tokenizer.decode(output[context_length:], skip_special_tokens=True)
+    out = attention_maps[-1]
+    for idx in range(GENERATION_LENGTH-1):
+        out[:,:,:,:-(GENERATION_LENGTH-idx-1)] += attention_maps[idx]
     
-    return answer.strip()
+    selected_indices = out[:,:,:,:-GENERATION_LENGTH].topk(k=TOTAL_BUDGET, dim=3).indices.squeeze(2)
+    
+    return prompt, selected_indices
 
 def load_longbench_dataset(dataset_name: str, num_samples: int = 10) -> List[Dict[str, Any]]:
     """Load samples from existing LongBench dataset files"""
-    try:
-        # Load from existing jsonl file
-        dataset_path = f"/root/A2SF/datasets/longbench/{dataset_name}.jsonl"
-        
-        if not os.path.exists(dataset_path):
-            print(f"Dataset file not found: {dataset_path}")
-            return []
-        
-        samples = []
-        with open(dataset_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                if line.strip():
-                    sample = json.loads(line.strip())
-                    samples.append(sample)
-        
-        # Sample random examples
-        if len(samples) > num_samples:
-            samples = random.sample(samples, num_samples)
-        
-        return samples
-    except Exception as e:
-        print(f"Error loading dataset {dataset_name}: {e}")
+    # Load from existing jsonl file
+    dataset_path = f"/root/A2SF/datasets/longbench/{dataset_name}.jsonl"
+    
+    if not os.path.exists(dataset_path):
+        print(f"Dataset file not found: {dataset_path}")
         return []
+    
+    samples = []
+    with open(dataset_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            if line.strip():
+                sample = json.loads(line.strip())
+                samples.append(sample)
+    
+    # Sample random examples
+    if len(samples) > num_samples:
+        samples = random.sample(samples, num_samples)
+    
+    return samples
 
 def process_dataset(
     dataset_name: str, 
     samples: List[Dict[str, Any]], 
     model, 
     tokenizer, 
-    dataset2maxlen: Dict[str, int],
-    dataset2prompt: Dict[str, str],
-    model2maxlen: Dict[str, int],
     model_name: str
 ) -> List[Dict[str, Any]]:
     """Process samples from a dataset to generate training data"""
     training_data = []
-    max_gen = dataset2maxlen.get(dataset_name, 128)  # max generation length
-    max_length = model2maxlen.get(model_name, 7500)  # max input length from model config
-    prompt_template = dataset2prompt.get(dataset_name, "{context}\n\nQuestion: {input}\nAnswer:")
     
-    print(f"Processing {dataset_name} with max_gen={max_gen}, max_length={max_length}")
+    print(f"Processing {dataset_name}")
     
     for i, sample in enumerate(tqdm(samples, desc=f"Processing {dataset_name}")):
-        try:
-            # Extract from existing data structure
-            input_prompt = sample.get("input_prompt", "")
-            existing_answers = sample.get("answers", [])
-            
-            # Use existing prompt if available, otherwise format from template
-            if input_prompt:
-                prompt = input_prompt
-            else:
-                # Fallback: try to extract context and input from other fields
-                context = sample.get("context", "")
-                input_text = sample.get("input", "")
-                
-                if "{context}" in prompt_template and "{input}" in prompt_template:
-                    prompt = prompt_template.format(context=context, input=input_text)
-                elif "{context}" in prompt_template:
-                    prompt = prompt_template.format(context=context)
-                else:
-                    prompt = f"{context}\n\n{input_text}"
-            
-            # Generate answer using model
-            answer = generate_answer(model, tokenizer, prompt, max_gen, dataset_name, model_name, max_length)
-            
-            # Create training sample following longbench_pred.py output format
-            training_sample = {
-                "input_prompt": prompt,
-                "answers": answer,  # Generated prediction
-                "length": sample.get("length", 0),
-                "task": sample.get("task", ""),
-                "dataset": dataset_name,
-                "max_gen": max_gen,
-                "max_length": max_length,
-            }
-            
-            training_data.append(training_sample)
-            
-        except Exception as e:
-            print(f"Error processing sample {i} from {dataset_name}: {e}")
-            continue
+        prompt = sample["input_prompt"]
+        
+        # Generate answer using model
+        prompt, selected_indices = generate_answer(model, tokenizer, prompt, dataset_name, model_name)
+        
+        # Create training sample following longbench_pred.py output format
+        training_sample = {
+            "dataset": dataset_name,
+            "input_prompt": prompt,
+            "selected_indices": selected_indices.cpu().numpy().tolist(),  # Generated prediction
+        }
+        
+        training_data.append(training_sample)
     
     return training_data
 
 def main():
     parser = argparse.ArgumentParser(description="Generate training data from LongBench datasets")
-    parser.add_argument("--output_file", type=str, default="/root/A2SF/datasets/training_data.json", 
-                       help="Output file for training data")
-    parser.add_argument("--num_samples_per_dataset", type=int, default=10,
-                       help="Number of samples per dataset")
-    parser.add_argument("--seed", type=int, default=42,
-                       help="Random seed")
-    parser.add_argument("--gpus", type=int, nargs='+', default=[0], 
-                       help="List of GPU IDs (e.g., --gpus 0 1 2 3)")
-    parser.add_argument("--model", type=str, default="llama3", 
-                       choices=["llama", "llama2", "llama3", "opt"],
-                       help="Model to use for generation")
+    parser.add_argument("--output_file", type=str, default="/root/A2SF/datasets/training_data.json", help="Output file for training data")
+    parser.add_argument("--num_samples_per_dataset", type=int, default=10,help="Number of samples per dataset")
+    parser.add_argument("--seed", type=int, default=42,help="Random seed")
+    parser.add_argument("--gpus", type=int, nargs='+', default=[0], help="List of GPU IDs (e.g., --gpus 0 1 2 3)")
+    parser.add_argument("--model", type=str, default="llama3", choices=["llama", "llama2", "llama3", "opt"], help="Model to use for generation")
     
     args = parser.parse_args()
     
     # Set random seed using utils.py
     set_seed(args.seed)
     
-    # Load configurations
-    dataset2maxlen, dataset2prompt = load_dataset_configs()
-    
-    # Load model2maxlen config
-    with open('/root/A2SF/config/model2maxlen.json', 'r') as f:
-        model2maxlen = json.load(f)
-    
     # Load model
     model_name = args.model
     model, tokenizer = load_model_for_generation(model_name, args.gpus)
     
     # Get all dataset names
-    dataset_names = list(dataset2maxlen.keys())
+    dataset_names = os.listdir("/root/A2SF/datasets/longbench")
+    dataset_names = [dataset_name.replace(".jsonl", "") for dataset_name in dataset_names]
     print(f"Processing {len(dataset_names)} datasets: {dataset_names}")
     
     all_training_data = []
@@ -245,10 +185,7 @@ def main():
             continue
         
         # Process samples
-        training_data = process_dataset(
-            dataset_name, samples, model, tokenizer, 
-            dataset2maxlen, dataset2prompt, model2maxlen, model_name
-        )
+        training_data = process_dataset(dataset_name, samples, model, tokenizer, model_name)
         
         all_training_data.extend(training_data)
         print(f"Generated {len(training_data)} training samples for {dataset_name}")
