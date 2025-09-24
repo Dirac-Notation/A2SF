@@ -9,14 +9,18 @@ from datasets import load_dataset
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, default="meta-llama/Llama-2-7b-hf", help="Name of the model to use (e.g., 'meta-llama/Llama-2-7b-hf')")
+    parser.add_argument("--model", type=str, default="llama3", help="Name of the model to use")
     args = parser.parse_args()
 
     # Create output directory if needed
     os.makedirs("datasets", exist_ok=True)
     
+    model2path = json.load(open("config/model2path.json", "r"))
+    
+    model_name = model2path[args.model]
+    
     # Load tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
     
     # Define user prompt
     system_prompt = "[INST]You are a helpful assistant that can identify the password in the text.\n\n<text>\n"
@@ -42,7 +46,7 @@ def main():
     all_sentences = [s for lst in sentences_by_length.values() for s in lst]
 
     # Define total token lengths and needle positions
-    target_lengths = list(range(400, 3601, 400))
+    target_lengths = list(range(800, 8001, 800))
     positions = [i / 100 for i in range(0, 100, 10)]
 
     # Prepare output file
