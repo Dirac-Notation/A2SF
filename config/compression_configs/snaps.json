@@ -3,6 +3,10 @@
     "compression_method": "snap",
     "observation_window": 1
     },
+    "snap4": {
+    "compression_method": "snap",
+    "observation_window": 4
+    },
     "snap16": {
     "compression_method": "snap",
     "observation_window": 16
