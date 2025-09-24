@@ -37,7 +37,7 @@ class SnapCache(KVCache):
         ), dim=self.seq_dim)
     
     def flash_prepare_scores(self, attn_scores):
-        return attn_scores[:,:,-self.observation_window:].sum(self.seq_dim)
+        return attn_scores.sum(self.seq_dim)
 
     def prompt_flash_attention(self, query, key, value, attn_mask, head_dim, block_size=1024):
         """
