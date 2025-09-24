@@ -9,8 +9,8 @@ class A2SFRLConfig:
     
     # ----- Context Features -----
     sentence_transformer_model: str = "all-MiniLM-L6-v2"
-    context_window: int = 512
-    max_context: int = 32
+    context_window: int = 64
+    max_context: int = 128
     
     # ----- PPO Hyperparameters -----
     ppo_clip: float = 0.2

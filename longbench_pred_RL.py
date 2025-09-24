@@ -144,6 +144,7 @@ def get_pred_rl(data, max_length, max_gen, dataset, model, tokenizer, out_path, 
                     temperature=1.0,
                     min_length=context_length+1,
                     eos_token_id=[tokenizer.eos_token_id, tokenizer.encode("\n", add_special_tokens=False)[-1]],
+                    pad_token_id=tokenizer.eos_token_id,
                 )[0]
             else:
                 output = model.generate(
@@ -153,6 +154,7 @@ def get_pred_rl(data, max_length, max_gen, dataset, model, tokenizer, out_path, 
                     num_beams=1,
                     do_sample=False,
                     temperature=1.0,
+                    pad_token_id=tokenizer.eos_token_id,
                 )[0]
         
         pred = tokenizer.decode(output[context_length:], skip_special_tokens=True)

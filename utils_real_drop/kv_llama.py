@@ -107,7 +107,7 @@ class LlamaAttention(nn.Module):
 
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
-
+        
         # Use flash attention for efficient computation
         attn_output = self.past_key_value.flash_attention(
             query=query_states,
@@ -216,12 +216,8 @@ class LlamaModel(LlamaPreTrainedModel):
                     from .kv_cache.h2o_cache import H2OCache
                     layer.self_attn.past_key_value = H2OCache(layer.self_attn.num_key_value_heads)
                 elif compression_config.compression_method == "a2sf":
-                    if compression_config.forgetting_factors[idx] == 1.0:
-                        from .kv_cache.h2o_cache import H2OCache
-                        layer.self_attn.past_key_value = H2OCache(layer.self_attn.num_key_value_heads)
-                    else:
-                        from .kv_cache.a2sf_cache import A2SFCache
-                        layer.self_attn.past_key_value = A2SFCache(layer.self_attn.num_key_value_heads)
+                    from .kv_cache.a2sf_cache import A2SFCache
+                    layer.self_attn.past_key_value = A2SFCache(layer.self_attn.num_key_value_heads)
                 elif compression_config.compression_method == "snap":
                     from .kv_cache.snap_cache import SnapCache
                     layer.self_attn.past_key_value = SnapCache(layer.self_attn.num_key_value_heads)

@@ -21,17 +21,17 @@ def parse_args():
     
     # Training configuration
     parser.add_argument('--iterations', type=int, default=1000, help="Number of training iterations")
-    parser.add_argument('--episodes_per_update', type=int, default=128, help="Number of episodes per PPO update")
+    parser.add_argument('--episodes_per_update', type=int, default=32, help="Number of episodes per PPO update")
     parser.add_argument('--lr', type=float, default=3e-4, help="Learning rate")
-    parser.add_argument('--minibatch_size', type=int, default=64, help="Minibatch size")
+    parser.add_argument('--minibatch_size', type=int, default=16, help="Minibatch size")
     
     # Evaluation configuration
     parser.add_argument('--eval_frequency', type=int, default=100, help="Evaluation frequency")
     parser.add_argument('--eval_samples', type=int, default=50, help="Number of samples for evaluation")
     
     # Logging and saving
-    parser.add_argument('--save_dir', type=str, default="runs/a2sf_rl", help="Directory to save checkpoints and logs")
-    parser.add_argument('--log_frequency', type=int, default=5, help="Logging frequency")
+    parser.add_argument('--save_dir', type=str, default="runs/a2sf_rl_tmp", help="Directory to save checkpoints and logs")
+    parser.add_argument('--log_frequency', type=int, default=1, help="Logging frequency")
     
     # Misc
     parser.add_argument('--seed', type=int, default=42, help="Random seed")
