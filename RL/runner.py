@@ -80,7 +80,6 @@ class A2SFRunner:
         base_config.total_budget = 128
         base_config.layerwise_ratios = [1.0 for i in range(32)]
         base_config.local_ratios = 0.125
-        forgetting_factor = 0.9
         base_config.forgetting_factors = [forgetting_factor for i in range(32)]
         
         return base_config
@@ -103,7 +102,7 @@ class A2SFRunner:
                 model_set = set(model_selected_indices[head_idx].tolist() + list(range(context_length-16, context_length)))
                 answer_set = set(answer_selected_indices[head_idx].tolist())
                 similarity_score += len(model_set & answer_set) / len(model_set | answer_set)
-                
+            
         similarity_score /= num_layers * num_heads
         
         return similarity_score
