@@ -21,7 +21,7 @@ SYSTEM_PROMPT = 'You are a helpful assistant that can summarize the text.\n\n'
 USER_PROMPT_TEMPLATE = '<text>\n{article}\n</text>\n\nSummarize the key points from the text above. Provide a direct response.'
 
 # Load Llama2 tokenizer for token counting
-tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3-8B-Instruct")
+tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
 MIN_TOKENS = 1000
 MAX_TOKENS = 3000  # Changed to 1000 tokens
 FEWSHOT_SAMPLES = 100  # Number of few-shot samples to create
