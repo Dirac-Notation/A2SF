@@ -149,7 +149,7 @@ def ppo_update(
             # Value loss (MSE to returns)
             value_loss = F.mse_loss(value, reward)
 
-            # Entropy bonus (maximize entropy -> subtract in loss)
+            # Entropy bonus
             entropy_bonus = entropy.mean()
 
             total_loss = (policy_loss + config.value_coef * value_loss - config.entropy_coef * entropy_bonus)

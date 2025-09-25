@@ -57,7 +57,7 @@ def process_prompt(model, tokenizer, prompt):
         return attention_maps
 
 def process_model(model, tokenizer, prompts, task):
-    snap_windows = [1, 16, 512, 1024, 1536, 2048, 2560, 3072, 3584, 4096]
+    snap_windows = [512, 1024, 1536, 2048, 2560, 3072, 3584, 4096]
     bounds = [512*(i+1) for i in range(8)]
     window_results = torch.zeros(len(snap_windows), len(bounds))
     
@@ -96,7 +96,7 @@ def process_model(model, tokenizer, prompts, task):
     plt.tight_layout(rect=[0.02, 0.02, 0.98, 0.98])
     plt.xlabel("Observation Window Size")
     plt.ylabel("Ratio of Selected Tokens")
-    plt.title(f"{task}")
+    # plt.title(f"{task}")
     plt.savefig(f"plots/motivation/{task}.png")
     plt.close()
 

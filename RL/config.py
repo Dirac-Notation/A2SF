@@ -16,7 +16,7 @@ class A2SFRLConfig:
     ppo_clip: float = 0.2
     lr: float = 3e-4
     value_coef: float = 0.5
-    entropy_coef: float = 0.05
+    entropy_coef: float = 0.1
     max_grad_norm: float = 1.0
     
     # Training configuration
