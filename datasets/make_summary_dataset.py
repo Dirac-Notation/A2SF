@@ -21,8 +21,9 @@ SYSTEM_PROMPT = 'You are a helpful assistant that can summarize the text.\n\n'
 USER_PROMPT_TEMPLATE = '<text>\n{article}\n</text>\n\nSummarize the key points from the text above. Provide a direct response.'
 
 # Load Llama2 tokenizer for token counting
-tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-chat-hf")
-MAX_TOKENS = 1000  # Changed to 1000 tokens
+tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3-8B-Instruct")
+MIN_TOKENS = 1000
+MAX_TOKENS = 3000  # Changed to 1000 tokens
 FEWSHOT_SAMPLES = 100  # Number of few-shot samples to create
 
 dataset_obj = (load_dataset(args.dataset, "2.0.0", trust_remote_code=True) if args.dataset == "abisee/cnn_dailymail" else load_dataset(args.dataset, trust_remote_code=True))
@@ -43,7 +44,7 @@ for entry in tqdm(dataset, desc="Processing dataset entries"):
     summary_tokens = len(tokenizer.encode(highlight))
     
     # Only include if total tokens (input + output) is within limit
-    if article_tokens + summary_tokens <= MAX_TOKENS:
+    if article_tokens + summary_tokens >= MIN_TOKENS and article_tokens + summary_tokens <= MAX_TOKENS:
         prompts.append({
             'article': article,
             'summary': highlight,

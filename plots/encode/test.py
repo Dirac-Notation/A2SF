@@ -95,12 +95,57 @@ class LongBenchAnalyzer:
         
         os.makedirs(save_path, exist_ok=True)
 
+        # Set larger font sizes to match generate_accuracy_plots.py style
+        plt.rcParams.update({
+            'font.size': 20,
+            'axes.titlesize': 20,
+            'axes.labelsize': 20,
+            'xtick.labelsize': 20,
+            'ytick.labelsize': 20,
+            'legend.fontsize': 15,
+            'figure.titlesize': 20
+        })
+
         for task, datasets in data_group.items():
-            for dataset in datasets:
-                result = all_results[dataset]
-                plt.plot(result, label=dataset)
-            plt.legend()
-            plt.savefig(f"{save_path}/{task}.png")
+            # Create figure with proper sizing
+            plt.figure(figsize=(12, 6))
+            
+            # Get colors for each dataset
+            colors = plt.cm.tab10(np.linspace(0, 1, len(datasets)))
+            
+            for i, dataset in enumerate(datasets):
+                if dataset in all_results:
+                    result = all_results[dataset]
+                    # Convert tensor to numpy if needed
+                    if hasattr(result, 'cpu'):
+                        result = result.cpu().numpy()
+                    elif hasattr(result, 'numpy'):
+                        result = result.numpy()
+                    
+                    # Plot with markers and lines
+                    plt.plot(result, 'o-', label=dataset, color=colors[i], 
+                            linewidth=2, markersize=6)
+                    
+                    # Find and highlight the maximum value
+                    max_idx = np.argmax(result)
+                    max_y = result[max_idx]
+                    
+                    # Highlight the maximum point with a larger, different marker
+                    plt.scatter(max_idx, max_y, s=150, color=colors[i], 
+                               marker='*', edgecolors='black', linewidth=1, zorder=5)
+            
+            # Add labels and formatting
+            plt.xlabel('Context Position')
+            plt.ylabel('Similarity Score')
+            plt.grid(True, alpha=0.3)
+            plt.legend(bbox_to_anchor=(1.02, 1), loc='upper left')
+            
+            # Adjust layout
+            plt.tight_layout(rect=[0.02, 0.02, 0.98, 0.98])
+            
+            # Save with high DPI
+            plt.savefig(f"{save_path}/{task}.png", dpi=300, bbox_inches='tight')
+            print(f"Saved plot: {save_path}/{task}.png")
             plt.close()
         
 def main():
