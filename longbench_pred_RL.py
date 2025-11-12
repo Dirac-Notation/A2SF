@@ -126,7 +126,7 @@ def get_pred_rl(data, max_length, max_gen, dataset, model, tokenizer, out_path, 
         from utils import CompressionConfig
         config = CompressionConfig()
         config.compression_method = "a2sf"
-        config.total_budget = 128
+        config.total_budget = 512
         config.layerwise_ratios = [1.0 for i in range(32)]
         config.local_ratios = 0.125
         config.forgetting_factors = [forgetting_factor for i in range(32)]

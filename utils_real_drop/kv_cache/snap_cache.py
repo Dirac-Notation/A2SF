@@ -83,7 +83,7 @@ class SnapCache(KVCache):
             
             output[:,:,q_start:q_end] = torch.matmul(scores, value)
 
-            if q_start <= observation_point and q_end > observation_point:
+            if q_start <= observation_point and q_end >= observation_point:
                 acc_score.add_(self.flash_prepare_scores(scores[:,:,observation_point:q_end:]))
             elif q_start >= observation_point:
                 acc_score.add_(self.flash_prepare_scores(scores))

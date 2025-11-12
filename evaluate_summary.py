@@ -53,10 +53,10 @@ def load_datasets(
     
     return inputs, answers, output_indices
 
-def load_rl_policy(checkpoint_path, device):
+def load_rl_policy(checkpoint_path):
     """Load RL policy from checkpoint"""
     print(f"Loading RL policy from: {checkpoint_path}")
-    
+    device = "cuda:0"
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
     
@@ -93,13 +93,13 @@ def load_rl_policy(checkpoint_path, device):
     
     return policy, context_encoder, config
 
-def get_rl_action(policy, context_encoder, prompt, model_name, device):
+def get_rl_action(policy, context_encoder, prompt, model_name):
     """Get RL action (forgetting factor) for given prompt"""
     # Encode context
     context_embedding = context_encoder.encode_context(prompt)
     
     # Build state
-    state = context_embedding.to(device, dtype=torch.float32)
+    state = context_embedding.to(dtype=torch.float32)
     
     # Get action from policy (no exploration during inference)
     with torch.no_grad():
@@ -148,11 +148,17 @@ def evaluate_model(
             # Get the original prompt for RL
             original_prompt = inputs[idx].input_ids
             prompt_text = tokenizer.decode(original_prompt[0], skip_special_tokens=True)
-            
+
+            # GPU timing events
+            torch.cuda.synchronize()
+            start_evt = torch.cuda.Event(enable_timing=True)
+            end_evt = torch.cuda.Event(enable_timing=True)
+            start_evt.record()
+
             # Initialize cache if needed
             if use_rl and rl_policy and context_encoder:
                 # Use RL policy to determine forgetting factor
-                forgetting_factor = get_rl_action(rl_policy, context_encoder, prompt_text, model_name, device)
+                forgetting_factor = get_rl_action(rl_policy, context_encoder, prompt_text, model_name)
                 
                 # Create compression config with RL-determined forgetting factor
                 rl_config = CompressionConfig()
@@ -166,17 +172,12 @@ def evaluate_model(
             elif init_cache_fn and compression_config:
                 init_cache_fn(compression_config)
 
-            # GPU timing events
-            torch.cuda.synchronize()
-            start_evt = torch.cuda.Event(enable_timing=True)
-            end_evt = torch.cuda.Event(enable_timing=True)
-            start_evt.record()
-
             # Generate with proper input format and explicit pad_token_id
             gen_ids = model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                max_new_tokens=output_indices[idx].numel(),
+                # max_new_tokens=output_indices[idx].numel(),
+                max_new_tokens=1,
                 eos_token_id=eos_token_id,
                 pad_token_id=pad_token_id,
                 do_sample=False
@@ -248,7 +249,7 @@ def main(args):
     os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpus))
     
     # Prepare device, model, and tokenizer
-    device = f"cuda:{args.gpus[0]}"  # Use first GPU for device reference
+    device = f"cuda:0"  # Use first GPU for device reference
     
     # Load model and tokenizer using the utility function
     print(f"Loading model: {model_name}")
@@ -262,24 +263,19 @@ def main(args):
     if args.use_rl:
         if not args.rl_checkpoint:
             raise ValueError("--rl_checkpoint is required when --use_rl is specified")
-        
-        try:
-            device_torch = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            rl_policy, context_encoder, rl_config = load_rl_policy(args.rl_checkpoint, device_torch)
-            
-            # Override config parameters if provided
-            if hasattr(args, 'sentence_transformer_model'):
-                rl_config.sentence_transformer_model = args.sentence_transformer_model
-            if hasattr(args, 'context_window'):
-                rl_config.context_window = args.context_window
-            
-            print(f"RL Policy loaded successfully")
-            print(f"Config: {rl_config}")
-        except Exception as e:
-            print(f"Error loading RL policy: {e}")
-            print("Falling back to standard evaluation mode")
-            args.use_rl = False
 
+        device_torch = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        rl_policy, context_encoder, rl_config = load_rl_policy(args.rl_checkpoint)
+        
+        # Override config parameters if provided
+        if hasattr(args, 'sentence_transformer_model'):
+            rl_config.sentence_transformer_model = args.sentence_transformer_model
+        if hasattr(args, 'context_window'):
+            rl_config.context_window = args.context_window
+        
+        print(f"RL Policy loaded successfully")
+        print(f"Config: {rl_config}")
+        
     cur_idx = 0
     for dataset in datasets:
         dataset_name = os.path.basename(dataset).split('.')[0]
@@ -335,9 +331,7 @@ if __name__ == "__main__":
     parser.add_argument("--config_file", type=str, default="config/dataset2prompt.json", help="Path to compression config file")
     parser.add_argument("--use_rl", action="store_true", help="Use RL policy for dynamic compression")
     parser.add_argument("--rl_checkpoint", type=str, help="Path to RL model checkpoint (.pt file)")
-    parser.add_argument("--sentence_transformer_model", type=str, default="all-MiniLM-L6-v2",
-                       help="Sentence transformer model for context encoding")
-    parser.add_argument("--context_window", type=int, default=64,
-                       help="Context window size for RL state encoding")
+    parser.add_argument("--sentence_transformer_model", type=str, default="all-MiniLM-L6-v2", help="Sentence transformer model for context encoding")
+    parser.add_argument("--context_window", type=int, default=64, help="Context window size for RL state encoding")
     args = parser.parse_args()
     main(args)
