@@ -14,12 +14,13 @@ from pathlib import Path
 
 def extract_snap_parameter(folder_name):
     """Extract snap parameter from folder name"""
-    if 'h2o' in folder_name:
-        return 8192
-    elif 'snap' in folder_name:
-        # Extract number after 'snap'
-        match = re.search(r'snap(\d+)', folder_name)
-        return int(match.group(1))
+    if "128" in folder_name:
+        if 'h2o' in folder_name:
+            return 8192
+        elif 'snap' in folder_name:
+            # Extract number after 'snap'
+            match = re.search(r'snap(\d+)', folder_name)
+            return int(match.group(1))
     return None
 
 def extract_budget(folder_name):
@@ -68,13 +69,13 @@ def create_plots(data, output_dir):
     """Create plots for each budget"""
     # Set larger font sizes
     plt.rcParams.update({
-        'font.size': 20,
-        'axes.titlesize': 20,
-        'axes.labelsize': 20,
-        'xtick.labelsize': 20,
-        'ytick.labelsize': 20,
-        'legend.fontsize': 15,
-        'figure.titlesize': 20
+        'font.size': 23,
+        'axes.titlesize': 23,
+        'axes.labelsize': 23,
+        'xtick.labelsize': 23,
+        'ytick.labelsize': 23,
+        'legend.fontsize': 23,
+        'figure.titlesize': 23
     })
     
     for budget in sorted(data.keys()):
@@ -105,7 +106,7 @@ def create_plots(data, output_dir):
             all_groups = sorted(all_groups, key=lambda x: snap1_values.get(x, 0), reverse=True)
         
         # Create figure
-        plt.figure(figsize=(12, 6))
+        plt.figure(figsize=(12, 8))
         
         # Plot 1: Group averages
         colors = plt.cm.tab10(np.linspace(0, 1, len(all_groups)))
@@ -134,13 +135,13 @@ def create_plots(data, output_dir):
                            marker='*', edgecolors='black', linewidth=1, zorder=5)
         
         plt.xlabel('Observation Window Size')
-        plt.ylabel('Group Average Accuracy (%)')
+        plt.ylabel('Average Accuracy (%)')
         plt.grid(True, alpha=0.3)
         plt.legend(bbox_to_anchor=(1.02, 1), loc='upper left')
         
         # Set x-axis to equal spacing with snap parameter labels
         x_positions = range(len(snap_params))
-        plt.xticks(x_positions, [str(x) for x in snap_params])
+        plt.xticks(x_positions, ["TOVA", "SnapKV", "256", "512", "1024", "2048", "3072", "4096", "5120", "6144", "7168", "H2O"], rotation=90)
         
         # Adjust layout
         plt.tight_layout(rect=[0.02, 0.02, 0.98, 0.98])
@@ -153,8 +154,8 @@ def create_plots(data, output_dir):
         plt.close()
 
 def main():
-    result_dir = '/root/A2SF/result_txt/pred'
-    output_dir = '/root/A2SF/plots/acc'
+    result_dir = '/home/smp9898/A2SF/result_txt/pred'
+    output_dir = '/home/smp9898/A2SF/plots/acc'
     
     print("Loading result data...")
     data = load_result_data(result_dir)
