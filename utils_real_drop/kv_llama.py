@@ -224,6 +224,9 @@ class LlamaModel(LlamaPreTrainedModel):
                 elif compression_config.compression_method == "pyramid":
                     from .kv_cache.pyramid_cache import PyramidCache
                     layer.self_attn.past_key_value = PyramidCache(layer.self_attn.num_key_value_heads)
+                elif compression_config.compression_method == "linear":
+                    from .kv_cache.linear_cache import LinearCache
+                    layer.self_attn.past_key_value = LinearCache(layer.self_attn.num_key_value_heads)
                 else:
                     raise ValueError(f"Unsupported compression method: {compression_config.compression_method}")
             else:
@@ -235,7 +238,7 @@ class LlamaModel(LlamaPreTrainedModel):
     def set_forget(self, input_ids):
         exponents = None
         
-        if self.compression_method == "a2sf":
+        if self.compression_method == "a2sf" or self.compression_method == "linear":
             if input_ids.size(1) > 1:
                 orig_shape = input_ids.shape
                 exponents = torch.arange(orig_shape[1]-1, -1, -1, device=input_ids.device).view(orig_shape[0], 1, orig_shape[1])
