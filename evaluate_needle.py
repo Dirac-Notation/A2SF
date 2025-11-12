@@ -241,19 +241,13 @@ def create_heatmap(metrics, output_file):
     # Create the heatmap
     im = plt.imshow(heatmap_data, cmap='RdYlGn', vmin=0.0, vmax=1.0)
     
-    # Add colorbar
-    cbar = plt.colorbar(im)
-    cbar.set_label('Accuracy', fontsize=25)
-    cbar.ax.tick_params(labelsize=20)
+    # Set axis labels with larger font size
+    plt.xlabel('Context Length (tokens)', fontsize=30)
+    plt.ylabel('Needle Position (%)', fontsize=30)
     
-    # Set axis labels and title
-    plt.xlabel('Context Length (tokens)', fontsize=25)
-    plt.ylabel('Needle Position (%)', fontsize=25)
-    plt.title('Needle-in-Haystack Performance with Budget Settings', fontsize=25, pad=20)
-    
-    # Set tick labels
-    plt.xticks(np.arange(len(context_lengths)), context_lengths, fontsize=22)
-    plt.yticks(np.arange(len(positions)), positions, fontsize=22)
+    # Set tick labels with larger font size and rotate x-axis labels
+    plt.xticks(np.arange(len(context_lengths)), context_lengths, fontsize=26, rotation=45)
+    plt.yticks(np.arange(len(positions)), positions, fontsize=26)
     
     plt.tight_layout()
     
