@@ -106,7 +106,7 @@ def create_plots(data, output_dir):
             all_groups = sorted(all_groups, key=lambda x: snap1_values.get(x, 0), reverse=True)
         
         # Create figure
-        plt.figure(figsize=(12, 8))
+        plt.figure(figsize=(18, 8))
         
         # Plot 1: Group averages
         colors = plt.cm.tab10(np.linspace(0, 1, len(all_groups)))

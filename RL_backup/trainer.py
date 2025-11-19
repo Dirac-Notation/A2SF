@@ -139,17 +139,8 @@ class A2SFTrainer:
 
             with torch.no_grad():
                 out = self.policy(state)
-                a_logits = out["a_logits"]
-                b_alpha, b_beta = out["b_alpha"], out["b_beta"]
-                
-                # Get mode for a (most likely value)
-                a_idx = torch.argmax(a_logits, dim=-1)
-                a = self.policy.a_values[a_idx]
-                
-                # Get mode for b (mean of Beta distribution)
-                b = (b_alpha / (b_alpha + b_beta + 1e-6)).clamp(1e-6, 1 - 1e-6)
-                
-                action = (a, b)
+                alpha, beta = out["alpha"], out["beta"]
+                action = (alpha / (alpha + beta)).clamp(1e-6, 1 - 1e-6)
 
             reward, info = self.env.step(action)
 

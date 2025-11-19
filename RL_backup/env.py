@@ -48,22 +48,13 @@ class A2SFEnv:
         
         return state
     
-    def step(self, action: Tuple[torch.Tensor, torch.Tensor]) -> Tuple[torch.Tensor, Dict[str, Any]]:
-        """
-        Args:
-            action: tuple of (a, b) where a is the a parameter value, b is in [0, 1]
-        Returns:
-            reward, info
-        """
-        a, b = action
-        a_val = float(a.item() if isinstance(a, torch.Tensor) else a)
-        b_val = float(b.item() if isinstance(b, torch.Tensor) else b)
+    def step(self, action: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, Any]]:
+        forgetting_factor = float(action.item() if isinstance(action, torch.Tensor) else action)
 
         with torch.no_grad():
             result = self.runner.run_with_compression(
                 prompt=self.current_prompt,
-                a=a_val,
-                b=b_val,
+                forgetting_factor=forgetting_factor,
                 selected_indices=self.current_selected_indices,
                 dataset=self.current_dataset
             )
@@ -71,8 +62,7 @@ class A2SFEnv:
         reward = torch.tensor(float(result.reward), device=self.device)
         
         info = {
-            "a": a_val,
-            "b": b_val,
+            "forgetting_factor": forgetting_factor,
             "reward": result.reward
         }
         

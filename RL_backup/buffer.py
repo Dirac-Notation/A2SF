@@ -6,7 +6,6 @@ class RolloutBuffer:
     """
     Single-step (bandit) buffer for PPO/REINFORCE.
     Stores independent (s, a, logp, r, v).
-    Actions are now tuples of (a, b) for sigmoid cache.
     """
 
     def __init__(self, device: str = "cuda"):
@@ -15,8 +14,7 @@ class RolloutBuffer:
 
     def clear(self):
         self.states = []
-        self.actions_a = []  # a values
-        self.actions_b = []  # b values
+        self.actions = []
         self.log_probs = []
         self.rewards = []
         self.values = []
@@ -24,30 +22,28 @@ class RolloutBuffer:
     def add(
         self,
         state: torch.Tensor,
-        action: Tuple[torch.Tensor, torch.Tensor],
+        action: torch.Tensor,
         log_prob: torch.Tensor,
         reward: torch.Tensor,
         value: torch.Tensor,
     ):
-        a, b = action
         self.states.append(state.to(self.device))
-        self.actions_a.append(a.to(self.device))
-        self.actions_b.append(b.to(self.device))
+        self.actions.append(action.to(self.device))
         self.log_probs.append(log_prob.to(self.device))
         self.rewards.append(reward.to(self.device))
         self.values.append(value.to(self.device))
 
-    def get(self) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor]:
+    def get(self) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Returns:
             states:   (N, state_dim)
-            actions:  tuple of (a, b) where each is (N,)
+            actions:  (N,)
             log_probs:(N,)
             rewards:  (N,)
             values:   (N,)
         """
         states = torch.stack(self.states)
-        actions = (torch.stack(self.actions_a), torch.stack(self.actions_b))
+        actions = torch.stack(self.actions)
         log_probs = torch.stack(self.log_probs)
         rewards = torch.stack(self.rewards)
         values = torch.stack(self.values)

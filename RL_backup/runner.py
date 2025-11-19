@@ -46,8 +46,7 @@ class A2SFRunner:
     def run_with_compression(
         self, 
         prompt: str, 
-        a: float,
-        b: float,
+        forgetting_factor: float,
         selected_indices: List[int],
         dataset: str = None
     ) -> ModelResult:
@@ -58,7 +57,7 @@ class A2SFRunner:
         input_ids = input_tensor.input_ids.to(self.model.device)
         context_length = input_ids.size(1)
         
-        compression_config = self._create_compression_config(a, b)
+        compression_config = self._create_compression_config(forgetting_factor)
         
         self.model.init_cache(compression_config)
         
@@ -74,15 +73,14 @@ class A2SFRunner:
             inference_time=inference_time
         )
     
-    def _create_compression_config(self, a: float, b: float) -> Dict[str, Any]:
+    def _create_compression_config(self, forgetting_factor: float) -> Dict[str, Any]:
         base_config = CompressionConfig()
         
-        base_config.compression_method = "sigmoid"
+        base_config.compression_method = "a2sf"
         base_config.total_budget = 128
         base_config.layerwise_ratios = [1.0 for i in range(32)]
         base_config.local_ratios = 0.125
-        base_config.a = a
-        base_config.b = b
+        base_config.forgetting_factors = [forgetting_factor for i in range(32)]
         
         return base_config
     
