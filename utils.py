@@ -18,7 +18,7 @@ def load_configs(config_file, method, total_budget, task):
     
     if method == "full":
         config = CompressionConfig({"method": "full"})
-    elif method == "a2sf" or method == "linear":
+    elif method == "a2sf" or method == "linear" or method == "sigmoid":
         config = CompressionConfig(compression_configs[method][task])
     else:
         if method not in compression_configs:

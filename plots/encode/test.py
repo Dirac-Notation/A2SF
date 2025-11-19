@@ -11,7 +11,7 @@ import os
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
-sys.path.append("/root/A2SF")
+sys.path.append("/home/smp9898/A2SF")
 from RL.features import ContextEncoder
 
 class LongBenchAnalyzer:

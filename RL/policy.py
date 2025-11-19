@@ -8,18 +8,23 @@ from typing import Dict, Tuple
 
 EPS = 1e-6
 
+# a values: [0.0, 0.0001, 0.0005, 0.001, 0.01, 0.1]
+A_VALUES = torch.tensor([0.0, 0.0001, 0.0005, 0.001, 0.01, 0.1])
+
 class A2SFPolicy(nn.Module):
     """
-    Policy network for A2SF RL agent (single-step / bandit)
-    - Continuous action in [0, 1]
-    - Beta policy: network outputs (mu, kappa) -> (alpha, beta)
+    Policy network for A2SF RL agent (single-step / bandit) with sigmoid cache
+    - a: discrete action from [0.0, 0.0001, 0.0005, 0.001, 0.01, 0.1]
+    - b: continuous action in [0, 1] using Beta distribution
     - Value head as baseline
     """
 
-    def __init__(self, state_dim: int, action_min: float = 0.0, action_max: float = 1.0):
+    def __init__(self, state_dim: int, a_values: torch.Tensor = None):
         super().__init__()
-        self.action_min = action_min
-        self.action_max = action_max
+        if a_values is None:
+            a_values = A_VALUES
+        self.register_buffer('a_values', a_values)
+        self.num_a_values = len(a_values)
 
         # Backbone
         self.backbone = nn.Sequential(
@@ -27,9 +32,13 @@ class A2SFPolicy(nn.Module):
             nn.Linear(512, 512), nn.ReLU()
         )
 
-        # Policy heads (μ in (0,1), κ>0)
-        self.mu_head = nn.Linear(512, 1)       # -> sigmoid
-        self.kappa_head = nn.Linear(512, 1)    # -> softplus + offset
+        # Policy heads
+        # a: discrete (Categorical over 6 values)
+        self.a_head = nn.Linear(512, self.num_a_values)
+        
+        # b: continuous (Beta distribution)
+        self.b_mu_head = nn.Linear(512, 1)       # -> sigmoid
+        self.b_kappa_head = nn.Linear(512, 1)    # -> softplus + offset
 
         # Value head
         self.value_head = nn.Linear(512, 1)
@@ -42,13 +51,13 @@ class A2SFPolicy(nn.Module):
                 nn.init.xavier_uniform_(m.weight, gain=1.0)
                 nn.init.constant_(m.bias, 0.0)
 
-    def _alpha_beta(self, h: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _b_alpha_beta(self, h: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Stable (mu, kappa) parameterization -> (alpha, beta).
+        Stable (mu, kappa) parameterization -> (alpha, beta) for b.
         mu in (0,1), kappa > 0
         """
-        mu = torch.sigmoid(self.mu_head(h))  # (B,1) in (0,1)
-        kappa = F.softplus(self.kappa_head(h)) + 1.0  # (>1 keeps distribution well-behaved)
+        mu = torch.sigmoid(self.b_mu_head(h))  # (B,1) in (0,1)
+        kappa = F.softplus(self.b_kappa_head(h)) + 1.0  # (>1 keeps distribution well-behaved)
         alpha = (mu * kappa).clamp_min(EPS)
         beta = ((1.0 - mu) * kappa).clamp_min(EPS)
         return alpha.squeeze(-1), beta.squeeze(-1)
@@ -58,48 +67,92 @@ class A2SFPolicy(nn.Module):
         Args:
             state: (B, state_dim) or (state_dim,)
         Returns:
-            dict with alpha, beta, value
+            dict with a_logits, b_alpha, b_beta, value
         """
         if state.dim() == 1:
             state = state.unsqueeze(0)
 
         h = self.backbone(state)
-        alpha, beta = self._alpha_beta(h)
+        a_logits = self.a_head(h)  # (B, num_a_values)
+        b_alpha, b_beta = self._b_alpha_beta(h)
         value = self.value_head(h).squeeze(-1)
-        return {"alpha": alpha, "beta": beta, "value": value}
+        return {"a_logits": a_logits, "b_alpha": b_alpha, "b_beta": b_beta, "value": value}
 
     @torch.no_grad()
-    def act(self, state: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def act(self, state: torch.Tensor) -> Tuple[Tuple[torch.Tensor, torch.Tensor], torch.Tensor, torch.Tensor]:
         """
         Sample action (single-step)
         Returns:
-            action (B,), log_prob (B,), value (B,)
+            action: tuple of (a, b) where a is discrete index, b is continuous [0,1]
+            log_prob: combined log probability
+            value: state value
         """
         out = self.forward(state)
-        alpha, beta, value = out["alpha"], out["beta"], out["value"]
+        a_logits = out["a_logits"]
+        b_alpha, b_beta = out["b_alpha"], out["b_beta"]
+        value = out["value"]
 
-        dist = torch.distributions.Beta(alpha, beta)
-        action = dist.sample()
-        action = action.clamp(EPS, 1 - EPS)  # numerical safety in log_prob
+        # Sample a (discrete)
+        a_dist = torch.distributions.Categorical(logits=a_logits)
+        a_idx = a_dist.sample()  # (B,)
+        a = self.a_values[a_idx]  # (B,)
+        a_log_prob = a_dist.log_prob(a_idx)  # (B,)
 
-        log_prob = dist.log_prob(action)  # log prob in (0,1) space
-        return action.squeeze(-1), log_prob.squeeze(-1), value.squeeze(-1)
+        # Sample b (continuous)
+        b_dist = torch.distributions.Beta(b_alpha, b_beta)
+        b = b_dist.sample()  # (B,)
+        b = b.clamp(EPS, 1 - EPS)  # numerical safety
+        b_log_prob = b_dist.log_prob(b)  # (B,)
+
+        # Combined log probability
+        log_prob = a_log_prob + b_log_prob
+
+        return (a, b), log_prob, value
 
     def log_prob_value(
-        self, state: torch.Tensor, action: torch.Tensor
+        self, state: torch.Tensor, action: Tuple[torch.Tensor, torch.Tensor]
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Args:
+            state: (B, state_dim) or (state_dim,)
+            action: tuple of (a, b) where a is the actual a value, b is continuous [0,1]
+        Returns:
+            log_prob, value, entropy
+        """
         if state.dim() == 1:
             state = state.unsqueeze(0)
-        if action.dim() == 0:
-            action = action.unsqueeze(0)
+        
+        a, b = action
+        if a.dim() == 0:
+            a = a.unsqueeze(0)
+        if b.dim() == 0:
+            b = b.unsqueeze(0)
 
         out = self.forward(state)
-        alpha, beta, value = out["alpha"], out["beta"], out["value"]
+        a_logits = out["a_logits"]
+        b_alpha, b_beta = out["b_alpha"], out["b_beta"]
+        value = out["value"]
 
-        dist = torch.distributions.Beta(alpha, beta)
-        log_prob = dist.log_prob(action)
-        entropy = dist.entropy()
-        return log_prob.squeeze(-1), value.squeeze(-1), entropy.squeeze(-1)
+        # Find closest a value index
+        a_expanded = a.unsqueeze(-1)  # (B, 1)
+        a_values_expanded = self.a_values.unsqueeze(0)  # (1, num_a_values)
+        a_idx = torch.argmin(torch.abs(a_expanded - a_values_expanded), dim=-1)  # (B,)
+        
+        # Compute log prob for a
+        a_dist = torch.distributions.Categorical(logits=a_logits)
+        a_log_prob = a_dist.log_prob(a_idx)
+        a_entropy = a_dist.entropy()
+
+        # Compute log prob for b
+        b_dist = torch.distributions.Beta(b_alpha, b_beta)
+        b_log_prob = b_dist.log_prob(b)
+        b_entropy = b_dist.entropy()
+
+        # Combined
+        log_prob = a_log_prob + b_log_prob
+        entropy = a_entropy + b_entropy
+
+        return log_prob, value, entropy
 
 def ppo_update(
     policy: A2SFPolicy,
@@ -108,7 +161,7 @@ def ppo_update(
     optimizer: torch.optim.Optimizer
 ) -> Dict[str, float]:
     """
-    PPO update for single-step episodes.
+    PPO update for single-step episodes with (a, b) actions.
     - advantages = rewards - values (baseline)
     - returns    = rewards
     """
@@ -121,8 +174,12 @@ def ppo_update(
 
     # Shuffle
     batch_size = states.size(0)
-    idx = torch.randperm(config.episodes_per_update, device=states.device)
-    states, actions, old_log_probs, rewards, advantages = states[idx], actions[idx], old_log_probs[idx], rewards[idx], advantages[idx]
+    idx = torch.randperm(batch_size, device=states.device)
+    states = states[idx]
+    actions = (actions[0][idx], actions[1][idx])  # Unpack tuple, shuffle, repack
+    old_log_probs = old_log_probs[idx]
+    rewards = rewards[idx]
+    advantages = advantages[idx]
 
     policy_losses, value_losses, entropies = [], [], []
 
@@ -131,7 +188,7 @@ def ppo_update(
             end = start + config.minibatch_size
             
             state = states[start:end]
-            action = actions[start:end]
+            action = (actions[0][start:end], actions[1][start:end])  # Slice tuple
             old_log_prob = old_log_probs[start:end]
             reward = rewards[start:end]
             advantage = advantages[start:end]

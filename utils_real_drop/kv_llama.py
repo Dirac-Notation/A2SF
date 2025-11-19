@@ -209,10 +209,7 @@ class LlamaModel(LlamaPreTrainedModel):
         for idx, layer in enumerate(self.layers):
             # Create appropriate cache implementation based on compression method
             if compression_config.method != "full":
-                if compression_config.compression_method == "streamingLLM":
-                    from .kv_cache.streaming_cache import StreamingCache
-                    layer.self_attn.past_key_value = StreamingCache(layer.self_attn.num_key_value_heads)
-                elif compression_config.compression_method == "h2o":
+                if compression_config.compression_method == "h2o":
                     from .kv_cache.h2o_cache import H2OCache
                     layer.self_attn.past_key_value = H2OCache(layer.self_attn.num_key_value_heads)
                 elif compression_config.compression_method == "a2sf":
@@ -227,6 +224,9 @@ class LlamaModel(LlamaPreTrainedModel):
                 elif compression_config.compression_method == "linear":
                     from .kv_cache.linear_cache import LinearCache
                     layer.self_attn.past_key_value = LinearCache(layer.self_attn.num_key_value_heads)
+                elif compression_config.compression_method == "sigmoid":
+                    from .kv_cache.sigmoid_cache import SigmoidCache
+                    layer.self_attn.past_key_value = SigmoidCache(layer.self_attn.num_key_value_heads)
                 else:
                     raise ValueError(f"Unsupported compression method: {compression_config.compression_method}")
             else:
@@ -242,6 +242,10 @@ class LlamaModel(LlamaPreTrainedModel):
             if input_ids.size(1) > 1:
                 orig_shape = input_ids.shape
                 exponents = torch.arange(orig_shape[1]-1, -1, -1, device=input_ids.device).view(orig_shape[0], 1, orig_shape[1])
+        elif self.compression_method == "sigmoid":
+            if input_ids.size(1) > 1:
+                orig_shape = input_ids.shape
+                exponents = torch.arange(0, orig_shape[1], device=input_ids.device).view(orig_shape[0], 1, orig_shape[1])
 
         for layer in self.layers:
             device = layer.self_attn.q_proj.weight.device
