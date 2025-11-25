@@ -112,7 +112,7 @@ def main():
     print(f"Number of layers: {num_layers}")
     
     # Methods to compare (excluding a2sf)
-    methods = ["full", "sigmoid", "snap"]
+    methods = ["snap", "sigmoid"]
     
     # Create compression configs for each method
     configs = {}
