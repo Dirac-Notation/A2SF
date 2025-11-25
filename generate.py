@@ -7,15 +7,12 @@ from tqdm import tqdm
 from utils import load_model, set_seed, CompressionConfig
 
 def parse_args(args=None):
-    parser = argparse.ArgumentParser(description="Generate responses using LLM with configurable settings")
+    parser = argparse.ArgumentParser(description="Generate responses using LLM with configurable settings and compare methods")
     parser.add_argument('--gpus', type=int, nargs='+', default=[0], help="List of GPU IDs (e.g., --gpus 0 1 2 3)")
     parser.add_argument('--model', type=str, required=True, choices=["llama", "llama2", "llama3", "opt"], help="Model to use")
-    parser.add_argument('--method', type=str, default="full", help="Compression method (full, a2sf, sigmoid, etc.)")
     parser.add_argument('--budget', type=int, default=128, help="Budget for compression")
     parser.add_argument('--a', type=float, default=0.001, help="Parameter a for sigmoid cache")
-    parser.add_argument('--b', type=float, default=4096, help="Parameter b for sigmoid cache")
-    parser.add_argument('--num_layers', type=int, default=32, help="Number of layers (default: 32)")
-    parser.add_argument('--local_ratios', type=float, default=0.125, help="Local ratios for compression (default: 0.125)")
+    parser.add_argument('--b', type=float, default=4096, help="Observation window for snap cache (or parameter b for sigmoid)")
     return parser.parse_args(args)
 
 def get_predefined_prompts():
@@ -45,9 +42,9 @@ def format_prompt(prompt, model_name):
     else:
         return prompt
 
-def generate_response(model, tokenizer, prompt, max_length, max_gen, model_name, config):
+def generate_response(model, tokenizer, prompt, max_length, max_gen, model_name, config, method_name):
     """
-    Generate response for a single prompt
+    Generate response for a single prompt with given method
     """
     # Format prompt based on model type
     formatted_prompt = format_prompt(prompt, model_name)
@@ -69,7 +66,7 @@ def generate_response(model, tokenizer, prompt, max_length, max_gen, model_name,
     context_length = input_ids.shape[-1]
     
     # Initialize cache if using compression
-    if hasattr(model, 'init_cache'):
+    if hasattr(model, 'init_cache') and method_name != "full":
         model.init_cache(config)
     
     # Generate response
@@ -110,64 +107,106 @@ def main():
     model, tokenizer = load_model(model_name, args.gpus)
     print("Model loaded successfully!")
     
-    # Create compression config
-    config = CompressionConfig()
-    config.compression_method = args.method
-    config.total_budget = args.budget
-    config.layerwise_ratios = [1.0 for i in range(args.num_layers)]
-    config.local_ratios = args.local_ratios
+    # Get number of layers from model config
+    num_layers = model.config.num_hidden_layers
+    print(f"Number of layers: {num_layers}")
     
-    # Method-specific parameters
-    if args.method == "sigmoid":
-        config.a = args.a
-        config.b = args.b
-    elif args.method == "a2sf":
-        # For a2sf, you might need forgetting_factors
-        # Default to 0.5 if not specified
-        config.forgetting_factors = [0.5 for i in range(args.num_layers)]
+    # Methods to compare (excluding a2sf)
+    methods = ["full", "sigmoid", "snap"]
+    
+    # Create compression configs for each method
+    configs = {}
+    for method in methods:
+        config = CompressionConfig()
+        config.compression_method = method
+        config.total_budget = args.budget
+        config.layerwise_ratios = [1.0 for i in range(num_layers)]
+        config.local_ratios = 0.125  # Fixed value
+        
+        if method == "sigmoid":
+            config.a = args.a
+            config.b = args.b
+        elif method == "snap":
+            config.observation_window = int(args.b)  # Use --b as observation_window
+        
+        configs[method] = config
     
     # Get predefined prompts
     prompts = get_predefined_prompts()
     
-    print(f"Generating responses for {len(prompts)} prompts...")
-    print(f"Using method: {args.method}, budget: {args.budget}")
+    print(f"\nGenerating responses for {len(prompts)} prompts...")
+    print(f"Comparing methods: {', '.join(methods)}")
+    print(f"Budget: {args.budget}")
     print(f"Max input length: {max_length}, Max generation: {max_gen}")
     print(f"Temperature: 0.0, Sampling: False")
-    print("-" * 50)
+    if "sigmoid" in methods:
+        print(f"Sigmoid parameters: a={args.a}, b={args.b}")
+    if "snap" in methods:
+        print(f"Snap observation window: {int(args.b)}")
+    print("=" * 80)
     
-    # Generate responses
-    results = []
+    # Generate responses for each method and compare
+    all_results = {method: [] for method in methods}
+    
     for i, prompt in enumerate(tqdm(prompts, desc="Generating")):
-        print(f"\nPrompt {i+1}: {prompt}")
-
-        response = generate_response(
-            model=model,
-            tokenizer=tokenizer,
-            prompt=prompt,
-            max_length=max_length,
-            max_gen=max_gen,
-            model_name=model_name,
-            config=config
-        )
+        print(f"\n{'='*80}")
+        print(f"Prompt {i+1}: {prompt}")
+        print(f"{'='*80}")
         
-        print(f"Response: {response}")
+        prompt_results = {}
         
-        # Store result (no file output, just in memory)
-        result = {
-            "prompt_id": i + 1,
-            "prompt": prompt,
-            "response": response,
-            "model": model_name,
-            "method": args.method,
-            "budget": args.budget,
-            "temperature": 0.0,
-            "do_sample": False
-        }
-        results.append(result)
+        for method in methods:
+            print(f"\n[{method.upper()}]")
+            
+            response = generate_response(
+                model=model,
+                tokenizer=tokenizer,
+                prompt=prompt,
+                max_length=max_length,
+                max_gen=max_gen,
+                model_name=model_name,
+                config=configs[method],
+                method_name=method
+            )
+            
+            print(f"Response: {response}")
+            
+            result = {
+                "prompt_id": i + 1,
+                "prompt": prompt,
+                "response": response,
+                "model": model_name,
+                "method": method,
+                "budget": args.budget,
+                "temperature": 0.0,
+                "do_sample": False
+            }
+            
+            if method == "sigmoid":
+                result["a"] = args.a
+                result["b"] = args.b
+            elif method == "snap":
+                result["observation_window"] = int(args.b)
+            
+            all_results[method].append(result)
+            prompt_results[method] = response
+        
+        # Compare responses side by side
+        print(f"\n{'='*80}")
+        print("COMPARISON:")
+        print(f"{'='*80}")
+        for method in methods:
+            print(f"\n[{method.upper()}]:")
+            print(f"  {prompt_results[method]}")
     
-    # No file output - results are only stored in memory
-    print(f"\nGeneration completed!")
-    print(f"Total prompts processed: {len(results)}")
+    # Summary
+    print(f"\n{'='*80}")
+    print("GENERATION COMPLETED!")
+    print(f"{'='*80}")
+    print(f"Total prompts processed: {len(prompts)}")
+    print(f"Methods compared: {', '.join(methods)}")
+    for method in methods:
+        print(f"  {method}: {len(all_results[method])} responses generated")
 
 if __name__ == '__main__':
     main()
