@@ -4,15 +4,18 @@ import argparse
 import torch
 from tqdm import tqdm
 
-from utils import load_configs, load_model, set_seed
+from utils import load_model, set_seed, CompressionConfig
 
 def parse_args(args=None):
     parser = argparse.ArgumentParser(description="Generate responses using LLM with configurable settings")
     parser.add_argument('--gpus', type=int, nargs='+', default=[0], help="List of GPU IDs (e.g., --gpus 0 1 2 3)")
     parser.add_argument('--model', type=str, required=True, choices=["llama", "llama2", "llama3", "opt"], help="Model to use")
-    parser.add_argument('--method', type=str, default="full", help="Compression method (full, a2sf, etc.)")
-    parser.add_argument('--budget', type=int, default=100, help="Budget for compression")
-    parser.add_argument('--config_file', type=str, required=True, help="Path to config file")
+    parser.add_argument('--method', type=str, default="full", help="Compression method (full, a2sf, sigmoid, etc.)")
+    parser.add_argument('--budget', type=int, default=128, help="Budget for compression")
+    parser.add_argument('--a', type=float, default=0.001, help="Parameter a for sigmoid cache")
+    parser.add_argument('--b', type=float, default=4096, help="Parameter b for sigmoid cache")
+    parser.add_argument('--num_layers', type=int, default=32, help="Number of layers (default: 32)")
+    parser.add_argument('--local_ratios', type=float, default=0.125, help="Local ratios for compression (default: 0.125)")
     return parser.parse_args(args)
 
 def get_predefined_prompts():
@@ -107,8 +110,21 @@ def main():
     model, tokenizer = load_model(model_name, args.gpus)
     print("Model loaded successfully!")
     
-    # Load compression config
-    config = load_configs(args.config_file, args.method, args.budget, "Single-doc QA")  # Default task
+    # Create compression config
+    config = CompressionConfig()
+    config.compression_method = args.method
+    config.total_budget = args.budget
+    config.layerwise_ratios = [1.0 for i in range(args.num_layers)]
+    config.local_ratios = args.local_ratios
+    
+    # Method-specific parameters
+    if args.method == "sigmoid":
+        config.a = args.a
+        config.b = args.b
+    elif args.method == "a2sf":
+        # For a2sf, you might need forgetting_factors
+        # Default to 0.5 if not specified
+        config.forgetting_factors = [0.5 for i in range(args.num_layers)]
     
     # Get predefined prompts
     prompts = get_predefined_prompts()

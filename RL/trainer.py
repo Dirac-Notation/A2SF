@@ -3,7 +3,7 @@ import json
 import random
 import torch
 import torch.optim as optim
-from typing import Dict
+from typing import Dict, List, Any
 from tqdm import tqdm
 
 import sys
@@ -11,10 +11,10 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from .config import A2SFRLConfig
-from .policy import A2SFPolicy, ppo_update
+from .policy import A2SFPolicy
 from .buffer import RolloutBuffer
 from .env import A2SFEnv
-from .runner import A2SFRunner
+from .runner import A2SFModelRunner
 
 class A2SFTrainer:
     def __init__(self, config: A2SFRLConfig):
@@ -22,37 +22,69 @@ class A2SFTrainer:
         self.device = torch.device(config.device if torch.cuda.is_available() else "cpu")
         
         torch.manual_seed(config.seed)
-        random.seed(config.seed)
+        random.seed(config.seed)        
         
-        self.runner = A2SFRunner(config)
-        self.env = A2SFEnv(self.runner, config)
-        
-        self.training_data = self.runner.load_training_data()
-        print(f"Loaded {len(self.training_data)} training samples")
-        
-        self.eval_episodes = random.sample(self.training_data, self.config.eval_samples)
-        
+        self.model_runner = A2SFModelRunner(config)
+        self.env = A2SFEnv(self.model_runner, config)
         self.policy = A2SFPolicy(config.max_context).to(self.device)
-        self.optimizer = optim.Adam(self.policy.parameters(), lr=config.lr)
-        
         self.buffer = RolloutBuffer(device=self.device)
         
+        self.optimizer = optim.Adam(self.policy.parameters(), lr=config.lr)
+        
+        self.training_data = self.load_training_data()
+        self.eval_episodes = random.sample(self.training_data, self.config.eval_samples)
+        print(f"Loaded {len(self.training_data)} training samples")
+        print(f"Loaded {len(self.eval_episodes)} evaluation samples")
         os.makedirs(config.save_dir, exist_ok=True)
         
         self.training_stats = {
             "iterations": [],
             "rewards": [],
-            "losses": []
+            "losses": [],
+            "actions_a": [],
+            "actions_b": []
         }
+    
+    def load_training_data(self) -> List[Dict[str, Any]]:
+        training_data_path = "datasets/training_data.json"
+        
+        with open(training_data_path, 'r', encoding='utf-8') as f:
+            training_data = json.load(f)
+        
+        for data in training_data:
+            data["input_prompt"] = self.model_runner.prepare_prompt(data["input_prompt"], data["dataset"])
+        
+        print(f"Loaded {len(training_data)} training samples from {training_data_path}")
+        return training_data
     
     def train(self, num_iterations: int = 1000):
         print(f"Starting training for {num_iterations} iterations")
         
         for iteration in range(num_iterations):
             
-            self._collect_experiences()
+            episodes = random.sample(self.training_data, self.config.episodes_per_update)
+
+            for episode_data in tqdm(episodes):
+                state = self.env.encode_to_state(
+                    prompt=episode_data["input_prompt"],
+                    selected_indices=episode_data["selected_indices"],
+                    dataset=episode_data["dataset"],
+                )
+                
+                state = state.to(self.device)
+
+                action, log_prob, value = self.policy.act(state)
+                
+                reward, info = self.env.step(action)
+                
+                self.buffer.add(state, action, log_prob, reward, value)
+                
+                a, b = action
+                self.training_stats["rewards"].append(reward)
+                self.training_stats["actions_a"].append(round(a.item(), 5) if isinstance(a, torch.Tensor) else a)
+                self.training_stats["actions_b"].append(round(b.item(), 5) if isinstance(b, torch.Tensor) else b)
             
-            loss_stats = ppo_update(self.policy, self.buffer, self.config, self.optimizer)
+            loss_stats = self.policy.ppo_update(self.buffer, self.config, self.optimizer)
             self.buffer.clear()
             
             if iteration % self.config.log_frequency == 0:
@@ -64,73 +96,13 @@ class A2SFTrainer:
             if iteration % self.config.eval_frequency == 0 and iteration > 0:
                 self._evaluate(iteration)
     
-    def _collect_experiences(self):
-        episodes = random.sample(self.training_data, self.config.episodes_per_update)
-
-        for episode_data in tqdm(episodes):
-            state = self.env.reset(
-                prompt=episode_data["input_prompt"],
-                selected_indices=episode_data["selected_indices"],
-                dataset=episode_data["dataset"],
-            )
-            
-            state = state.to(self.device)
-
-            action, log_prob, value = self.policy.act(state)
-            
-            reward, info = self.env.step(action)
-
-            self.buffer.add(state, action, log_prob, reward, value)
-            
-            self.training_stats["rewards"].append(reward)
-    
-    def _log_progress(self, iteration: int, loss_stats: Dict[str, float]):
-        n = self.config.episodes_per_update
-        recent_rewards = self.training_stats["rewards"][-n:]
-        
-        avg_reward = sum(recent_rewards) / len(recent_rewards)
-        
-        policy_loss = loss_stats.get("policy_loss", 0.0)
-        value_loss = loss_stats.get("value_loss", 0.0)
-        entropy = loss_stats.get("entropy", 0.0)
-        
-        print(f"Iteration {iteration}:")
-        print(f"  Avg Reward:  {avg_reward:.4f}")
-        print(f"  Policy Loss: {policy_loss:.4f}")
-        print(f"  Value  Loss: {value_loss:.4f}")
-        print(f"  Entropy:     {entropy:.4f}")
-        print()
-        
-        progress_data = {
-            "iteration": iteration,
-            "avg_reward": avg_reward.item(),
-            "policy_loss": policy_loss,
-            "value_loss": value_loss,
-            "entropy": entropy,
-        }
-        
-        with open(os.path.join(self.config.save_dir, "progress.jsonl"), "a") as f:
-            f.write(json.dumps(progress_data) + "\n")
-    
-    def _save_checkpoint(self, iteration: int):
-        checkpoint_path = os.path.join(self.config.save_dir, f"policy_{iteration}.pt")
-        torch.save({
-            "iteration": iteration,
-            "policy_state_dict": self.policy.state_dict(),
-            "optimizer_state_dict": self.optimizer.state_dict(),
-            "config": self.config,
-            "training_stats": self.training_stats
-        }, checkpoint_path)
-        
-        print(f"Saved checkpoint: {checkpoint_path}")
-    
     def _evaluate(self, iteration: int):
         print(f"Evaluating at iteration {iteration}")
         
         eval_rewards = []
         
         for episode_data in self.eval_episodes:
-            state = self.env.reset(
+            state = self.env.encode_to_state(
                 prompt=episode_data["input_prompt"],
                 selected_indices=episode_data["selected_indices"],
                 dataset=episode_data["dataset"],
@@ -140,14 +112,15 @@ class A2SFTrainer:
             with torch.no_grad():
                 out = self.policy(state)
                 a_logits = out["a_logits"]
-                b_alpha, b_beta = out["b_alpha"], out["b_beta"]
+                b_logits = out["b_logits"]
                 
                 # Get mode for a (most likely value)
                 a_idx = torch.argmax(a_logits, dim=-1)
                 a = self.policy.a_values[a_idx]
                 
-                # Get mode for b (mean of Beta distribution)
-                b = (b_alpha / (b_alpha + b_beta + 1e-6)).clamp(1e-6, 1 - 1e-6)
+                # Get mode for b (most likely value)
+                b_idx = torch.argmax(b_logits, dim=-1)
+                b = self.policy.b_values[b_idx]
                 
                 action = (a, b)
 
@@ -169,6 +142,50 @@ class A2SFTrainer:
         
         with open(os.path.join(self.config.save_dir, "evaluation.jsonl"), "a") as f:
             f.write(json.dumps(eval_data) + "\n")
+
+    def _log_progress(self, iteration: int, loss_stats: Dict[str, float]):
+        n = self.config.episodes_per_update
+        recent_rewards = self.training_stats["rewards"][-n:]
+        recent_actions_a = self.training_stats["actions_a"][-n:]
+        recent_actions_b = self.training_stats["actions_b"][-n:]
+        
+        avg_reward = sum(recent_rewards) / len(recent_rewards)
+        
+        policy_loss = loss_stats.get("policy_loss", 0.0)
+        value_loss = loss_stats.get("value_loss", 0.0)
+        entropy = loss_stats.get("entropy", 0.0)
+        
+        print(f"Iteration {iteration}:")
+        print(f"  Avg Reward:  {avg_reward:.4f}")
+        print(f"  Policy Loss: {policy_loss:.4f}")
+        print(f"  Value  Loss: {value_loss:.4f}")
+        print(f"  Entropy:     {entropy:.4f}")
+        print()
+        
+        progress_data = {
+            "iteration": iteration,
+            "avg_reward": avg_reward.item() if isinstance(avg_reward, torch.Tensor) else avg_reward,
+            "policy_loss": policy_loss,
+            "value_loss": value_loss,
+            "entropy": entropy,
+            "actions_a": recent_actions_a,
+            "actions_b": recent_actions_b,
+        }
+        
+        with open(os.path.join(self.config.save_dir, "progress.jsonl"), "a") as f:
+            f.write(json.dumps(progress_data) + "\n")
+
+    def _save_checkpoint(self, iteration: int):
+        checkpoint_path = os.path.join(self.config.save_dir, f"policy_{iteration}.pt")
+        torch.save({
+            "iteration": iteration,
+            "policy_state_dict": self.policy.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "config": self.config,
+            "training_stats": self.training_stats
+        }, checkpoint_path)
+        
+        print(f"Saved checkpoint: {checkpoint_path}")
     
     def load_checkpoint(self, checkpoint_path: str):
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
