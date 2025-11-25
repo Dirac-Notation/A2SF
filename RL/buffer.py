@@ -49,7 +49,7 @@ class RolloutBuffer:
         states = torch.stack(self.states)
         actions = (torch.stack(self.actions_a), torch.stack(self.actions_b))
         log_probs = torch.stack(self.log_probs)
-        rewards = torch.stack(self.rewards)
+        rewards = torch.stack(self.rewards).unsqueeze(-1)
         values = torch.stack(self.values)
         return states, actions, log_probs, rewards, values
 

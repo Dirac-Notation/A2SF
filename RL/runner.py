@@ -17,7 +17,7 @@ class ModelResult:
     reward: float
     inference_time: float
 
-class A2SFRunner:
+class A2SFModelRunner:
     def __init__(self, config: A2SFRLConfig):
         self.config = config
         self.device = torch.device(config.device if torch.cuda.is_available() else "cpu")
@@ -108,15 +108,4 @@ class A2SFRunner:
         similarity_score /= num_layers * num_heads
         
         return similarity_score
-    
-    def load_training_data(self) -> List[Dict[str, Any]]:
-        training_data_path = "datasets/training_data.json"
-        
-        with open(training_data_path, 'r', encoding='utf-8') as f:
-            training_data = json.load(f)
-        
-        # for data in training_data:
-        #     data["input_prompt"] = self.prepare_prompt(data["input_prompt"], data["dataset"])
-        
-        print(f"Loaded {len(training_data)} training samples from {training_data_path}")
-        return training_data
+

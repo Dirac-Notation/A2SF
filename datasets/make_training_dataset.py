@@ -34,7 +34,7 @@ def set_seed(seed):
 def load_model_for_generation(model_name, gpu_list=None):
     """Load model and tokenizer directly"""
     # Load model2path config
-    with open('/home/smp9898/A2SF/config/model2path.json', 'r') as f:
+    with open('/root/A2SF/config/model2path.json', 'r') as f:
         model2path = json.load(f)
     
     model_path = model2path[model_name]
@@ -100,7 +100,7 @@ def generate_answer(model, tokenizer, prompt: str, dataset: str, model_name: str
 def load_longbench_dataset(dataset_name: str, num_samples: int = 10) -> List[Dict[str, Any]]:
     """Load samples from existing LongBench dataset files"""
     # Load from existing jsonl file
-    dataset_path = f"/home/smp9898/A2SF/datasets/longbench/{dataset_name}.jsonl"
+    dataset_path = f"/root/A2SF/datasets/longbench/{dataset_name}.jsonl"
     
     if not os.path.exists(dataset_path):
         print(f"Dataset file not found: {dataset_path}")
@@ -150,7 +150,7 @@ def process_dataset(
 
 def main():
     parser = argparse.ArgumentParser(description="Generate training data from LongBench datasets")
-    parser.add_argument("--output_file", type=str, default="/home/smp9898/A2SF/datasets/training_data.json", help="Output file for training data")
+    parser.add_argument("--output_file", type=str, default="/root/A2SF/datasets/training_data.json", help="Output file for training data")
     parser.add_argument("--num_samples_per_dataset", type=int, default=10,help="Number of samples per dataset")
     parser.add_argument("--seed", type=int, default=42,help="Random seed")
     parser.add_argument("--gpus", type=int, nargs='+', default=[0], help="List of GPU IDs (e.g., --gpus 0 1 2 3)")
@@ -166,7 +166,7 @@ def main():
     model, tokenizer = load_model_for_generation(model_name, args.gpus)
     
     # Get all dataset names
-    dataset_names = os.listdir("/home/smp9898/A2SF/datasets/longbench")
+    dataset_names = os.listdir("/root/A2SF/datasets/longbench")
     dataset_names = [dataset_name.replace(".jsonl", "") for dataset_name in dataset_names]
     print(f"Processing {len(dataset_names)} datasets: {dataset_names}")
     

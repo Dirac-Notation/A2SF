@@ -34,19 +34,14 @@ class A2SFEnv:
         self.current_dataset = None
         self.current_selected_indices = None
     
-    def _encode_to_state(self, prompt: str) -> torch.Tensor:
-        context_embedding = self.context_encoder.encode_context(prompt)
-        
-        return context_embedding.to(self.device, dtype=torch.float32)
-    
-    def reset(self, prompt: str, selected_indices: list, dataset: str = None) -> torch.Tensor:
+    def encode_to_state(self, prompt: str, selected_indices: list, dataset: str = None) -> torch.Tensor:
         self.current_prompt = prompt
         self.current_dataset = dataset
         self.current_selected_indices = selected_indices
         
-        state = self._encode_to_state(prompt)
+        context_embedding = self.context_encoder.encode_context(prompt).to(self.device, dtype=torch.float32)
         
-        return state
+        return context_embedding
     
     def step(self, action: Tuple[torch.Tensor, torch.Tensor]) -> Tuple[torch.Tensor, Dict[str, Any]]:
         """
