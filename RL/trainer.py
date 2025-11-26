@@ -51,8 +51,8 @@ class A2SFTrainer:
         with open(training_data_path, 'r', encoding='utf-8') as f:
             training_data = json.load(f)
         
-        for data in training_data:
-            data["input_prompt"] = self.model_runner.prepare_prompt(data["input_prompt"], data["dataset"])
+        # for data in training_data:
+        #     data["input_prompt"] = self.model_runner.prepare_prompt(data["input_prompt"], data["dataset"])
         
         print(f"Loaded {len(training_data)} training samples from {training_data_path}")
         return training_data
@@ -152,12 +152,14 @@ class A2SFTrainer:
         avg_reward = sum(recent_rewards) / len(recent_rewards)
         
         policy_loss = loss_stats.get("policy_loss", 0.0)
+        policy_loss_a = loss_stats.get("policy_loss_a", 0.0)
+        policy_loss_b = loss_stats.get("policy_loss_b", 0.0)
         value_loss = loss_stats.get("value_loss", 0.0)
         entropy = loss_stats.get("entropy", 0.0)
         
         print(f"Iteration {iteration}:")
         print(f"  Avg Reward:  {avg_reward:.4f}")
-        print(f"  Policy Loss: {policy_loss:.4f}")
+        print(f"  Policy Loss: {policy_loss:.4f} (a: {policy_loss_a:.4f}, b: {policy_loss_b:.4f})")
         print(f"  Value  Loss: {value_loss:.4f}")
         print(f"  Entropy:     {entropy:.4f}")
         print()
@@ -166,6 +168,8 @@ class A2SFTrainer:
             "iteration": iteration,
             "avg_reward": avg_reward.item() if isinstance(avg_reward, torch.Tensor) else avg_reward,
             "policy_loss": policy_loss,
+            "policy_loss_a": policy_loss_a,
+            "policy_loss_b": policy_loss_b,
             "value_loss": value_loss,
             "entropy": entropy,
             "actions_a": recent_actions_a,

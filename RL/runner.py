@@ -99,7 +99,6 @@ class A2SFModelRunner:
             num_key_value_heads = layer.self_attn.num_key_value_groups
             model_selected_indices = model_selected_indices.unsqueeze(1).expand(-1, num_key_value_heads, -1).reshape(answer_selected_indices.size(0), -1)
             
-            
             for head_idx in range(num_heads):
                 model_set = set(model_selected_indices[head_idx].tolist() + list(range(context_length-16, context_length)))
                 answer_set = set(answer_selected_indices[head_idx].tolist())
