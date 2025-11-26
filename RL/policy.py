@@ -10,8 +10,10 @@ EPS = 1e-6
 
 # a values: [0.0, 0.0001, 0.0005, 0.001, 0.01, 0.1]
 A_VALUES = torch.tensor([0.0, 0.0001, 0.0005, 0.001, 0.01, 0.1])
+# A_VALUES = torch.tensor([10.0])
 # b values: [8192, 4096, 1024, 256, 64, 32, 16, 8, 4, 2, 1]
-B_VALUES = torch.tensor([8192, 4096, 1024, 256, 64, 32, 16, 8, 4, 2, 1])
+# B_VALUES = torch.tensor([8192, 4096, 1024, 256, 64, 32, 16, 8, 4, 2, 1])
+B_VALUES = torch.tensor([16])
 
 class A2SFPolicy(nn.Module):
     """
@@ -70,12 +72,12 @@ class A2SFPolicy(nn.Module):
         return {"a_logits": a_logits, "b_logits": b_logits, "value": value}
 
     @torch.no_grad()
-    def act(self, state: torch.Tensor) -> Tuple[Tuple[torch.Tensor, torch.Tensor], torch.Tensor, torch.Tensor]:
+    def act(self, state: torch.Tensor) -> Tuple[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
         """
         Sample action (single-step)
         Returns:
             action: tuple of (a, b) where both are discrete values
-            log_prob: combined log probability
+            log_prob: tuple of (a_log_prob, b_log_prob)
             value: state value
         """
         out = self.forward(state)
@@ -88,27 +90,25 @@ class A2SFPolicy(nn.Module):
         a_idx = a_dist.sample()  # (B,)
         a = self.a_values[a_idx]  # (B,)
         a_log_prob = a_dist.log_prob(a_idx)  # (B,)
-
+        
         # Sample b (discrete)
         b_dist = torch.distributions.Categorical(logits=b_logits)
         b_idx = b_dist.sample()  # (B,)
         b = self.b_values[b_idx]  # (B,)
         b_log_prob = b_dist.log_prob(b_idx)  # (B,)
-
-        # Combined log probability
-        log_prob = a_log_prob + b_log_prob
         
-        return (a, b), log_prob, value
+        return (a, b), (a_log_prob, b_log_prob), value
 
     def log_prob_value(
         self, state: torch.Tensor, action: Tuple[torch.Tensor, torch.Tensor]
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[Tuple[torch.Tensor, torch.Tensor], torch.Tensor, torch.Tensor]:
         """
         Args:
             state: (B, state_dim) or (state_dim,)
             action: tuple of (a, b) where both are discrete values
         Returns:
-            log_prob, value, entropy
+            log_prob: tuple of (a_log_prob, b_log_prob)
+            value, entropy
         """
         a, b = action
 
@@ -129,17 +129,16 @@ class A2SFPolicy(nn.Module):
         a_dist = torch.distributions.Categorical(logits=a_logits)
         a_log_prob = a_dist.log_prob(a_idx)
         a_entropy = a_dist.entropy()
-
+        
         # Compute log prob for b
         b_dist = torch.distributions.Categorical(logits=b_logits)
         b_log_prob = b_dist.log_prob(b_idx)
         b_entropy = b_dist.entropy()
         
-        # Combined
-        log_prob = a_log_prob + b_log_prob
+        # Combined entropy
         entropy = a_entropy + b_entropy
 
-        return log_prob, value, entropy
+        return (a_log_prob, b_log_prob), value, entropy
 
     def ppo_update(
         self,
@@ -155,6 +154,7 @@ class A2SFPolicy(nn.Module):
         self.train()
 
         states, actions, old_log_probs, rewards, old_values = buffer.get()
+        old_a_log_probs, old_b_log_probs = old_log_probs
         
         # Single-step advantages/returns
         advantages = (rewards - old_values).detach()
@@ -164,11 +164,12 @@ class A2SFPolicy(nn.Module):
         idx = torch.randperm(batch_size, device=states.device)
         states = states[idx]
         actions = (actions[0][idx], actions[1][idx])  # Unpack tuple, shuffle, repack
-        old_log_probs = old_log_probs[idx]
+        old_a_log_probs = old_a_log_probs[idx]
+        old_b_log_probs = old_b_log_probs[idx]
         rewards = rewards[idx]
         advantages = advantages[idx]
 
-        policy_losses, value_losses, entropies = [], [], []
+        policy_losses, policy_losses_a, policy_losses_b, value_losses, entropies = [], [], [], [], []
 
         for _ in range(config.update_epochs):
             for start in range(0, batch_size, config.minibatch_size):
@@ -176,19 +177,28 @@ class A2SFPolicy(nn.Module):
                 
                 state = states[start:end]
                 action = (actions[0][start:end], actions[1][start:end])  # Slice tuple
-                old_log_prob = old_log_probs[start:end]
+                old_a_log_prob = old_a_log_probs[start:end]
+                old_b_log_prob = old_b_log_probs[start:end]
                 reward = rewards[start:end]
                 advantage = advantages[start:end]
 
                 # Recompute under current policy
-                log_prob, value, entropy = self.log_prob_value(state, action)
+                (a_log_prob, b_log_prob), value, entropy = self.log_prob_value(state, action)
 
-                # PPO ratio
-                ratio = torch.exp(log_prob - old_log_prob)
+                # PPO ratios for a and b separately
+                ratio_a = torch.exp(a_log_prob - old_a_log_prob)
+                ratio_b = torch.exp(b_log_prob - old_b_log_prob)
                 
-                surr1 = ratio * advantage
-                surr2 = torch.clamp(ratio, 1.0 - config.ppo_clip, 1.0 + config.ppo_clip) * advantage
-                policy_loss = -torch.min(surr1, surr2).mean()
+                surr_a = torch.clamp(ratio_a, 1.0 - config.ppo_clip, 1.0 + config.ppo_clip)
+                surr_b = torch.clamp(ratio_b, 1.0 - config.ppo_clip, 1.0 + config.ppo_clip)
+                
+                surr_a_advantage = surr_a * advantage
+                surr_b_advantage = surr_b * advantage
+                
+                # Policy loss is sum of losses for a and b
+                policy_loss_a = -surr_a_advantage.mean()
+                policy_loss_b = -surr_b_advantage.mean()
+                policy_loss = policy_loss_a + policy_loss_b
 
                 # Value loss (MSE to returns)
                 value_loss = F.mse_loss(value, reward)
@@ -204,11 +214,15 @@ class A2SFPolicy(nn.Module):
                 optimizer.step()
 
                 policy_losses.append(policy_loss.item())
+                policy_losses_a.append(surr_a.mean().item())
+                policy_losses_b.append(surr_b.mean().item())
                 value_losses.append(value_loss.item())
                 entropies.append(entropy_bonus.item())
 
         return {
             "policy_loss": float(np.mean(policy_losses)),
+            "policy_loss_a": float(np.mean(policy_losses_a)),
+            "policy_loss_b": float(np.mean(policy_losses_b)),
             "value_loss": float(np.mean(value_losses)),
             "entropy": float(np.mean(entropies)),
         }
