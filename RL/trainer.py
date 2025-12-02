@@ -46,10 +46,10 @@ class A2SFTrainer:
         }
     
     def load_training_data(self) -> List[Dict[str, Any]]:
-        training_data_path = "datasets/training_data.json"
+        training_data_path = "datasets/training_data.jsonl"
         
-        with open(training_data_path, 'r', encoding='utf-8') as f:
-            training_data = json.load(f)
+        training_data = open(training_data_path, 'r', encoding='utf-8')
+        training_data = [json.loads(line) for line in training_data]
         
         # for data in training_data:
         #     data["input_prompt"] = self.model_runner.prepare_prompt(data["input_prompt"], data["dataset"])
@@ -76,7 +76,7 @@ class A2SFTrainer:
                 action, log_prob, value = self.policy.act(state)
                 
                 reward, info = self.env.step(action)
-                
+
                 self.buffer.add(state, action, log_prob, reward, value)
                 
                 a, b = action

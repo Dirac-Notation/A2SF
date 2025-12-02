@@ -9,11 +9,11 @@ from typing import Dict, Tuple
 EPS = 1e-6
 
 # a values: [0.0, 0.0001, 0.0005, 0.001, 0.01, 0.1]
-A_VALUES = torch.tensor([0.0, 0.0001, 0.0005, 0.001, 0.01, 0.1])
+A_VALUES = torch.tensor([0.0, 0.0001, 0.001, 0.01, 0.1, 1.0, 10.0])
 # A_VALUES = torch.tensor([10.0])
 # b values: [8192, 4096, 1024, 256, 64, 32, 16, 8, 4, 2, 1]
-# B_VALUES = torch.tensor([8192, 4096, 1024, 256, 64, 32, 16, 8, 4, 2, 1])
-B_VALUES = torch.tensor([16])
+B_VALUES = torch.tensor([1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192])
+# B_VALUES = torch.tensor([16])
 
 class A2SFPolicy(nn.Module):
     """
@@ -69,6 +69,7 @@ class A2SFPolicy(nn.Module):
         a_logits = self.a_head(h)  # (B, num_a_values)
         b_logits = self.b_head(h)  # (B, num_b_values)
         value = self.value_head(h)
+        value = nn.functional.sigmoid(value)
         return {"a_logits": a_logits, "b_logits": b_logits, "value": value}
 
     @torch.no_grad()
@@ -136,7 +137,7 @@ class A2SFPolicy(nn.Module):
         b_entropy = b_dist.entropy()
         
         # Combined entropy
-        entropy = a_entropy + b_entropy
+        entropy = (a_entropy + b_entropy)/2
 
         return (a_log_prob, b_log_prob), value, entropy
 
@@ -156,8 +157,14 @@ class A2SFPolicy(nn.Module):
         states, actions, old_log_probs, rewards, old_values = buffer.get()
         old_a_log_probs, old_b_log_probs = old_log_probs
         
-        # Single-step advantages/returns
-        advantages = (rewards - old_values).detach()
+        # Single-step: returns = rewards (no discounting)
+        returns = rewards.squeeze(-1)  # (N,)
+        
+        # Single-step advantages
+        advantages = (returns - old_values.squeeze(-1)).detach()
+        
+        # Normalize advantages for stability
+        advantages = (advantages - advantages.mean()) / (advantages.std() + EPS)
 
         # Shuffle
         batch_size = states.size(0)
@@ -166,7 +173,7 @@ class A2SFPolicy(nn.Module):
         actions = (actions[0][idx], actions[1][idx])  # Unpack tuple, shuffle, repack
         old_a_log_probs = old_a_log_probs[idx]
         old_b_log_probs = old_b_log_probs[idx]
-        rewards = rewards[idx]
+        returns = returns[idx]
         advantages = advantages[idx]
 
         policy_losses, policy_losses_a, policy_losses_b, value_losses, entropies = [], [], [], [], []
@@ -179,29 +186,31 @@ class A2SFPolicy(nn.Module):
                 action = (actions[0][start:end], actions[1][start:end])  # Slice tuple
                 old_a_log_prob = old_a_log_probs[start:end]
                 old_b_log_prob = old_b_log_probs[start:end]
-                reward = rewards[start:end]
+                return_batch = returns[start:end]
                 advantage = advantages[start:end]
 
                 # Recompute under current policy
                 (a_log_prob, b_log_prob), value, entropy = self.log_prob_value(state, action)
+                value = value.squeeze(-1)  # (B,)
 
                 # PPO ratios for a and b separately
                 ratio_a = torch.exp(a_log_prob - old_a_log_prob)
                 ratio_b = torch.exp(b_log_prob - old_b_log_prob)
                 
-                surr_a = torch.clamp(ratio_a, 1.0 - config.ppo_clip, 1.0 + config.ppo_clip)
-                surr_b = torch.clamp(ratio_b, 1.0 - config.ppo_clip, 1.0 + config.ppo_clip)
+                # PPO clipped objective: min(ratio * advantage, clip(ratio) * advantage)
+                surr_a = ratio_a * advantage
+                clipped_surr_a = torch.clamp(ratio_a, 1.0 - config.ppo_clip, 1.0 + config.ppo_clip) * advantage
+                policy_loss_a = -torch.min(surr_a, clipped_surr_a).mean()
                 
-                surr_a_advantage = surr_a * advantage
-                surr_b_advantage = surr_b * advantage
+                surr_b = ratio_b * advantage
+                clipped_surr_b = torch.clamp(ratio_b, 1.0 - config.ppo_clip, 1.0 + config.ppo_clip) * advantage
+                policy_loss_b = -torch.min(surr_b, clipped_surr_b).mean()
                 
                 # Policy loss is sum of losses for a and b
-                policy_loss_a = -surr_a_advantage.mean()
-                policy_loss_b = -surr_b_advantage.mean()
                 policy_loss = policy_loss_a + policy_loss_b
 
                 # Value loss (MSE to returns)
-                value_loss = F.mse_loss(value, reward)
+                value_loss = F.mse_loss(value, return_batch)
 
                 # Entropy bonus
                 entropy_bonus = entropy.mean()
@@ -214,8 +223,8 @@ class A2SFPolicy(nn.Module):
                 optimizer.step()
 
                 policy_losses.append(policy_loss.item())
-                policy_losses_a.append(surr_a.mean().item())
-                policy_losses_b.append(surr_b.mean().item())
+                policy_losses_a.append(policy_loss_a.item())
+                policy_losses_b.append(policy_loss_b.item())
                 value_losses.append(value_loss.item())
                 entropies.append(entropy_bonus.item())
 

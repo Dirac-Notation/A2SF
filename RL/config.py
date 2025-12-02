@@ -20,9 +20,9 @@ class A2SFRLConfig:
     max_grad_norm: float = 1.0
     
     # Training configuration
-    episodes_per_update: int = 128
+    episodes_per_update: int = 32
     update_epochs: int = 4
-    minibatch_size: int = 64
+    minibatch_size: int = 32
     
     # ----- Evaluation Configuration -----
     eval_frequency: int = 100
