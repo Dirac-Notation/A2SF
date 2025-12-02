@@ -103,7 +103,7 @@ class SigmoidCache(KVCache):
         if not self.prompt:
             self.prompt = True
             seq_len = query.size(2)
-            self.window = 1/(1+torch.exp(-self.a * (self.exponents - (seq_len - self.b))))
+            self.window = 1/(1+torch.exp(-self.a * (self.exponents - (seq_len - self.b - 0.5))))
             return self.prompt_flash_attention(query, key, value, attn_mask, head_dim, block_size)
         else:
             return super().flash_attention(query, key, value, attn_mask, head_dim, block_size)

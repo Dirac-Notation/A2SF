@@ -20,6 +20,7 @@ from tqdm import tqdm
 PROMPT_LENGTH = 7500
 TOTAL_BUDGET = 128
 GENERATION_LENGTH = int(TOTAL_BUDGET * 0.125)
+# GENERATION_LENGTH = 1
 
 def set_seed(seed):
     """Set random seed for reproducibility"""
@@ -93,7 +94,7 @@ def generate_answer(model, tokenizer, prompt: str, dataset: str, model_name: str
     for idx in range(GENERATION_LENGTH-1):
         out[:,:,:,:-(GENERATION_LENGTH-idx-1)] += attention_maps[idx]
     
-    selected_indices = out[:,:,:,:-GENERATION_LENGTH].topk(k=TOTAL_BUDGET, dim=3).indices.squeeze(2)
+    selected_indices = out[:,:,:,:-GENERATION_LENGTH].topk(k=TOTAL_BUDGET, dim=3).indices.squeeze(2).sort(dim=-1).values
     
     return prompt, selected_indices
 
@@ -124,10 +125,11 @@ def process_dataset(
     samples: List[Dict[str, Any]], 
     model, 
     tokenizer, 
-    model_name: str
-) -> List[Dict[str, Any]]:
-    """Process samples from a dataset to generate training data"""
-    training_data = []
+    model_name: str,
+    output_file_handle
+) -> int:
+    """Process samples from a dataset to generate training data and write to file"""
+    count = 0
     
     print(f"Processing {dataset_name}")
     
@@ -144,13 +146,16 @@ def process_dataset(
             "selected_indices": selected_indices.cpu().numpy().tolist(),  # Generated prediction
         }
         
-        training_data.append(training_sample)
+        # Write to file immediately (jsonl format: one JSON object per line)
+        output_file_handle.write(json.dumps(training_sample, ensure_ascii=False) + "\n")
+        output_file_handle.flush()  # Ensure data is written to disk
+        count += 1
     
-    return training_data
+    return count
 
 def main():
     parser = argparse.ArgumentParser(description="Generate training data from LongBench datasets")
-    parser.add_argument("--output_file", type=str, default="/root/A2SF/datasets/training_data.json", help="Output file for training data")
+    parser.add_argument("--output_file", type=str, default="/root/A2SF/datasets/training_data.jsonl", help="Output file for training data")
     parser.add_argument("--num_samples_per_dataset", type=int, default=10,help="Number of samples per dataset")
     parser.add_argument("--seed", type=int, default=42,help="Random seed")
     parser.add_argument("--gpus", type=int, nargs='+', default=[0], help="List of GPU IDs (e.g., --gpus 0 1 2 3)")
@@ -170,44 +175,39 @@ def main():
     dataset_names = [dataset_name.replace(".jsonl", "") for dataset_name in dataset_names]
     print(f"Processing {len(dataset_names)} datasets: {dataset_names}")
     
-    all_training_data = []
-    
-    for dataset_name in dataset_names:
-        print(f"\n{'='*50}")
-        print(f"Processing dataset: {dataset_name}")
-        print(f"{'='*50}")
-        
-        # Load dataset samples
-        samples = load_longbench_dataset(dataset_name, args.num_samples_per_dataset)
-        
-        if not samples:
-            print(f"No samples loaded for {dataset_name}, skipping...")
-            continue
-        
-        # Process samples
-        training_data = process_dataset(dataset_name, samples, model, tokenizer, model_name)
-        
-        all_training_data.extend(training_data)
-        print(f"Generated {len(training_data)} training samples for {dataset_name}")
-    
-    # Save training data
-    print(f"\n{'='*50}")
-    print(f"Saving {len(all_training_data)} total training samples to {args.output_file}")
-    print(f"{'='*50}")
-    
+    # Create output directory if needed
     os.makedirs(os.path.dirname(args.output_file), exist_ok=True)
+    
+    # Open output file for writing (jsonl format: one JSON object per line)
+    total_samples = 0
+    dataset_counts = {}
+    
     with open(args.output_file, 'w', encoding='utf-8') as f:
-        json.dump(all_training_data, f, indent=2, ensure_ascii=False)
+        for dataset_name in dataset_names:
+            print(f"\n{'='*50}")
+            print(f"Processing dataset: {dataset_name}")
+            print(f"{'='*50}")
+            
+            # Load dataset samples
+            samples = load_longbench_dataset(dataset_name, args.num_samples_per_dataset)
+            
+            if not samples:
+                print(f"No samples loaded for {dataset_name}, skipping...")
+                continue
+            
+            # Process samples and write to file immediately
+            count = process_dataset(dataset_name, samples, model, tokenizer, model_name, f)
+            
+            dataset_counts[dataset_name] = count
+            total_samples += count
+            print(f"Generated {count} training samples for {dataset_name}")
     
     # Print summary
-    print(f"\nTraining data generation complete!")
-    print(f"Total samples: {len(all_training_data)}")
-    
-    # Count by dataset
-    dataset_counts = {}
-    for sample in all_training_data:
-        dataset = sample["dataset"]
-        dataset_counts[dataset] = dataset_counts.get(dataset, 0) + 1
+    print(f"\n{'='*50}")
+    print(f"Training data generation complete!")
+    print(f"Total samples: {total_samples}")
+    print(f"Saved to: {args.output_file}")
+    print(f"{'='*50}")
     
     print(f"\nSamples per dataset:")
     for dataset, count in sorted(dataset_counts.items()):
