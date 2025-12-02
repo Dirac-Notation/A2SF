@@ -8,7 +8,7 @@ import sys
 # Add the current directory to the path for imports
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from utils import load_configs, load_model, set_seed
+from utils import load_model, set_seed
 from RL.config import A2SFRLConfig
 from RL.policy import A2SFPolicy
 from RL.features import ContextEncoder
@@ -17,9 +17,7 @@ def parse_args(args=None):
     parser = argparse.ArgumentParser(description="LongBench evaluation with RL-trained A2SF model")
     parser.add_argument('--gpus', type=int, nargs='+', default=[0], help="List of GPU IDs (e.g., --gpus 0 1 2 3)")
     parser.add_argument('--model', type=str, required=True, choices=["llama", "llama2", "llama3", "opt"])
-    parser.add_argument('--method', type=str, default="full")
     parser.add_argument('--budget', type=int, default=100)
-    parser.add_argument('--config_file', type=str, required=True)
     parser.add_argument('--task', type=str, nargs='+', required=True, 
                        choices=["Code Complete", "Few Shot", "Single-doc QA", "Multi-doc QA", "Passage Retrieval", "Summarization"])
     parser.add_argument('--rl_checkpoint', type=str, required=True, 
@@ -221,8 +219,6 @@ if __name__ == '__main__':
         os.makedirs("result_txt/pred")
     
     for task in args.task:
-        config = load_configs(args.config_file, args.method, args.budget, task)
-        
         datasets = data_group[task]
         
         for dataset in datasets:
@@ -235,7 +231,7 @@ if __name__ == '__main__':
             data = load_jsonl_file(jsonl_path)
             
             # Create output directory with RL indicator
-            output_dir = f"result_txt/pred/{args.model}_{args.method}_{args.budget}_RL"
+            output_dir = f"result_txt/pred/{args.model}_sigmoid_{args.budget}_RL"
             if not os.path.exists(output_dir):
                 os.makedirs(output_dir)
             out_path = f"{output_dir}/{dataset}.jsonl"
@@ -248,4 +244,4 @@ if __name__ == '__main__':
             print(f"Completed {dataset} with RL policy")
     
     print("\nRL LongBench evaluation completed!")
-    print(f"Results saved in: result_txt/pred/{args.model}_{args.method}_{args.budget}_RL/")
+    print(f"Results saved in: result_txt/pred/{args.model}_sigmoid_{args.budget}_RL/")
