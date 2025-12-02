@@ -80,7 +80,7 @@ def load_rl_policy(checkpoint_path, device):
     return policy, context_encoder, config
 
 def get_rl_action(policy, context_encoder, prompt, dataset, model_name, device):
-    """Get RL action (forgetting factor) for given prompt"""
+    """Get RL action (a, b) for sigmoid cache from given prompt"""
     # Encode context
     context_embedding = context_encoder.encode_context(prompt)
     
@@ -91,16 +91,20 @@ def get_rl_action(policy, context_encoder, prompt, dataset, model_name, device):
     with torch.no_grad():
         action, _, _ = policy.act(state)
     
-    return action.item()
+    # action is a tuple of (a, b) tensors
+    a = action[0].item() if isinstance(action[0], torch.Tensor) else action[0]
+    b = action[1].item() if isinstance(action[1], torch.Tensor) else action[1]
+    
+    return a, b
 
 def get_pred_rl(data, max_length, max_gen, dataset, model, tokenizer, out_path, model_name, 
-                rl_policy, context_encoder, rl_config, device):
+                rl_policy, context_encoder, rl_config, device, budget):
     """Generate predictions using RL-determined compression parameters"""
     for json_obj in tqdm(data):
         prompt = json_obj["input_prompt"]
 
-        # Get RL action (forgetting factor) for this prompt
-        forgetting_factor = get_rl_action(
+        # Get RL action (a, b) for sigmoid cache from this prompt
+        a, b = get_rl_action(
             rl_policy, context_encoder, prompt, dataset, model_name, device
         )
 
@@ -122,14 +126,18 @@ def get_pred_rl(data, max_length, max_gen, dataset, model, tokenizer, out_path, 
         
         context_length = input_ids.shape[-1]
         
-        # Create compression config with RL-determined forgetting factor
+        # Get number of layers from model config
+        num_layers = model.config.num_hidden_layers
+        
+        # Create compression config with RL-determined sigmoid parameters (a, b)
         from utils import CompressionConfig
         config = CompressionConfig()
-        config.compression_method = "a2sf"
-        config.total_budget = 512
-        config.layerwise_ratios = [1.0 for i in range(32)]
+        config.compression_method = "sigmoid"
+        config.total_budget = budget
+        config.layerwise_ratios = [1.0 for i in range(num_layers)]
         config.local_ratios = 0.125
-        config.forgetting_factors = [forgetting_factor for i in range(32)]
+        config.a = a
+        config.b = b
         
         model.init_cache(config)
         
@@ -159,14 +167,15 @@ def get_pred_rl(data, max_length, max_gen, dataset, model, tokenizer, out_path, 
         
         pred = tokenizer.decode(output[context_length:], skip_special_tokens=True)
         
-        # Save prediction with RL forgetting factor
+        # Save prediction with RL sigmoid parameters
         with open(out_path, "a", encoding="utf-8") as f:
             json.dump({
                 "pred": pred, 
                 "answers": json_obj["answers"], 
                 "all_classes": json_obj["all_classes"], 
                 "length": json_obj["length"],
-                "forgetting_factor": forgetting_factor  # Add RL forgetting factor to output
+                "a": a,  # Add RL sigmoid parameter a to output
+                "b": b   # Add RL sigmoid parameter b to output
             }, f, ensure_ascii=False)
             f.write('\n')
 
@@ -234,7 +243,7 @@ if __name__ == '__main__':
             max_gen = dataset2maxlen[dataset]
             
             get_pred_rl(data, max_length, max_gen, dataset, model, tokenizer, out_path, 
-                       model_name, rl_policy, context_encoder, rl_config, device)
+                       model_name, rl_policy, context_encoder, rl_config, device, args.budget)
             
             print(f"Completed {dataset} with RL policy")
     
