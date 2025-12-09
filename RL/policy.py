@@ -65,7 +65,7 @@ class A2SFPolicy(nn.Module):
         
         # Transform to positive values for Beta distribution parameters
         # Using softplus + 1 to ensure alpha, beta >= 1 (for numerical stability)
-        a_params = F.softplus(a_params_raw) + 1.0  # (B, 2): [alpha_a, beta_a]
+        a_params = F.relu(a_params_raw) + 1.0  # (B, 2): [alpha_a, beta_a]
         
         value = self.value_head(h)
         value = nn.functional.sigmoid(value)
