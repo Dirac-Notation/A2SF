@@ -8,30 +8,22 @@ from typing import Dict, Tuple
 
 EPS = 1e-6
 
-# a values: [0.0, 0.0001, 0.0005, 0.001, 0.01, 0.1]
-A_VALUES = torch.tensor([0.0, 0.0001, 0.001, 0.01, 0.1, 1.0, 10.0])
-# A_VALUES = torch.tensor([10.0])
-# b values: [8192, 4096, 1024, 256, 64, 32, 16, 8, 4, 2, 1]
-B_VALUES = torch.tensor([1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192])
-# B_VALUES = torch.tensor([16])
+# b values: discrete set for b parameter
+B_VALUES = torch.tensor([1, 2, 4, 6, 8, 12, 16, 20, 32, 48, 64, 96, 128, 512, 1024, 2048, 4096, 8192])
 
 class A2SFPolicy(nn.Module):
     """
     Policy network for A2SF RL agent (single-step / bandit) with sigmoid cache
-    - a: discrete action from [0.0, 0.0001, 0.0005, 0.001, 0.01, 0.1]
-    - b: discrete action from [8192, 4096, 1024, 256, 64, 32, 16, 8, 4, 2, 1]
+    - a: continuous action in [0, 10] using Beta distribution (0~1 * 10)
+    - b: discrete action from predefined set using Categorical distribution
     - Value head as baseline
     """
 
     def __init__(self, state_dim: int, a_values: torch.Tensor = None, b_values: torch.Tensor = None):
         super().__init__()
-        if a_values is None:
-            a_values = A_VALUES
         if b_values is None:
             b_values = B_VALUES
-        self.register_buffer('a_values', a_values)
         self.register_buffer('b_values', b_values)
-        self.num_a_values = len(a_values)
         self.num_b_values = len(b_values)
 
         # Backbone
@@ -41,10 +33,10 @@ class A2SFPolicy(nn.Module):
         )
 
         # Policy heads
-        # a: discrete (Categorical over 6 values)
-        self.a_head = nn.Linear(512, self.num_a_values)
+        # a: Beta(alpha_a, beta_a) -> outputs in [0, 1] then * 10 -> [0, 10]
+        self.a_head = nn.Linear(512, 2)
         
-        # b: discrete (Categorical over 11 values)
+        # b: discrete (Categorical over b_values)
         self.b_head = nn.Linear(512, self.num_b_values)
 
         # Value head
@@ -63,36 +55,50 @@ class A2SFPolicy(nn.Module):
         Args:
             state: (B, state_dim) or (state_dim,)
         Returns:
-            dict with a_logits, b_logits, value
+            dict with a_params, b_logits, value
+            a_params: (B, 2) - [alpha_a, beta_a]
+            b_logits: (B, num_b_values) - logits for Categorical distribution
         """
         h = self.backbone(state)
-        a_logits = self.a_head(h)  # (B, num_a_values)
+        a_params_raw = self.a_head(h)  # (B, 2)
         b_logits = self.b_head(h)  # (B, num_b_values)
+        
+        # Transform to positive values for Beta distribution parameters
+        # Using softplus + 1 to ensure alpha, beta >= 1 (for numerical stability)
+        a_params = F.softplus(a_params_raw) + 1.0  # (B, 2): [alpha_a, beta_a]
+        
         value = self.value_head(h)
         value = nn.functional.sigmoid(value)
-        return {"a_logits": a_logits, "b_logits": b_logits, "value": value}
+        return {"a_params": a_params, "b_logits": b_logits, "value": value}
 
     @torch.no_grad()
     def act(self, state: torch.Tensor) -> Tuple[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
         """
         Sample action (single-step)
         Returns:
-            action: tuple of (a, b) where both are discrete values
+            action: tuple of (a, b) where a is in [0, 10] and b is from discrete set
             log_prob: tuple of (a_log_prob, b_log_prob)
             value: state value
         """
         out = self.forward(state)
-        a_logits = out["a_logits"]
-        b_logits = out["b_logits"]
+        a_params = out["a_params"]  # (B, 2): [alpha_a, beta_a]
+        b_logits = out["b_logits"]  # (B, num_b_values)
         value = out["value"]
 
-        # Sample a (discrete)
-        a_dist = torch.distributions.Categorical(logits=a_logits)
-        a_idx = a_dist.sample()  # (B,)
-        a = self.a_values[a_idx]  # (B,)
-        a_log_prob = a_dist.log_prob(a_idx)  # (B,)
+        if a_params.ndim == 1:
+            a_params = a_params.unsqueeze(0)
+        if b_logits.ndim == 1:
+            b_logits = b_logits.unsqueeze(0)
+
+        # Sample a from Beta distribution, then scale to [0, 10]
+        alpha_a = a_params[:, 0]  # (B,)
+        beta_a = a_params[:, 1]    # (B,)
+        a_dist = torch.distributions.Beta(alpha_a, beta_a)
+        a_normalized = a_dist.sample()  # (B,) in [0, 1]
+        a = a_normalized * 10.0  # (B,) in [0, 10]
+        a_log_prob = a_dist.log_prob(a_normalized)  # (B,)
         
-        # Sample b (discrete)
+        # Sample b from Categorical distribution
         b_dist = torch.distributions.Categorical(logits=b_logits)
         b_idx = b_dist.sample()  # (B,)
         b = self.b_values[b_idx]  # (B,)
@@ -106,7 +112,7 @@ class A2SFPolicy(nn.Module):
         """
         Args:
             state: (B, state_dim) or (state_dim,)
-            action: tuple of (a, b) where both are discrete values
+            action: tuple of (a, b) where a is in [0, 10] and b is from discrete set
         Returns:
             log_prob: tuple of (a_log_prob, b_log_prob)
             value, entropy
@@ -114,30 +120,32 @@ class A2SFPolicy(nn.Module):
         a, b = action
 
         out = self.forward(state)
-        a_logits = out["a_logits"]
-        b_logits = out["b_logits"]
+        a_params = out["a_params"]  # (B, 2): [alpha_a, beta_a]
+        b_logits = out["b_logits"]  # (B, num_b_values)
         value = out["value"]
         
-        # Find closest a value index
-        a_values_expanded = self.a_values.unsqueeze(0)  # (1, num_a_values)
-        a_idx = torch.argmin(torch.abs(a.unsqueeze(-1) - a_values_expanded), dim=-1)  # (B,)
+        # Normalize a from [0, 10] to [0, 1] for Beta distribution
+        a_normalized = a / 10.0
+        a_normalized = torch.clamp(a_normalized, EPS, 1.0 - EPS)
+        
+        # Compute log prob for a using Beta distribution
+        alpha_a = a_params[:, 0]  # (B,)
+        beta_a = a_params[:, 1]    # (B,)
+        a_dist = torch.distributions.Beta(alpha_a, beta_a)
+        a_log_prob = a_dist.log_prob(a_normalized)  # (B,)
+        a_entropy = a_dist.entropy()     # (B,)
         
         # Find closest b value index
         b_values_expanded = self.b_values.unsqueeze(0)  # (1, num_b_values)
         b_idx = torch.argmin(torch.abs(b.unsqueeze(-1) - b_values_expanded), dim=-1)  # (B,)
         
-        # Compute log prob for a
-        a_dist = torch.distributions.Categorical(logits=a_logits)
-        a_log_prob = a_dist.log_prob(a_idx)
-        a_entropy = a_dist.entropy()
-        
-        # Compute log prob for b
+        # Compute log prob for b using Categorical distribution
         b_dist = torch.distributions.Categorical(logits=b_logits)
-        b_log_prob = b_dist.log_prob(b_idx)
-        b_entropy = b_dist.entropy()
+        b_log_prob = b_dist.log_prob(b_idx)  # (B,)
+        b_entropy = b_dist.entropy()     # (B,)
         
         # Combined entropy
-        entropy = (a_entropy + b_entropy)/2
+        entropy = (a_entropy + b_entropy) / 2
 
         return (a_log_prob, b_log_prob), value, entropy
 

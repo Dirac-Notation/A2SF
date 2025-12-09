@@ -15,12 +15,10 @@ from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import numpy as np
 
-from tqdm import tqdm
-
 PROMPT_LENGTH = 7500
 TOTAL_BUDGET = 128
-GENERATION_LENGTH = int(TOTAL_BUDGET * 0.125)
-# GENERATION_LENGTH = 1
+GENERATION_LENGTHS = [128]  # Multiple generation lengths to include in dataset
+MAX_GENERATION_LENGTH = max(GENERATION_LENGTHS)  # 256
 
 def set_seed(seed):
     """Set random seed for reproducibility"""
@@ -61,8 +59,10 @@ def load_model_for_generation(model_name, gpu_list=None):
 def logits_to_tokens(logits):
     return torch.argmax(logits[:, -1, :], dim=-1).unsqueeze(-1)
 
-def generate_answer(model, tokenizer, prompt: str, dataset: str, model_name: str) -> str:
-    """Generate answer using model following longbench_pred.py approach"""
+def generate_answer(model, tokenizer, prompt: str, dataset: str, model_name: str) -> tuple:
+    """Generate answer using model following longbench_pred.py approach.
+    Returns prompt and a dictionary mapping generation_length to selected_indices.
+    """
     # Tokenize prompt without truncation first
     tokenized_prompt = tokenizer(prompt, truncation=False, return_tensors="pt").input_ids[0]
     
@@ -81,22 +81,27 @@ def generate_answer(model, tokenizer, prompt: str, dataset: str, model_name: str
     input_ids = input.input_ids.to(model.device)
     
     attention_maps = []
-    # Generate following longbench_pred.py approach (deterministic)
+    # Generate up to MAX_GENERATION_LENGTH following longbench_pred.py approach (deterministic)
     with torch.no_grad():
         input_ids = input_ids.to(model.device)
         outputs = model(input_ids)
         input_ids = logits_to_tokens(outputs.logits)
-        for _ in range(GENERATION_LENGTH):
+        for _ in range(MAX_GENERATION_LENGTH):
             outputs = model(input_ids, past_key_values=outputs.past_key_values, output_attentions=True)
             attention_maps.append(torch.stack([attention.cpu().squeeze(0) for attention in outputs.attentions], dim=0))
     
-    out = attention_maps[-1]
-    for idx in range(GENERATION_LENGTH-1):
-        out[:,:,:,:-(GENERATION_LENGTH-idx-1)] += attention_maps[idx]
+    # Compute selected_indices for each generation_length
+    results = {}
+    for gen_len in GENERATION_LENGTHS:
+        # Use only the first gen_len attention maps
+        out = attention_maps[gen_len - 1].clone()
+        for idx in range(gen_len - 1):
+            out[:,:,:,:-(gen_len-idx-1)] += attention_maps[idx]
+        
+        selected_indices = out[:,:,:,:-gen_len].topk(k=TOTAL_BUDGET, dim=3).indices.squeeze(2).sort(dim=-1).values
+        results[gen_len] = selected_indices
     
-    selected_indices = out[:,:,:,:-GENERATION_LENGTH].topk(k=TOTAL_BUDGET, dim=3).indices.squeeze(2).sort(dim=-1).values
-    
-    return prompt, selected_indices
+    return prompt, results
 
 def load_longbench_dataset(dataset_name: str, num_samples: int = 10) -> List[Dict[str, Any]]:
     """Load samples from existing LongBench dataset files"""
@@ -128,7 +133,9 @@ def process_dataset(
     model_name: str,
     output_file_handle
 ) -> int:
-    """Process samples from a dataset to generate training data and write to file"""
+    """Process samples from a dataset to generate training data and write to file.
+    Creates multiple training samples per input sample, one for each generation_length.
+    """
     count = 0
     
     print(f"Processing {dataset_name}")
@@ -136,20 +143,25 @@ def process_dataset(
     for i, sample in enumerate(tqdm(samples, desc=f"Processing {dataset_name}")):
         prompt = sample["input_prompt"]
         
-        # Generate answer using model
-        prompt, selected_indices = generate_answer(model, tokenizer, prompt, dataset_name, model_name)
+        # Generate answer using model - returns prompt and dict of {gen_len: selected_indices}
+        prompt, selected_indices_dict = generate_answer(model, tokenizer, prompt, dataset_name, model_name)
         
-        # Create training sample following longbench_pred.py output format
-        training_sample = {
-            "dataset": dataset_name,
-            "input_prompt": prompt,
-            "selected_indices": selected_indices.cpu().numpy().tolist(),  # Generated prediction
-        }
-        
-        # Write to file immediately (jsonl format: one JSON object per line)
-        output_file_handle.write(json.dumps(training_sample, ensure_ascii=False) + "\n")
-        output_file_handle.flush()  # Ensure data is written to disk
-        count += 1
+        # Create training sample for each generation_length
+        for gen_len in GENERATION_LENGTHS:
+            selected_indices = selected_indices_dict[gen_len]
+            
+            # Create training sample following longbench_pred.py output format
+            training_sample = {
+                "dataset": dataset_name,
+                "input_prompt": prompt,
+                "selected_indices": selected_indices.cpu().numpy().tolist(),  # Generated prediction
+                "generation_length": gen_len,  # Store generation length for reference
+            }
+            
+            # Write to file immediately (jsonl format: one JSON object per line)
+            output_file_handle.write(json.dumps(training_sample, ensure_ascii=False) + "\n")
+            output_file_handle.flush()  # Ensure data is written to disk
+            count += 1
     
     return count
 
