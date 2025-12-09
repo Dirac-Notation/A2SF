@@ -27,8 +27,9 @@ def parse_args():
     # PPO Hyperparameters
     parser.add_argument('--ppo_clip', type=float, default=0.2, help="PPO clip parameter")
     parser.add_argument('--lr', type=float, default=3e-4, help="Learning rate")
+    
     parser.add_argument('--value_coef', type=float, default=0.5, help="Value loss coefficient")
-    parser.add_argument('--entropy_coef', type=float, default=0.05, help="Entropy coefficient")
+    parser.add_argument('--entropy_coef', type=float, default=0.07, help="Entropy coefficient")
     parser.add_argument('--max_grad_norm', type=float, default=1.0, help="Maximum gradient norm for clipping")
     
     # Training configuration
