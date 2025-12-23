@@ -17,16 +17,16 @@ def parse_args(args=None):
 
 def get_predefined_prompts():
     prompts = [
-        "Explain the concept of machine learning in simple terms so that even someone without any technical background can intuitively understand how computers learn patterns from data.",
-        "Describe in detail the main differences between supervised and unsupervised learning, including how they use labeled data, what goals they aim for, and in what situations each approach is typically applied.",
-        "Provide a clear and step-by-step explanation of the process of training a neural network, from initializing weights to performing forward and backward propagation and updating parameters.",
-        "Explain the importance of data preprocessing in machine learning, describing why tasks such as cleaning, normalization, and feature scaling significantly influence model performance.",
-        "Explain the concept of overfitting in machine learning and describe several practical strategies to prevent it, including regularization, dropout, and data augmentation.",
-        "Describe the major advantages and disadvantages of deep learning, focusing on its ability to learn complex patterns while also requiring large datasets and high computational resources.",
-        "Explain the role of activation functions in neural networks and discuss why nonlinearity is essential for enabling models to learn complex relationships in data.",
-        "Describe what gradient descent is and explain in detail how it iteratively updates model parameters to minimize the loss function during training.",
-        "Explain the concept of regularization in machine learning and illustrate how techniques like L1, L2, and dropout help reduce overfitting and improve generalization.",
-        "Describe the key components of a typical machine learning pipeline, including data collection, preprocessing, modeling, evaluation, and deployment stages."
+        16*"Explain the concept of machine learning in simple terms so that even someone without any technical background can intuitively understand how computers learn patterns from data.",
+        16*"Describe in detail the main differences between supervised and unsupervised learning, including how they use labeled data, what goals they aim for, and in what situations each approach is typically applied.",
+        16*"Provide a clear and step-by-step explanation of the process of training a neural network, from initializing weights to performing forward and backward propagation and updating parameters.",
+        16*"Explain the importance of data preprocessing in machine learning, describing why tasks such as cleaning, normalization, and feature scaling significantly influence model performance.",
+        16*"Explain the concept of overfitting in machine learning and describe several practical strategies to prevent it, including regularization, dropout, and data augmentation.",
+        16*"Describe the major advantages and disadvantages of deep learning, focusing on its ability to learn complex patterns while also requiring large datasets and high computational resources.",
+        16*"Explain the role of activation functions in neural networks and discuss why nonlinearity is essential for enabling models to learn complex relationships in data.",
+        16*"Describe what gradient descent is and explain in detail how it iteratively updates model parameters to minimize the loss function during training.",
+        16*"Explain the concept of regularization in machine learning and illustrate how techniques like L1, L2, and dropout help reduce overfitting and improve generalization.",
+        16*"Describe the key components of a typical machine learning pipeline, including data collection, preprocessing, modeling, evaluation, and deployment stages."
     ]
     return prompts
 
