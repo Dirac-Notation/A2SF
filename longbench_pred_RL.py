@@ -18,14 +18,10 @@ def parse_args(args=None):
     parser.add_argument('--gpus', type=int, nargs='+', default=[0], help="List of GPU IDs (e.g., --gpus 0 1 2 3)")
     parser.add_argument('--model', type=str, required=True, choices=["llama", "llama2", "llama3", "opt"])
     parser.add_argument('--budget', type=int, default=100)
-    parser.add_argument('--task', type=str, nargs='+', required=True, 
-                       choices=["Code Complete", "Few Shot", "Single-doc QA", "Multi-doc QA", "Passage Retrieval", "Summarization"])
-    parser.add_argument('--rl_checkpoint', type=str, required=True, 
-                       help="Path to RL model checkpoint (.pt file)")
-    parser.add_argument('--sentence_transformer_model', type=str, default="all-MiniLM-L6-v2",
-                       help="Sentence transformer model for context encoding")
-    parser.add_argument('--context_window', type=int, default=64,
-                       help="Context window size for RL state encoding")
+    parser.add_argument('--task', type=int, nargs='*', default=None, help="List of task numbers (0-5). If not specified, all tasks will be executed. 0: Code Complete, 1: Few Shot, 2: Single-doc QA, 3: Multi-doc QA, 4: Passage Retrieval, 5: Summarization")
+    parser.add_argument('--rl_checkpoint', type=str, required=True, help="Path to RL model checkpoint (.pt file)")
+    parser.add_argument('--sentence_transformer_model', type=str, default="all-MiniLM-L6-v2",help="Sentence transformer model for context encoding")
+    parser.add_argument('--context_window', type=int, default=64, help="Context window size for RL state encoding")
     return parser.parse_args(args)
 
 def load_jsonl_file(file_path):
@@ -204,6 +200,16 @@ if __name__ == '__main__':
     print(f"RL Policy loaded successfully")
     print(f"Config: {rl_config}")
 
+    # Task 이름 리스트 (번호로 접근하기 위해 명시적으로 정의)
+    task_list = [
+        "Code Complete",
+        "Few Shot",
+        "Single-doc QA",
+        "Multi-doc QA",
+        "Passage Retrieval",
+        "Summarization",
+    ]
+    
     data_group = {
         "Code Complete": ["repobench-p", "lcc"],
         "Few Shot": ["trec", "triviaqa", "samsum"],
@@ -213,12 +219,25 @@ if __name__ == '__main__':
         "Passage Retrieval": ["passage_retrieval_en", "passage_count"],
     }
     
+    # Task 번호를 task 이름으로 변환
+    if args.task is None:
+        # 기본값: 전체 task 실행
+        selected_tasks = task_list
+    else:
+        # 번호로 선택된 task들
+        selected_tasks = []
+        for task_num in args.task:
+            if 0 <= task_num < len(task_list):
+                selected_tasks.append(task_list[task_num])
+            else:
+                print(f"Warning: Task number {task_num} is out of range (0-{len(task_list)-1}), skipping")
+    
     dataset2maxlen = json.load(open("config/dataset2maxlen.json", "r"))
     
     if not os.path.exists("result_txt/pred"):
         os.makedirs("result_txt/pred")
     
-    for task in args.task:
+    for task in selected_tasks:
         datasets = data_group[task]
         
         for dataset in datasets:
