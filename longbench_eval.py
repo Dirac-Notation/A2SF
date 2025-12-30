@@ -138,5 +138,6 @@ if __name__ == '__main__':
             if group_name == "overall average":
                 print("-" * 50)
             print(f"{group_name:20}: {avg_score:.2f}")
+        print(f"\n{'Overall Average':20}: {overall_avg:.2f}")
         
         print(f"\nResults have been saved to: {out_path}")
