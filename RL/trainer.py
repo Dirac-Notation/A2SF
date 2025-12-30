@@ -111,14 +111,12 @@ class A2SFTrainer:
 
             with torch.no_grad():
                 out = self.policy(state)
-                a_params = out["a_params"]  # (B, 2): [alpha_a, beta_a]
+                a_logits = out["a_logits"]  # (B, num_a_values)
                 b_logits = out["b_logits"]  # (B, num_b_values)
                 
-                # For a: use mode of Beta distribution, then scale to [0, 10]
-                alpha_a = a_params[:, 0]
-                beta_a = a_params[:, 1]
-                a_normalized = (alpha_a - 1) / (alpha_a + beta_a - 2)  # mode in [0, 1]
-                a = a_normalized * 10.0  # scale to [0, 10]
+                # For a: use mode (most likely value from Categorical)
+                a_idx = torch.argmax(a_logits, dim=-1)
+                a = self.policy.a_values[a_idx]
                 
                 # For b: use mode (most likely value from Categorical)
                 b_idx = torch.argmax(b_logits, dim=-1)

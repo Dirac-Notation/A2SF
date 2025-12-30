@@ -11,8 +11,9 @@ import numpy as np
 
 PROMPT_LENGTH = 7500
 TOTAL_BUDGET = 128
-GENERATION_LENGTHS = [128]
-MAX_GENERATION_LENGTH = max(GENERATION_LENGTHS)
+GENERATION_LENGTHS = 128
+LOCAL_WINDOW = int(TOTAL_BUDGET * 0.125)
+SELECT_BUDGET = TOTAL_BUDGET - LOCAL_WINDOW
 
 def set_seed(seed):
     torch.manual_seed(seed)
@@ -65,20 +66,16 @@ def generate_answer(model, tokenizer, prompt: str, dataset: str, model_name: str
         input_ids = input_ids.to(model.device)
         outputs = model(input_ids)
         input_ids = logits_to_tokens(outputs.logits)
-        for _ in range(MAX_GENERATION_LENGTH):
+        for _ in range(GENERATION_LENGTHS):
             outputs = model(input_ids, past_key_values=outputs.past_key_values, output_attentions=True)
             attention_maps.append(torch.stack([attention.cpu().squeeze(0) for attention in outputs.attentions], dim=0))
     
-    results = {}
-    for gen_len in GENERATION_LENGTHS:
-        out = attention_maps[gen_len - 1].clone()
-        for idx in range(gen_len - 1):
-            out[:,:,:,:-(gen_len-idx-1)] += attention_maps[idx]
-        
-        selected_indices = out[:,:,:,:-gen_len].topk(k=TOTAL_BUDGET, dim=3).indices.squeeze(2)
-        results[gen_len] = selected_indices
+    out = attention_maps[-1].clone()
+    for idx in range(GENERATION_LENGTHS-1):
+        out[:,:,:,:-GENERATION_LENGTHS+1+idx] += attention_maps[idx]
+    selected_indices = out[:,:,:,:-GENERATION_LENGTHS-LOCAL_WINDOW].topk(k=SELECT_BUDGET, dim=3).indices.squeeze(2)
     
-    return prompt, results
+    return prompt, selected_indices
 
 def load_longbench_dataset(dataset_name: str, num_samples: int = 10) -> List[Dict[str, Any]]:
     dataset_path = f"./datasets/longbench/{dataset_name}.jsonl"
@@ -112,22 +109,18 @@ def process_dataset(
     
     for i, sample in enumerate(tqdm(samples, desc=f"Processing {dataset_name}")):
         prompt = sample["input_prompt"]
-        prompt, selected_indices_dict = generate_answer(model, tokenizer, prompt, dataset_name, model_name)
+        prompt, selected_indices = generate_answer(model, tokenizer, prompt, dataset_name, model_name)
         
-        for gen_len in GENERATION_LENGTHS:
-            selected_indices = selected_indices_dict[gen_len]
-            
-            training_sample = {
-                "dataset": dataset_name,
-                "input_prompt": prompt,
-                "selected_indices": selected_indices.cpu().numpy().tolist(),
-                "generation_length": gen_len,
-            }
-            
-            # separators 옵션을 추가하여 공백 없이 한 줄로 저장
-            output_file_handle.write(json.dumps(training_sample, ensure_ascii=False, separators=(',', ':')) + "\n")
-            output_file_handle.flush()
-            count += 1
+        training_sample = {
+            "dataset": dataset_name,
+            "input_prompt": prompt,
+            "selected_indices": selected_indices.cpu().numpy().tolist(),
+        }
+        
+        # separators 옵션을 추가하여 공백 없이 한 줄로 저장
+        output_file_handle.write(json.dumps(training_sample, ensure_ascii=False, separators=(',', ':')) + "\n")
+        output_file_handle.flush()
+        count += 1
     
     return count
 

@@ -25,7 +25,7 @@ class SigmoidCache(KVCache):
         
     def select(self, scores):
         # Select tokens to keep (common logic)
-        selected_indices = scores[:,:,:-self.recent_budget].topk(self.select_budget, dim=-1).indices.sort().values
+        selected_indices = scores[:,:,:-self.recent_budget].topk(self.select_budget, dim=-1).indices
         self.selected_indices = selected_indices
         
         # Update key-value cache
