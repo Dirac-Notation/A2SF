@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from typing import List
+import torch
 
 @dataclass
 class A2SFRLConfig:
@@ -9,8 +10,12 @@ class A2SFRLConfig:
     
     # ----- Context Features -----
     sentence_transformer_model: str = "all-MiniLM-L6-v2"
-    context_window: int = 64
-    max_context: int = 128
+    context_window: int = 32
+    max_context: int = 256
+    
+    # ----- Policy Action Spaces -----
+    a_values: torch.Tensor = field(default_factory=lambda: torch.tensor([0.0, 0.001, 0.01, 0.1, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]))
+    b_values: torch.Tensor = field(default_factory=lambda: torch.tensor([1, 2, 4, 8, 16, 32, 64, 128, 512, 1024, 4096, 8192]))
     
     # ----- PPO Hyperparameters -----
     ppo_clip: float = 0.2
@@ -27,6 +32,7 @@ class A2SFRLConfig:
     # ----- Evaluation Configuration -----
     eval_frequency: int = 100
     eval_samples: int = 50
+    rbo_p: float = 0.95
     
     # ----- Misc -----
     seed: int = 42

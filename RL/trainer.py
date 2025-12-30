@@ -26,7 +26,11 @@ class A2SFTrainer:
         
         self.model_runner = A2SFModelRunner(config)
         self.env = A2SFEnv(self.model_runner, config)
-        self.policy = A2SFPolicy(config.max_context).to(self.device)
+        self.policy = A2SFPolicy(
+            state_dim=config.max_context,
+            a_values=config.a_values,
+            b_values=config.b_values
+        ).to(self.device)
         self.buffer = RolloutBuffer(device=self.device)
         
         self.optimizer = optim.Adam(self.policy.parameters(), lr=config.lr)
@@ -193,6 +197,16 @@ class A2SFTrainer:
     
     def load_checkpoint(self, checkpoint_path: str):
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        
+        # Update config from checkpoint if available
+        if "config" in checkpoint:
+            checkpoint_config = checkpoint["config"]
+            # Update important config values that affect model initialization
+            self.config.sentence_transformer_model = checkpoint_config.sentence_transformer_model
+            self.config.context_window = checkpoint_config.context_window
+            self.config.max_context = checkpoint_config.max_context
+            self.config.a_values = checkpoint_config.a_values
+            self.config.b_values = checkpoint_config.b_values
         
         self.policy.load_state_dict(checkpoint["policy_state_dict"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])

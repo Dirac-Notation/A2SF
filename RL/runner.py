@@ -21,6 +21,7 @@ class A2SFModelRunner:
     def __init__(self, config: A2SFRLConfig):
         self.config = config
         self.device = torch.device(config.device if torch.cuda.is_available() else "cpu")
+        self.rbo_p = config.rbo_p
         
         self.model, self.tokenizer = load_model(config.model_name, config.gpus)
         
@@ -67,9 +68,7 @@ class A2SFModelRunner:
         
         inference_time = time.time() - start_time
         
-        # RBO 계산을 위해 config에서 p값을 가져옵니다 (기본값 0.9 설정)
-        rbo_p = getattr(self.config, 'rbo_p', 0.95)
-        reward = self._compute_accuracy_score(selected_indices, context_length, rbo_p)
+        reward = self._compute_accuracy_score(selected_indices, context_length, self.rbo_p)
         
         return ModelResult(
             reward=reward,

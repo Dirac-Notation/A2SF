@@ -75,8 +75,12 @@ def load_rl_policy(checkpoint_path, device):
         max_context=config.max_context
     )
     
-    # Initialize policy
-    policy = A2SFPolicy(state_dim=config.max_context).to(device)
+    # Initialize policy with config values
+    policy = A2SFPolicy(
+        state_dim=config.max_context,
+        a_values=config.a_values,
+        b_values=config.b_values
+    ).to(device)
     
     # Load policy weights
     if "policy_state_dict" in checkpoint:
@@ -319,12 +323,6 @@ def main(args):
                 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
                 rl_policy, context_encoder, rl_config = load_rl_policy(args.rl_checkpoint, device)
                 
-                # Override config parameters if provided
-                if hasattr(args, 'sentence_transformer_model'):
-                    rl_config.sentence_transformer_model = args.sentence_transformer_model
-                if hasattr(args, 'context_window'):
-                    rl_config.context_window = args.context_window
-                
                 print(f"RL Policy loaded successfully")
                 print(f"Config: {rl_config}")
             except Exception as e:
@@ -440,8 +438,6 @@ def parse_args(args=None):
     # RL-related arguments
     parser.add_argument("--use_rl", action="store_true", help="Use RL policy for compression")
     parser.add_argument("--rl_checkpoint", type=str, help="Path to RL model checkpoint (.pt file)")
-    parser.add_argument("--sentence_transformer_model", type=str, default="all-MiniLM-L6-v2", help="Sentence transformer model for context encoding")
-    parser.add_argument("--context_window", type=int, default=64, help="Context window size for RL state encoding")
     
     return parser.parse_args(args)
 

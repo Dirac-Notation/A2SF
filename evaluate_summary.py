@@ -79,8 +79,12 @@ def load_rl_policy(checkpoint_path):
         max_context=config.max_context
     )
     
-    # Initialize policy
-    policy = A2SFPolicy(state_dim=config.max_context).to(device)
+    # Initialize policy with config values
+    policy = A2SFPolicy(
+        state_dim=config.max_context,
+        a_values=config.a_values,
+        b_values=config.b_values
+    ).to(device)
     
     # Load policy weights
     if "policy_state_dict" in checkpoint:
