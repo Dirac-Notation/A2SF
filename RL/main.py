@@ -28,15 +28,15 @@ def parse_args():
     parser.add_argument('--ppo_clip', type=float, default=0.2, help="PPO clip parameter")
     parser.add_argument('--lr', type=float, default=3e-4, help="Learning rate")
     
-    parser.add_argument('--value_coef', type=float, default=0.5, help="Value loss coefficient")
-    parser.add_argument('--entropy_coef', type=float, default=0.07, help="Entropy coefficient")
+    parser.add_argument('--value_coef', type=float, default=1.0, help="Value loss coefficient")
+    parser.add_argument('--entropy_coef', type=float, default=0.01, help="Entropy coefficient")
     parser.add_argument('--max_grad_norm', type=float, default=1.0, help="Maximum gradient norm for clipping")
     
     # Training configuration
     parser.add_argument('--iterations', type=int, default=1000, help="Number of training iterations")
-    parser.add_argument('--episodes_per_update', type=int, default=32, help="Number of episodes per PPO update")
+    parser.add_argument('--episodes_per_update', type=int, default=128, help="Number of episodes per PPO update")
     parser.add_argument('--update_epochs', type=int, default=4, help="Number of update epochs")
-    parser.add_argument('--minibatch_size', type=int, default=32, help="Minibatch size")
+    parser.add_argument('--minibatch_size', type=int, default=64, help="Minibatch size")
     
     # Evaluation configuration
     parser.add_argument('--eval_frequency', type=int, default=100, help="Evaluation frequency")

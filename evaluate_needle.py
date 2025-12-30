@@ -101,7 +101,10 @@ def get_rl_action(policy, context_encoder, prompt, model_name, device):
     with torch.no_grad():
         action, _, _ = policy.act(state)
     
-    return action.item()
+    # action is a tuple of (a, b) tensors
+    # For a2sf compression, we use a as forgetting_factor
+    a = action[0].item() if isinstance(action[0], torch.Tensor) else action[0]
+    return a
 
 def evaluate_model(model, tokenizer, dataset, device, method, config=None, rl_policy=None, context_encoder=None, model_name=None):
     """Evaluate the model on the needle-in-haystack task with budget settings."""

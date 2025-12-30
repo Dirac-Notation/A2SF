@@ -105,7 +105,10 @@ def get_rl_action(policy, context_encoder, prompt, model_name):
     with torch.no_grad():
         action, _, _ = policy.act(state)
     
-    return action.item()
+    # action is a tuple of (a, b) tensors
+    # For a2sf compression, we use a as forgetting_factor
+    a = action[0].item() if isinstance(action[0], torch.Tensor) else action[0]
+    return a
 
 def evaluate_model(
     model,
