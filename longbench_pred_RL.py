@@ -20,8 +20,6 @@ def parse_args(args=None):
     parser.add_argument('--budget', type=int, default=100)
     parser.add_argument('--task', type=int, nargs='*', default=None, help="List of task numbers (0-5). If not specified, all tasks will be executed. 0: Code Complete, 1: Few Shot, 2: Single-doc QA, 3: Multi-doc QA, 4: Passage Retrieval, 5: Summarization")
     parser.add_argument('--rl_checkpoint', type=str, required=True, help="Path to RL model checkpoint (.pt file)")
-    parser.add_argument('--sentence_transformer_model', type=str, default="all-MiniLM-L6-v2",help="Sentence transformer model for context encoding")
-    parser.add_argument('--context_window', type=int, default=64, help="Context window size for RL state encoding")
     return parser.parse_args(args)
 
 def load_jsonl_file(file_path):
@@ -59,8 +57,12 @@ def load_rl_policy(checkpoint_path, device):
         max_context=config.max_context
     )
     
-    # Initialize policy
-    policy = A2SFPolicy(state_dim=config.max_context).to(device)
+    # Initialize policy with config values
+    policy = A2SFPolicy(
+        state_dim=config.max_context,
+        a_values=config.a_values,
+        b_values=config.b_values
+    ).to(device)
     
     # Load policy weights
     if "policy_state_dict" in checkpoint:
@@ -190,12 +192,6 @@ if __name__ == '__main__':
     # Load RL policy
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     rl_policy, context_encoder, rl_config = load_rl_policy(args.rl_checkpoint, device)
-    
-    # Override config parameters if provided
-    if hasattr(args, 'sentence_transformer_model'):
-        rl_config.sentence_transformer_model = args.sentence_transformer_model
-    if hasattr(args, 'context_window'):
-        rl_config.context_window = args.context_window
     
     print(f"RL Policy loaded successfully")
     print(f"Config: {rl_config}")

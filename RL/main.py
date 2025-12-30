@@ -41,6 +41,7 @@ def parse_args():
     # Evaluation configuration
     parser.add_argument('--eval_frequency', type=int, default=100, help="Evaluation frequency")
     parser.add_argument('--eval_samples', type=int, default=50, help="Number of samples for evaluation")
+    parser.add_argument('--rbo_p', type=float, default=0.95, help="Rank-Biased Overlap persistence parameter")
     
     # Logging and saving
     parser.add_argument('--save_dir', type=str, default="runs/a2sf_rl", help="Directory to save checkpoints and logs")
@@ -81,6 +82,7 @@ def create_config_from_args(args) -> A2SFRLConfig:
     # Evaluation configuration
     config.eval_frequency = args.eval_frequency
     config.eval_samples = args.eval_samples
+    config.rbo_p = args.rbo_p
     
     # Logging and saving
     config.save_dir = args.save_dir

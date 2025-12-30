@@ -10,6 +10,15 @@ echo "Running basic training..."
 python RL/run_training.py \
     --model llama3 \
     --gpus 0 \
+    --value_coef 1.0 \
+    --entropy_coef 0.01 \
+    --max_grad_norm 1.0 \
+    --episodes_per_update 128 \
+    --update_epochs 4 \
+    --minibatch_size 32 \
+    --eval_frequency 100 \
+    --eval_samples 50 \
+    --rbo_p 0.95 \
     --iterations 1600 \
 
 echo "Training completed!"

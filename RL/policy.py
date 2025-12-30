@@ -8,11 +8,15 @@ from typing import Dict, Tuple
 
 EPS = 1e-6
 
-# a values: discrete set for a parameter (0.0 to 10.0 in 0.5 steps)
-A_VALUES = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 6.5, 7.0, 7.5, 8.0, 8.5, 9.0, 9.5, 10.0])
+# Default a values: discrete set for a parameter (sigmoid cache)
+# Note: These defaults should match A2SFRLConfig defaults
+# The actual values used should come from config when initializing policy
+DEFAULT_A_VALUES = [0.0, 0.001, 0.01, 0.1, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
 
-# b values: discrete set for b parameter
-B_VALUES = torch.tensor([1, 2, 4, 6, 8, 12, 16, 20, 32, 48, 64, 96, 128, 512, 1024, 2048, 4096, 8192])
+# Default b values: discrete set for b parameter (sigmoid cache)
+# Note: These defaults should match A2SFRLConfig defaults
+# The actual values used should come from config when initializing policy
+DEFAULT_B_VALUES = [1, 2, 4, 6, 8, 12, 16, 20, 32, 48, 64, 96, 128, 512, 1024, 2048, 4096, 8192]
 
 class A2SFPolicy(nn.Module):
     """
@@ -25,9 +29,13 @@ class A2SFPolicy(nn.Module):
     def __init__(self, state_dim: int, a_values: torch.Tensor = None, b_values: torch.Tensor = None):
         super().__init__()
         if a_values is None:
-            a_values = A_VALUES
+            # Use default values if not provided (for backward compatibility)
+            # In practice, values should come from config
+            a_values = torch.tensor(DEFAULT_A_VALUES)
         if b_values is None:
-            b_values = B_VALUES
+            # Use default values if not provided (for backward compatibility)
+            # In practice, values should come from config
+            b_values = torch.tensor(DEFAULT_B_VALUES)
         self.register_buffer('a_values', a_values)
         self.register_buffer('b_values', b_values)
         self.num_a_values = len(a_values)
