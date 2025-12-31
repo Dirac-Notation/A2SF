@@ -21,7 +21,7 @@ class H2OCache(KVCache):
         if self.seq_length <= self.total_budget:
             return
         
-        selected_indices = scores[:,:,:-self.recent_budget].topk(self.select_budget, dim=-1).indices.sort().values
+        selected_indices = scores[:,:,:-self.recent_budget].topk(self.select_budget, dim=-1).indices
         
         selected_indices = selected_indices.unsqueeze(-1).expand(-1,-1,-1,self.key_data.size(-1))
         
