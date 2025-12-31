@@ -8,6 +8,7 @@ class SnapCache(KVCache):
     def __init__(self, num_key_value_heads: int, seq_dim: int = 2):
         super().__init__(num_key_value_heads, seq_dim)
         self.prompt = False
+        self.selected_indices = None
     
     def init_cache(self, compression_config, layer_idx):
         """Initialize Snap cache settings"""
@@ -17,12 +18,14 @@ class SnapCache(KVCache):
         self.select_budget = self.total_budget - self.recent_budget
         self.observation_window = compression_config.observation_window
         self.prompt = False
+        self.selected_indices = None
 
     def select(self, scores):
         if self.seq_length <= self.total_budget:
             return
         
-        selected_indices = scores[:,:,:-self.recent_budget].topk(self.select_budget, dim=-1).indices.sort().values
+        selected_indices = scores[:,:,:-self.recent_budget].topk(self.select_budget, dim=-1).indices
+        self.selected_indices = selected_indices
         
         selected_indices = selected_indices.unsqueeze(-1).expand(-1,-1,-1,self.key_data.size(-1))
         
