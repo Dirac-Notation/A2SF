@@ -41,13 +41,6 @@ class A2SFTrainer:
         print(f"Loaded {len(self.eval_episodes)} evaluation samples")
         os.makedirs(config.save_dir, exist_ok=True)
         
-        self.training_stats = {
-            "iterations": [],
-            "rewards": [],
-            "losses": [],
-            "actions_a": [],
-            "actions_b": []
-        }
     
     def load_training_data(self) -> List[Dict[str, Any]]:
         training_data_path = "datasets/training_data.jsonl"
@@ -65,6 +58,10 @@ class A2SFTrainer:
         print(f"Starting training for {num_iterations} iterations")
         
         for iteration in range(num_iterations):
+            # Initialize stats for this iteration
+            iteration_rewards = []
+            iteration_actions_a = []
+            iteration_actions_b = []
             
             episodes = random.sample(self.training_data, self.config.episodes_per_update)
 
@@ -85,15 +82,15 @@ class A2SFTrainer:
                 self.buffer.add(state, action, log_prob, reward, value)
                 
                 a, b = action
-                self.training_stats["rewards"].append(reward)
-                self.training_stats["actions_a"].append(round(a.item(), 5) if isinstance(a, torch.Tensor) else a)
-                self.training_stats["actions_b"].append(round(b.item(), 5) if isinstance(b, torch.Tensor) else b)
+                iteration_rewards.append(reward)
+                iteration_actions_a.append(round(a.item(), 5) if isinstance(a, torch.Tensor) else a)
+                iteration_actions_b.append(round(b.item(), 5) if isinstance(b, torch.Tensor) else b)
             
             loss_stats = self.policy.ppo_update(self.buffer, self.config, self.optimizer)
             self.buffer.clear()
             
             if iteration % self.config.log_frequency == 0:
-                self._log_progress(iteration, loss_stats)
+                self._log_progress(iteration, loss_stats, iteration_rewards, iteration_actions_a, iteration_actions_b)
             
             if iteration % 50 == 0 and iteration > 0:
                 self._save_checkpoint(iteration)
@@ -105,6 +102,8 @@ class A2SFTrainer:
         print(f"Evaluating at iteration {iteration}")
         
         eval_rewards = []
+        eval_actions_a = []
+        eval_actions_b = []
         
         for episode_data in self.eval_episodes:
             state = self.env.encode_to_state(
@@ -133,6 +132,8 @@ class A2SFTrainer:
             reward, info = self.env.step(action)
 
             eval_rewards.append(reward.item())
+            eval_actions_a.append(round(a.item(), 5) if isinstance(a, torch.Tensor) else a)
+            eval_actions_b.append(round(b.item(), 5) if isinstance(b, torch.Tensor) else b)
         
         avg_eval_reward = sum(eval_rewards) / len(eval_rewards) if eval_rewards else 0.0
         
@@ -144,17 +145,15 @@ class A2SFTrainer:
             "iteration": iteration,
             "eval_avg_reward": avg_eval_reward,
             "eval_rewards": eval_rewards,
+            "eval_actions_a": eval_actions_a,
+            "eval_actions_b": eval_actions_b,
         }
         
-        with open(os.path.join(self.config.save_dir, "evaluation.jsonl"), "a") as f:
+        with open(os.path.join(self.config.save_dir, "evaluation_progress.jsonl"), "a") as f:
             f.write(json.dumps(eval_data) + "\n")
 
-    def _log_progress(self, iteration: int, loss_stats: Dict[str, float]):
-        recent_rewards = self.training_stats["rewards"]
-        recent_actions_a = self.training_stats["actions_a"]
-        recent_actions_b = self.training_stats["actions_b"]
-        
-        avg_reward = sum(recent_rewards) / len(recent_rewards)
+    def _log_progress(self, iteration: int, loss_stats: Dict[str, float], iteration_rewards: List, iteration_actions_a: List, iteration_actions_b: List):
+        avg_reward = sum(iteration_rewards) / len(iteration_rewards) if iteration_rewards else 0.0
         
         policy_loss = loss_stats.get("policy_loss", 0.0)
         policy_loss_a = loss_stats.get("policy_loss_a", 0.0)
@@ -177,11 +176,11 @@ class A2SFTrainer:
             "policy_loss_b": policy_loss_b,
             "value_loss": value_loss,
             "entropy": entropy,
-            "actions_a": recent_actions_a,
-            "actions_b": recent_actions_b,
+            "actions_a": iteration_actions_a,
+            "actions_b": iteration_actions_b,
         }
         
-        with open(os.path.join(self.config.save_dir, "progress.jsonl"), "a") as f:
+        with open(os.path.join(self.config.save_dir, "training_progress.jsonl"), "a") as f:
             f.write(json.dumps(progress_data) + "\n")
 
     def _save_checkpoint(self, iteration: int):
