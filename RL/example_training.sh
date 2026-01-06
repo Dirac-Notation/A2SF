@@ -13,10 +13,10 @@ python RL/run_training.py \
     --value_coef 1.0 \
     --entropy_coef 0.01 \
     --max_grad_norm 1.0 \
-    --episodes_per_update 128 \
+    --episodes_per_update 64 \
     --update_epochs 4 \
-    --minibatch_size 32 \
-    --eval_frequency 100 \
+    --minibatch_size 16 \
+    --eval_frequency 1 \
     --eval_samples 50 \
     --rbo_p 0.95 \
     --iterations 1600 \

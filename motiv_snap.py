@@ -12,7 +12,6 @@ def parse_args(args=None):
     parser.add_argument('--gpus', type=int, nargs='+', default=[0], help="List of GPU IDs (e.g., --gpus 0 1 2 3)")
     parser.add_argument('--model', type=str, required=True, choices=["llama", "llama2", "llama3", "opt"])
     parser.add_argument('--budget', type=int, default=128, help="Total budget for KV cache compression")
-    parser.add_argument('--rbo_p', type=float, default=0.95, help="RBO persistence parameter")
     parser.add_argument('--data_path', type=str, default="datasets/training_data.jsonl", help="Path to training data")
     return parser.parse_args(args)
 
@@ -61,9 +60,10 @@ def calculate_rbo(list1: List[int], list2: List[int], p: float) -> float:
     # 정규화 (extrapolated RBO가 아닌 표준 수식 사용)
     return rbo_score * (1 - p)
 
-def compute_accuracy_score(model, selected_indices: List[List[int]], context_length: int, rbo_p: float) -> float:
+def compute_accuracy_score(model, selected_indices: List[List[int]], context_length: int, rbo_ps: List[List[float]]) -> float:
     """
     모델이 선택한 인덱스와 정답 인덱스를 비교하여 RBO 기반 정확도 점수를 계산합니다.
+    rbo_ps: 각 layer별, head별 rbo_p 값을 담은 중첩 리스트
     """
     similarity_score = 0.0
     
@@ -77,23 +77,27 @@ def compute_accuracy_score(model, selected_indices: List[List[int]], context_len
             # 선택된 인덱스가 없으면 (아직 압축이 일어나지 않았으면) 스킵
             continue
         
-        model_selected_indices = model_selected_indices_tensor.squeeze(0).cpu()
+        model_selected_indices = model_selected_indices_tensor.squeeze(0).cpu().tolist()
         # 정답 인덱스 가져오기
-        answer_selected_indices = torch.tensor(selected_indices[layer_idx])
+        answer_selected_indices = selected_indices[layer_idx]
+        # RBO_P 가져오기
+        layer_rbo_p = rbo_ps[layer_idx]
         
         # KV Heads 확장을 위한 처리
         num_key_value_heads = layer.self_attn.num_key_value_groups
-        model_selected_indices = model_selected_indices.unsqueeze(1).expand(-1, num_key_value_heads, -1).reshape(answer_selected_indices.size(0), -1)
         
         for head_idx in range(num_heads):
-            # 모델 리스트 구성: 선택된 인덱스
-            model_list = model_selected_indices[head_idx].tolist()
+            # Selected Indices
+            model_list = model_selected_indices[head_idx//num_key_value_heads]
             
-            # 정답 리스트 구성
-            answer_list = answer_selected_indices[head_idx].tolist()
+            # Answer
+            answer_list = answer_selected_indices[head_idx]
+            
+            # RBO_P 
+            head_rbo_p = layer_rbo_p[head_idx]
             
             # RBO 계산
-            similarity_score += calculate_rbo(model_list, answer_list, rbo_p)
+            similarity_score += calculate_rbo(model_list, answer_list, head_rbo_p)
     
     similarity_score /= (num_layers * num_heads)
     
@@ -114,7 +118,7 @@ def prepare_prompt(prompt: str, dataset: str, tokenizer, max_length: int) -> str
     
     return prompt
 
-def process_with_observation_window(model, tokenizer, training_data, max_length, budget, num_layers, observation_window, rbo_p):
+def process_with_observation_window(model, tokenizer, training_data, max_length, budget, num_layers, observation_window):
     """Process all samples with a specific observation window and return RBO scores"""
     # Create SnapKV compression config
     config = CompressionConfig()
@@ -130,6 +134,7 @@ def process_with_observation_window(model, tokenizer, training_data, max_length,
     for sample in training_data:
         prompt = sample["input_prompt"]
         selected_indices = sample["selected_indices"]  # Ground truth indices
+        rbo_ps = sample["scores"]  # 각 layer별, head별 rbo_p 값
         dataset = sample.get("dataset", None)
         
         # Prepare prompt
@@ -148,7 +153,7 @@ def process_with_observation_window(model, tokenizer, training_data, max_length,
             model(input_ids)
         
         # Compute RBO score
-        rbo_score = compute_accuracy_score(model, selected_indices, context_length, rbo_p)
+        rbo_score = compute_accuracy_score(model, selected_indices, context_length, rbo_ps)
         rbo_scores.append(rbo_score)
     
     return rbo_scores
@@ -190,7 +195,7 @@ def main():
     print(f"\nProcessing samples with SnapKV:")
     print(f"  Budget: {args.budget}")
     print(f"  Observation windows: {observation_windows}")
-    print(f"  RBO p: {args.rbo_p}")
+    print(f"  RBO p: from training data (scores field)")
     print("=" * 80)
     
     # Process each observation window
@@ -198,7 +203,7 @@ def main():
     for obs_window in tqdm(observation_windows, desc="Processing observation windows"):
         rbo_scores = process_with_observation_window(
             model, tokenizer, training_data, max_length, 
-            args.budget, num_layers, obs_window, args.rbo_p
+            args.budget, num_layers, obs_window
         )
         
         avg_rbo = sum(rbo_scores) / len(rbo_scores) if rbo_scores else 0.0

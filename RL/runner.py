@@ -50,6 +50,7 @@ class A2SFModelRunner:
         a: float,
         b: float,
         selected_indices: List[int],
+        rbo_ps: List[float],
         dataset: str = None
     ) -> ModelResult:
         start_time = time.time()
@@ -68,7 +69,7 @@ class A2SFModelRunner:
         
         inference_time = time.time() - start_time
         
-        reward = self._compute_accuracy_score(selected_indices, context_length, self.rbo_p)
+        reward = self._compute_accuracy_score(selected_indices, context_length, rbo_ps)
         
         return ModelResult(
             reward=reward,
@@ -125,7 +126,7 @@ class A2SFModelRunner:
         # 정규화 (extrapolated RBO가 아닌 표준 수식 사용)
         return rbo_score * (1 - p)
     
-    def _compute_accuracy_score(self, selected_indices: List[int], context_length: int, rbo_p: float) -> float:
+    def _compute_accuracy_score(self, selected_indices: List[int], context_length: int, rbo_ps: List[float]) -> float:
         similarity_score = 0.0
         
         num_layers = len(self.model.model.layers)
@@ -133,23 +134,27 @@ class A2SFModelRunner:
 
         for layer_idx, layer in enumerate(self.model.model.layers):
             # 모델이 선택한 인덱스 가져오기
-            model_selected_indices = layer.self_attn.past_key_value.selected_indices.squeeze(0).cpu()
+            model_selected_indices = layer.self_attn.past_key_value.selected_indices.squeeze(0).cpu().tolist()
             # 정답 인덱스 가져오기
-            answer_selected_indices = torch.tensor(selected_indices[layer_idx])
+            answer_selected_indices = selected_indices[layer_idx]
+            # RBO_P 가져오기
+            layer_rbo_p = rbo_ps[layer_idx]
             
             # KV Heads 확장을 위한 처리
             num_key_value_heads = layer.self_attn.num_key_value_groups
-            model_selected_indices = model_selected_indices.unsqueeze(1).expand(-1, num_key_value_heads, -1).reshape(answer_selected_indices.size(0), -1)
             
             for head_idx in range(num_heads):
-                # 모델 리스트 구성: 선택된 인덱스
-                model_list = model_selected_indices[head_idx].tolist()
+                # Selected Indices
+                model_list = model_selected_indices[head_idx//num_key_value_heads]
                 
-                # 정답 리스트 구성
-                answer_list = answer_selected_indices[head_idx].tolist()
+                # Answer
+                answer_list = answer_selected_indices[head_idx]
+                
+                # RBO_P 
+                head_rbo_p = layer_rbo_p[head_idx]
                 
                 # RBO 계산
-                similarity_score += self.calculate_rbo(model_list, answer_list, rbo_p)
+                similarity_score += self.calculate_rbo(model_list, answer_list, head_rbo_p)
             
         similarity_score /= (num_layers * num_heads)
         

@@ -11,12 +11,12 @@ EPS = 1e-6
 # Default a values: discrete set for a parameter (sigmoid cache)
 # Note: These defaults should match A2SFRLConfig defaults
 # The actual values used should come from config when initializing policy
-DEFAULT_A_VALUES = [0.0, 0.001, 0.01, 0.1, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
+DEFAULT_A_VALUES = [0.0, 0.001, 0.01, 0.1, 10.0]
 
 # Default b values: discrete set for b parameter (sigmoid cache)
 # Note: These defaults should match A2SFRLConfig defaults
 # The actual values used should come from config when initializing policy
-DEFAULT_B_VALUES = [1, 2, 4, 6, 8, 12, 16, 20, 32, 48, 64, 96, 128, 512, 1024, 2048, 4096, 8192]
+DEFAULT_B_VALUES = [1, 2, 4, 8, 16, 32, 64, 128, 512, 1024, 4096, 8192]
 
 class A2SFPolicy(nn.Module):
     """
