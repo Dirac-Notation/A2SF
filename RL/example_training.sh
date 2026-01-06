@@ -16,8 +16,8 @@ python RL/run_training.py \
     --episodes_per_update 64 \
     --update_epochs 4 \
     --minibatch_size 16 \
-    --eval_frequency 1 \
-    --eval_samples 50 \
+    --eval_frequency 100 \
+    --eval_samples 64 \
     --rbo_p 0.95 \
     --iterations 1600 \
 
