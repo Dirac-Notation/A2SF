@@ -68,14 +68,22 @@ def generate_answer(model, tokenizer, prompt: str, dataset: str, model_name: str
         input_ids = logits_to_tokens(outputs.logits)
         for _ in range(GENERATION_LENGTHS):
             outputs = model(input_ids, past_key_values=outputs.past_key_values, output_attentions=True)
-            attention_maps.append(torch.stack([attention.cpu().squeeze(0) for attention in outputs.attentions], dim=0))
+            attention_maps.append(torch.stack([attention.cpu().squeeze(0) for attention in outputs.attentions], dim=0).float())
     
-    out = attention_maps[-1].clone()
-    for idx in range(GENERATION_LENGTHS-1):
-        out[:,:,:,:-GENERATION_LENGTHS+1+idx] += attention_maps[idx]
-    selected_indices = out[:,:,:,:-GENERATION_LENGTHS-LOCAL_WINDOW].topk(k=SELECT_BUDGET, dim=3).indices.squeeze(2)
+    out = torch.zeros_like(attention_maps[-1])
+    for idx in range(GENERATION_LENGTHS):
+        k_len = attention_maps[idx].size(3)
+        out[:,:,:,:k_len] += attention_maps[idx]
+    values, indices = out[:,:,:,:-GENERATION_LENGTHS-LOCAL_WINDOW].topk(k=SELECT_BUDGET, dim=3)
     
-    return prompt, selected_indices
+    values /= 128
+    scores = torch.sum(-values*torch.log(values), dim=3)
+    scores = 2/(1 + torch.exp(-1.2*scores)) - 1
+    
+    scores = scores.squeeze(2)
+    indices = indices.squeeze(2)
+    
+    return prompt, indices, scores
 
 def load_longbench_dataset(dataset_name: str, num_samples: int = 10) -> List[Dict[str, Any]]:
     dataset_path = f"./datasets/longbench/{dataset_name}.jsonl"
@@ -109,12 +117,13 @@ def process_dataset(
     
     for i, sample in enumerate(tqdm(samples, desc=f"Processing {dataset_name}")):
         prompt = sample["input_prompt"]
-        prompt, selected_indices = generate_answer(model, tokenizer, prompt, dataset_name, model_name)
+        prompt, selected_indices, scores = generate_answer(model, tokenizer, prompt, dataset_name, model_name)
         
         training_sample = {
             "dataset": dataset_name,
             "input_prompt": prompt,
-            "selected_indices": selected_indices.cpu().numpy().tolist(),
+            "selected_indices": selected_indices.cpu().tolist(),
+            "scores": scores.cpu().tolist(),
         }
         
         # separators 옵션을 추가하여 공백 없이 한 줄로 저장

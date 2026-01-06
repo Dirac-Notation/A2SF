@@ -34,10 +34,11 @@ class A2SFEnv:
         self.current_dataset = None
         self.current_selected_indices = None
     
-    def encode_to_state(self, prompt: str, selected_indices: list, dataset: str = None) -> torch.Tensor:
+    def encode_to_state(self, prompt: str, selected_indices: list, rbo_ps: list, dataset: str = None) -> torch.Tensor:
         self.current_prompt = prompt
         self.current_dataset = dataset
         self.current_selected_indices = selected_indices
+        self.current_rbo_ps = rbo_ps
         
         context_embedding = self.context_encoder.encode_context(prompt).to(self.device, dtype=torch.float32)
         
@@ -60,6 +61,7 @@ class A2SFEnv:
                 a=a_val,
                 b=b_val,
                 selected_indices=self.current_selected_indices,
+                rbo_ps=self.current_rbo_ps,
                 dataset=self.current_dataset
             )
         

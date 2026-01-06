@@ -72,6 +72,7 @@ class A2SFTrainer:
                 state = self.env.encode_to_state(
                     prompt=episode_data["input_prompt"],
                     selected_indices=episode_data["selected_indices"],
+                    rbo_ps=episode_data["scores"],
                     dataset=episode_data["dataset"],
                 )
                 
@@ -109,6 +110,7 @@ class A2SFTrainer:
             state = self.env.encode_to_state(
                 prompt=episode_data["input_prompt"],
                 selected_indices=episode_data["selected_indices"],
+                rbo_ps=episode_data["scores"],
                 dataset=episode_data["dataset"],
             )
             state = state.to(self.device)
@@ -148,10 +150,9 @@ class A2SFTrainer:
             f.write(json.dumps(eval_data) + "\n")
 
     def _log_progress(self, iteration: int, loss_stats: Dict[str, float]):
-        n = self.config.episodes_per_update
-        recent_rewards = self.training_stats["rewards"][-n:]
-        recent_actions_a = self.training_stats["actions_a"][-n:]
-        recent_actions_b = self.training_stats["actions_b"][-n:]
+        recent_rewards = self.training_stats["rewards"]
+        recent_actions_a = self.training_stats["actions_a"]
+        recent_actions_b = self.training_stats["actions_b"]
         
         avg_reward = sum(recent_rewards) / len(recent_rewards)
         
@@ -190,7 +191,6 @@ class A2SFTrainer:
             "policy_state_dict": self.policy.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
             "config": self.config,
-            "training_stats": self.training_stats
         }, checkpoint_path)
         
         print(f"Saved checkpoint: {checkpoint_path}")

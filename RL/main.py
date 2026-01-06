@@ -133,7 +133,6 @@ def main():
         "policy_state_dict": trainer.policy.state_dict(),
         "optimizer_state_dict": trainer.optimizer.state_dict(),
         "config": config,
-        "training_stats": trainer.training_stats
     }, final_checkpoint_path)
     
     print(f"Training completed. Final model saved to: {final_checkpoint_path}")
