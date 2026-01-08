@@ -12,7 +12,7 @@ import sys
 # Add the current directory to the path for imports
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from utils import load_configs, load_model, set_seed
+from utils import load_model, set_seed
 from RL.config import A2SFRLConfig
 from RL.policy import A2SFPolicy
 from RL.features import ContextEncoder
@@ -341,10 +341,13 @@ def main(args):
                 for cur_method in methods:
                     cur_idx += 1
                     
-                    # Load compression config (skip if using RL)
+                    # Create compression config (skip if using RL)
                     config = None
                     if not args.use_rl:
-                        config = load_configs(args.config_file, cur_method, cur_budget, "Single-doc QA")  # Default task for needle
+                        from utils import CompressionConfig
+                        config = CompressionConfig()
+                        config["method"] = cur_method
+                        config["total_budget"] = cur_budget
 
                     # Evaluate with current configuration
                     results = evaluate_model(
@@ -433,7 +436,6 @@ def parse_args(args=None):
     parser.add_argument("--dataset", type=str, nargs='+', default=["datasets/needle_dataset.jsonl"])
     parser.add_argument("--budget", type=int, nargs='+', default=[100])
     parser.add_argument("--method", type=str, nargs='+', default=["a2sf"])
-    parser.add_argument("--config_file", type=str, default="config/compression_configs.json", help="Path to compression config file")
     
     # RL-related arguments
     parser.add_argument("--use_rl", action="store_true", help="Use RL policy for compression")

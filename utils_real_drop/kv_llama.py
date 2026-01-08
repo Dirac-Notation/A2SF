@@ -206,9 +206,15 @@ class LlamaModel(LlamaPreTrainedModel):
     def init_cache(self, compression_config):
         self.input_ids = False
         self.compression_method = compression_config.compression_method
+        applied_layer = compression_config.layer
         for idx, layer in enumerate(self.layers):
             # Create appropriate cache implementation based on compression method
             if compression_config.method != "full":
+                if idx != applied_layer:
+                    from .kv_cache.h2o_cache import H2OCache
+                    layer.self_attn.past_key_value = H2OCache(layer.self_attn.num_key_value_heads)
+                    continue
+                
                 if compression_config.compression_method == "h2o":
                     from .kv_cache.h2o_cache import H2OCache
                     layer.self_attn.past_key_value = H2OCache(layer.self_attn.num_key_value_heads)

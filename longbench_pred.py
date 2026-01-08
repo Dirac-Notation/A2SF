@@ -4,16 +4,16 @@ from tqdm import tqdm
 import argparse
 import torch
 
-from utils import load_configs, load_model, set_seed
+from utils import load_model, set_seed, CompressionConfig
 
 def parse_args(args=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--gpus', type=int, nargs='+', default=[0], help="List of GPU IDs (e.g., --gpus 0 1 2 3)")
     parser.add_argument('--model', type=str, required=True, choices=["llama", "llama2", "llama3", "opt"])
     parser.add_argument('--method', type=str, default="full")
-    parser.add_argument('--budget', type=int, default=100)
-    parser.add_argument('--config_file', type=str, required=True)
+    parser.add_argument('--budget', type=int, default=128)
     parser.add_argument('--task', type=int, nargs='*', default=None, help="List of task numbers (0-5). If not specified, all tasks will be executed. 0: Code Complete, 1: Few Shot, 2: Single-doc QA, 3: Multi-doc QA, 4: Passage Retrieval, 5: Summarization")
+    parser.add_argument('--layer', type=int, default=0)
     return parser.parse_args(args)
 
 def load_jsonl_file(file_path):
@@ -123,7 +123,10 @@ if __name__ == '__main__':
         os.makedirs("result_txt/pred")
     
     for task in selected_tasks:
-        config = load_configs(args.config_file, args.method, args.budget, task)
+        config = CompressionConfig()
+        config["method"] = args.method
+        config["total_budget"] = args.budget
+        config["layer"] = args.layer
         
         datasets = data_group[task]
         
@@ -135,7 +138,7 @@ if __name__ == '__main__':
                 print(f"Warning: {jsonl_path} not found, skipping {dataset}")
                 continue
             data = load_jsonl_file(jsonl_path)
-            output_dir = f"result_txt/pred/{args.model}_{args.method}_{args.budget}"
+            output_dir = f"result_txt/pred/{args.model}_{args.method}_{args.budget}_{args.layer}"
             if not os.path.exists(output_dir):
                 os.makedirs(output_dir)
             out_path = f"{output_dir}/{dataset}.jsonl"

@@ -12,24 +12,6 @@ class CompressionConfig(dict):
     __setattr__ = dict.__setitem__
     __delattr__ = dict.__delitem__
 
-def load_configs(config_file, method, total_budget, task):
-    with open(config_file, "r") as f:
-        compression_configs = json.load(f)
-    
-    if method == "full":
-        config = CompressionConfig({"method": "full"})
-    elif method == "a2sf" or method == "linear" or method == "sigmoid":
-        config = CompressionConfig(compression_configs[method][task])
-    else:
-        if method not in compression_configs:
-            raise ValueError(f"Method '{method}' not found in compression configurations")
-        config = CompressionConfig(compression_configs[method])
-        
-    config["total_budget"] = total_budget
-    config["method"] = method
-
-    return config
-
 def set_seed(seed):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
