@@ -11,6 +11,7 @@ def parse_args(args=None):
     parser.add_argument('--gpus', type=int, nargs='+', default=[0], help="List of GPU IDs (e.g., --gpus 0 1 2 3)")
     parser.add_argument('--model', type=str, required=True, choices=["llama", "llama2", "llama3", "opt"])
     parser.add_argument('--method', type=str, default="full")
+    parser.add_argument('--window', type=int, default=16)
     parser.add_argument('--budget', type=int, default=128)
     parser.add_argument('--task', type=int, nargs='*', default=None, help="List of task numbers (0-5). If not specified, all tasks will be executed. 0: Code Complete, 1: Few Shot, 2: Single-doc QA, 3: Multi-doc QA, 4: Passage Retrieval, 5: Summarization")
     parser.add_argument('--layer', type=int, default=0)
@@ -125,6 +126,7 @@ if __name__ == '__main__':
     for task in selected_tasks:
         config = CompressionConfig()
         config["compression_method"] = args.method
+        config["observation_window"] = args.window
         config["total_budget"] = args.budget
         config["layer"] = args.layer
         
@@ -138,7 +140,7 @@ if __name__ == '__main__':
                 print(f"Warning: {jsonl_path} not found, skipping {dataset}")
                 continue
             data = load_jsonl_file(jsonl_path)
-            output_dir = f"result_txt/pred/{args.model}_{args.method}_{args.budget}_{args.layer}"
+            output_dir = f"result_txt/pred/{args.model}_{args.method}_{args.window}_{args.budget}_{args.layer}"
             if not os.path.exists(output_dir):
                 os.makedirs(output_dir)
             out_path = f"{output_dir}/{dataset}.jsonl"
