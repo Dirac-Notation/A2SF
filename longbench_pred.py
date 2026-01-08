@@ -124,7 +124,7 @@ if __name__ == '__main__':
     
     for task in selected_tasks:
         config = CompressionConfig()
-        config["method"] = args.method
+        config["compression_method"] = args.method
         config["total_budget"] = args.budget
         config["layer"] = args.layer
         
