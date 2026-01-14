@@ -52,9 +52,6 @@ class A2SFCache(LayerCache):
         else:
             self.key_cache = [self.key_data]
             self.value_cache = [self.value_data]
-        
-        # Update seq_length after selection
-        self.seq_length = self.key_data.size(self.seq_dim)
 
     def flash_prepare_scores(self, attn_scores, q_start, q_end):
         seq_len = attn_scores.size(2)
@@ -95,13 +92,15 @@ class A2SFCache(LayerCache):
             q_chunk = query[:, :, q_start:q_end, :]  # [batch_size, num_heads, chunk_size, head_dim]
             
             # Compute attention scores for this chunk
-            scores = torch.matmul(q_chunk, key.transpose(2, 3)).mul_(sm_scale)  # [batch_size, num_heads, seq_len_q, chunk_size]
+            # Use float32 for numerical stability like original LlamaAttention
+            scores = torch.matmul(q_chunk.to(torch.float32), key.transpose(2, 3).to(torch.float32)) * sm_scale
             
             # Apply attention mask if provided (includes causal masking)
             if attn_mask is not None:
-                scores.add_(attn_mask[:, :, q_start:q_end, :])
+                scores = scores + attn_mask[:, :, q_start:q_end, :].to(torch.float32)
             
-            scores = torch.softmax(scores, dim=-1)
+            # Softmax in float32 then convert back
+            scores = torch.softmax(scores, dim=-1).to(q_chunk.dtype)
             
             output[:,:,q_start:q_end] = torch.matmul(scores, value)
 
