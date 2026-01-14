@@ -10,9 +10,9 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from .config import A2SFRLConfig
-from .policy import A2SFPolicy
-from .buffer import RolloutBuffer
+from .main import A2SFRLConfig
+from .policy import NeuralUCBPolicy
+from .buffer import NeuralUCBBuffer
 from .env import A2SFEnv
 from .runner import A2SFModelRunner
 
@@ -26,12 +26,18 @@ class A2SFTrainer:
         
         self.model_runner = A2SFModelRunner(config)
         self.env = A2SFEnv(self.model_runner, config)
-        self.policy = A2SFPolicy(
-            state_dim=config.max_context,
+        
+        # Calculate state dimension: just embedding_dim (CLS token only)
+        # Get embedding_dim from context encoder
+        embedding_dim = self.env.context_encoder.embedding_dim
+        state_dim = embedding_dim
+        
+        self.policy = NeuralUCBPolicy(
+            state_dim=state_dim,
             a_values=config.a_values,
             b_values=config.b_values
         ).to(self.device)
-        self.buffer = RolloutBuffer(device=self.device)
+        self.buffer = NeuralUCBBuffer(device=self.device)
         
         self.optimizer = optim.Adam(self.policy.parameters(), lr=config.lr)
         
@@ -68,25 +74,24 @@ class A2SFTrainer:
             for episode_data in tqdm(episodes):
                 state = self.env.encode_to_state(
                     prompt=episode_data["input_prompt"],
-                    selected_indices=episode_data["selected_indices"],
-                    rbo_ps=episode_data["scores"],
+                    generated_text_full=episode_data["generated_text"],
                     dataset=episode_data["dataset"],
                 )
                 
                 state = state.to(self.device)
 
-                action, log_prob, value = self.policy.act(state)
+                action, ucb_value = self.policy.act(state, beta=self.config.ucb_beta)
                 
                 reward, info = self.env.step(action)
 
-                self.buffer.add(state, action, log_prob, reward, value)
+                self.buffer.add(state, action, reward)
                 
                 a, b = action
                 iteration_rewards.append(reward)
                 iteration_actions_a.append(round(a.item(), 5) if isinstance(a, torch.Tensor) else a)
                 iteration_actions_b.append(round(b.item(), 5) if isinstance(b, torch.Tensor) else b)
             
-            loss_stats = self.policy.ppo_update(self.buffer, self.config, self.optimizer)
+            loss_stats = self.policy.neural_ucb_update(self.buffer, self.config, self.optimizer)
             self.buffer.clear()
             
             if iteration % self.config.log_frequency == 0:
@@ -108,28 +113,17 @@ class A2SFTrainer:
         for episode_data in self.eval_episodes:
             state = self.env.encode_to_state(
                 prompt=episode_data["input_prompt"],
-                selected_indices=episode_data["selected_indices"],
-                rbo_ps=episode_data["scores"],
+                generated_text_full=episode_data["generated_text"],
                 dataset=episode_data["dataset"],
             )
             state = state.to(self.device)
 
             with torch.no_grad():
-                out = self.policy(state)
-                a_logits = out["a_logits"]  # (B, num_a_values)
-                b_logits = out["b_logits"]  # (B, num_b_values)
-                
-                # For a: use mode (most likely value from Categorical)
-                a_idx = torch.argmax(a_logits, dim=-1)
-                a = self.policy.a_values[a_idx]
-                
-                # For b: use mode (most likely value from Categorical)
-                b_idx = torch.argmax(b_logits, dim=-1)
-                b = self.policy.b_values[b_idx]
-                
-                action = (a, b)
+                action, ucb_value = self.policy.act(state, beta=self.config.ucb_beta)
 
             reward, info = self.env.step(action)
+            
+            a, b = action
 
             eval_rewards.append(reward.item())
             eval_actions_a.append(round(a.item(), 5) if isinstance(a, torch.Tensor) else a)
@@ -155,27 +149,19 @@ class A2SFTrainer:
     def _log_progress(self, iteration: int, loss_stats: Dict[str, float], iteration_rewards: List, iteration_actions_a: List, iteration_actions_b: List):
         avg_reward = sum(iteration_rewards) / len(iteration_rewards) if iteration_rewards else 0.0
         
-        policy_loss = loss_stats.get("policy_loss", 0.0)
-        policy_loss_a = loss_stats.get("policy_loss_a", 0.0)
-        policy_loss_b = loss_stats.get("policy_loss_b", 0.0)
-        value_loss = loss_stats.get("value_loss", 0.0)
-        entropy = loss_stats.get("entropy", 0.0)
+        prediction_loss = loss_stats.get("prediction_loss", 0.0)
+        total_loss = loss_stats.get("total_loss", 0.0)
         
         print(f"Iteration {iteration}:")
-        print(f"  Avg Reward:  {avg_reward:.4f}")
-        print(f"  Policy Loss: {policy_loss:.4f} (a: {policy_loss_a:.4f}, b: {policy_loss_b:.4f})")
-        print(f"  Value  Loss: {value_loss:.4f}")
-        print(f"  Entropy:     {entropy:.4f}")
+        print(f"  Avg Reward:        {avg_reward:.4f}")
+        print(f"  Prediction Loss:   {prediction_loss:.4f}")
         print()
         
         progress_data = {
             "iteration": iteration,
             "avg_reward": avg_reward.item() if isinstance(avg_reward, torch.Tensor) else avg_reward,
-            "policy_loss": policy_loss,
-            "policy_loss_a": policy_loss_a,
-            "policy_loss_b": policy_loss_b,
-            "value_loss": value_loss,
-            "entropy": entropy,
+            "prediction_loss": prediction_loss,
+            "total_loss": total_loss,
             "actions_a": iteration_actions_a,
             "actions_b": iteration_actions_b,
         }
@@ -201,9 +187,7 @@ class A2SFTrainer:
         if "config" in checkpoint:
             checkpoint_config = checkpoint["config"]
             # Update important config values that affect model initialization
-            self.config.sentence_transformer_model = checkpoint_config.sentence_transformer_model
-            self.config.context_window = checkpoint_config.context_window
-            self.config.max_context = checkpoint_config.max_context
+            self.config.context_encoder_model = checkpoint_config.context_encoder_model
             self.config.a_values = checkpoint_config.a_values
             self.config.b_values = checkpoint_config.b_values
         

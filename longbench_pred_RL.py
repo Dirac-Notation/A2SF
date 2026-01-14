@@ -9,9 +9,9 @@ import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from utils import load_model, set_seed
-from RL.config import A2SFRLConfig
-from RL.policy import A2SFPolicy
-from RL.features import ContextEncoder
+from RL.main import A2SFRLConfig
+from RL.policy import NeuralUCBPolicy
+from RL.env import ContextEncoder
 
 def parse_args(args=None):
     parser = argparse.ArgumentParser(description="LongBench evaluation with RL-trained A2SF model")
@@ -51,15 +51,17 @@ def load_rl_policy(checkpoint_path, device):
     
     # Initialize context encoder
     context_encoder = ContextEncoder(
-        model_name=config.sentence_transformer_model,
-        device=device,
-        context_window=config.context_window,
-        max_context=config.max_context
+        model_name=config.context_encoder_model,
+        device=device
     )
     
+    # Calculate state dimension: just embedding_dim (CLS token only)
+    embedding_dim = context_encoder.embedding_dim
+    state_dim = embedding_dim
+    
     # Initialize policy with config values
-    policy = A2SFPolicy(
-        state_dim=config.max_context,
+    policy = NeuralUCBPolicy(
+        state_dim=state_dim,
         a_values=config.a_values,
         b_values=config.b_values
     ).to(device)
@@ -75,19 +77,22 @@ def load_rl_policy(checkpoint_path, device):
     
     return policy, context_encoder, config
 
-def get_rl_action(policy, context_encoder, prompt, dataset, model_name, device):
+def get_rl_action(policy, context_encoder, prompt, dataset, model_name, device, ucb_beta=1.0):
     """Get RL action (a, b) for sigmoid cache from given prompt"""
     # Encode context
     context_embedding = context_encoder.encode_context(prompt)
     
-    # Build state
+    # Build state (ensure it's on the correct device and dtype)
+    # forward() method handles 1D -> 2D conversion, but we ensure proper device/dtype here
     state = context_embedding.to(device, dtype=torch.float32)
     
-    # Get action from policy (no exploration during inference)
+    # Get action from policy using UCB
+    # During inference, we still use UCB for action selection (beta can be adjusted)
     with torch.no_grad():
-        action, _, _ = policy.act(state)
+        action, ucb_value = policy.act(state, beta=ucb_beta)
     
     # action is a tuple of (a, b) tensors
+    # Extract scalar values
     a = action[0].item() if isinstance(action[0], torch.Tensor) else action[0]
     b = action[1].item() if isinstance(action[1], torch.Tensor) else action[1]
     
@@ -101,7 +106,8 @@ def get_pred_rl(data, max_length, max_gen, dataset, model, tokenizer, out_path, 
 
         # Get RL action (a, b) for sigmoid cache from this prompt
         a, b = get_rl_action(
-            rl_policy, context_encoder, prompt, dataset, model_name, device
+            rl_policy, context_encoder, prompt, dataset, model_name, device, 
+            ucb_beta=rl_config.ucb_beta
         )
 
         tokenized_prompt = tokenizer(prompt, truncation=False, return_tensors="pt").input_ids[0]

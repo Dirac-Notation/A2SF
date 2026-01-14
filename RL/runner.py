@@ -1,7 +1,7 @@
 import torch
 import json
 import os
-from typing import Dict, Any, List, Tuple, Set
+from typing import Dict, Any, List, Tuple, Set, Optional
 from dataclasses import dataclass
 import time
 
@@ -10,18 +10,19 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils import load_model, set_seed, CompressionConfig
-from .config import A2SFRLConfig
+from .main import A2SFRLConfig
+from rouge_score import rouge_scorer
 
 @dataclass
 class ModelResult:
     reward: float
     inference_time: float
+    generated_text: str
 
 class A2SFModelRunner:
     def __init__(self, config: A2SFRLConfig):
         self.config = config
         self.device = torch.device(config.device if torch.cuda.is_available() else "cpu")
-        self.rbo_p = config.rbo_p
         
         self.model, self.tokenizer = load_model(config.model_name, config.gpus)
         
@@ -29,6 +30,9 @@ class A2SFModelRunner:
             self.model2maxlen = json.load(f)
         
         self.max_length = self.model2maxlen[config.model_name]
+        
+        # Initialize ROUGE scorer for text similarity
+        self.rouge_scorer = rouge_scorer.RougeScorer(['rouge1', 'rouge2', 'rougeL'], use_stemmer=True)
     
     def prepare_prompt(self, prompt: str, dataset: str) -> Tuple[torch.Tensor, List[str]]:
         tokenized_prompt = self.tokenizer(prompt, truncation=False, return_tensors="pt").input_ids[0]
@@ -49,8 +53,7 @@ class A2SFModelRunner:
         prompt: str, 
         a: float,
         b: float,
-        selected_indices: List[int],
-        rbo_ps: List[float],
+        generated_text_full: str,  # Full cache generated text (baseline)
         dataset: str = None
     ) -> ModelResult:
         start_time = time.time()
@@ -58,23 +61,60 @@ class A2SFModelRunner:
         input_tensor = self.tokenizer(prompt, truncation=False, return_tensors="pt")
         
         input_ids = input_tensor.input_ids.to(self.model.device)
+        attention_mask = input_tensor.attention_mask.to(self.model.device)
         context_length = input_ids.size(1)
         
         compression_config = self._create_compression_config(a, b)
         
         self.model.init_cache(compression_config)
         
-        with torch.no_grad():
-            self.model(input_ids)
+        # Generate text with compression
+        generated_text_compressed = self._generate_text(input_ids, attention_mask)
         
         inference_time = time.time() - start_time
         
-        reward = self._compute_accuracy_score(selected_indices, context_length, rbo_ps)
+        # Compute similarity between full cache and compressed cache generated texts
+        reward = self._compute_text_similarity(generated_text_full, generated_text_compressed)
         
         return ModelResult(
             reward=reward,
-            inference_time=inference_time
+            inference_time=inference_time,
+            generated_text=generated_text_compressed
         )
+    
+    def _generate_text(self, input_ids: torch.Tensor, attention_mask: torch.Tensor, max_new_tokens: int = 16) -> str:
+        """Generate text using the model with current cache configuration"""
+        context_length = input_ids.size(1)
+        
+        with torch.no_grad():
+            # Generate using model.generate() (includes forward pass)
+            output = self.model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                temperature=1.0,
+                pad_token_id=self.tokenizer.eos_token_id,
+            )[0]
+        
+        # Decode only the generated part (excluding the input prompt)
+        generated_text = self.tokenizer.decode(output[context_length:], skip_special_tokens=True)
+        
+        return generated_text
+    
+    def _compute_text_similarity(self, text1: str, text2: str) -> float:
+        """Compute ROUGE-L F1 score between two texts"""
+        if not text1 or not text2:
+            return 0.0
+        
+        # Compute ROUGE scores
+        scores = self.rouge_scorer.score(text1, text2)
+        
+        # Use ROUGE-L F1 score as the similarity metric
+        # ROUGE-L considers longest common subsequence
+        rouge_l_f1 = scores['rougeL'].fmeasure
+        
+        return rouge_l_f1
     
     def _create_compression_config(self, a: float, b: float) -> Dict[str, Any]:
         base_config = CompressionConfig()
@@ -87,75 +127,3 @@ class A2SFModelRunner:
         base_config.b = b
         
         return base_config
-
-    @staticmethod
-    def calculate_rbo(list1: List[int], list2: List[int], p: float) -> float:
-        """
-        두 리스트 간의 Rank-Biased Overlap (RBO)를 계산합니다.
-        list1, list2: 순위가 매겨진 요소들의 리스트 (앞쪽일수록 중요도 높음)
-        p: persistence parameter (0 < p < 1)
-        """
-        # 비교 깊이 설정 (더 긴 리스트 기준)
-        k = max(len(list1), len(list2))
-        
-        overlap = 0
-        rbo_score = 0.0
-        weight = 1.0
-        
-        # 누적된 요소를 추적하기 위한 집합
-        seen1 = set()
-        seen2 = set()
-        
-        for d in range(1, k + 1):
-            # d번째 순위(인덱스 d-1)의 요소 가져오기
-            item1 = list1[d-1] if d-1 < len(list1) else None
-            item2 = list2[d-1] if d-1 < len(list2) else None
-            
-            if item1 is not None: seen1.add(item1)
-            if item2 is not None: seen2.add(item2)
-            
-            # 현재 깊이 d까지의 교집합 개수 계산 (Agreement)
-            # RBO의 핵심: 단순히 현재 위치가 같은지가 아니라, 현재 깊이까지의 집합이 얼마나 겹치는지 확인
-            current_overlap = len(seen1.intersection(seen2))
-            agreement = current_overlap / d
-            
-            # 가중치 적용하여 점수 합산
-            rbo_score += agreement * weight
-            weight *= p
-            
-        # 정규화 (extrapolated RBO가 아닌 표준 수식 사용)
-        return rbo_score * (1 - p)
-    
-    def _compute_accuracy_score(self, selected_indices: List[int], context_length: int, rbo_ps: List[float]) -> float:
-        similarity_score = 0.0
-        
-        num_layers = len(self.model.model.layers)
-        num_heads = self.model.config.num_attention_heads
-
-        for layer_idx, layer in enumerate(self.model.model.layers):
-            # 모델이 선택한 인덱스 가져오기
-            model_selected_indices = layer.self_attn.past_key_value.selected_indices.squeeze(0).cpu().tolist()
-            # 정답 인덱스 가져오기
-            answer_selected_indices = selected_indices[layer_idx]
-            # RBO_P 가져오기
-            layer_rbo_p = rbo_ps[layer_idx]
-            
-            # KV Heads 확장을 위한 처리
-            num_key_value_heads = layer.self_attn.num_key_value_groups
-            
-            for head_idx in range(num_heads):
-                # Selected Indices
-                model_list = model_selected_indices[head_idx//num_key_value_heads]
-                
-                # Answer
-                answer_list = answer_selected_indices[head_idx]
-                
-                # RBO_P 
-                head_rbo_p = layer_rbo_p[head_idx]
-                
-                # RBO 계산
-                similarity_score += self.calculate_rbo(model_list, answer_list, head_rbo_p)
-            
-        similarity_score /= (num_layers * num_heads)
-        
-        return similarity_score
