@@ -5,7 +5,7 @@ import numpy as np
 import random
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from utils_real_drop import KVLlamaForCausalLM, KVOPTForCausalLM
+from utils_real_drop import KVLlamaForCausalLM
 
 class CompressionConfig(dict):
     __getattr__ = dict.get
@@ -45,8 +45,6 @@ def load_model(model_name, gpu_list=None):
     # Load appropriate model based on model name
     if "llama" in model_name.lower():
         model = KVLlamaForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16, device_map="auto")
-    elif "opt" in model_name.lower():
-        model = KVOPTForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16, device_map="auto")
     else:
         raise ValueError(f"Unsupported model: {model_name}. Only Llama and OPT models are supported.")
     

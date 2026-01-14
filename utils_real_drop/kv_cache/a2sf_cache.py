@@ -1,8 +1,8 @@
 import torch
 import math
-from . import KVCache
+from . import LayerCache
 
-class A2SFCache(KVCache):
+class A2SFCache(LayerCache):
     """A2SF cache implementation (forgetting_factor != 1)"""
     
     def __init__(self, num_key_value_heads: int, seq_dim: int = 2):
@@ -44,6 +44,17 @@ class A2SFCache(KVCache):
             self.value_data.gather(self.seq_dim, selected_indices),
             self.value_data[:,:,-self.recent_budget:,:]
         ), dim=self.seq_dim)
+        
+        # Update cache lists for compatibility with transformers 4.46.2
+        if len(self.key_cache) > 0:
+            self.key_cache[0] = self.key_data
+            self.value_cache[0] = self.value_data
+        else:
+            self.key_cache = [self.key_data]
+            self.value_cache = [self.value_data]
+        
+        # Update seq_length after selection
+        self.seq_length = self.key_data.size(self.seq_dim)
 
     def flash_prepare_scores(self, attn_scores, q_start, q_end):
         seq_len = attn_scores.size(2)

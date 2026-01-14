@@ -10,10 +10,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 import numpy as np
 
 PROMPT_LENGTH = 7500
-TOTAL_BUDGET = 128
-GENERATION_LENGTHS = 128
-LOCAL_WINDOW = int(TOTAL_BUDGET * 0.125)
-SELECT_BUDGET = TOTAL_BUDGET - LOCAL_WINDOW
+GENERATION_LENGTHS = 16
 
 def set_seed(seed):
     torch.manual_seed(seed)
@@ -60,30 +57,24 @@ def generate_answer(model, tokenizer, prompt: str, dataset: str, model_name: str
     
     input = tokenizer(prompt, truncation=False, return_tensors="pt")
     input_ids = input.input_ids.to(model.device)
+    attention_mask = input.attention_mask.to(model.device)
     
-    attention_maps = []
+    # Generate text using full cache (no compression) with model.generate()
     with torch.no_grad():
-        input_ids = input_ids.to(model.device)
-        outputs = model(input_ids)
-        input_ids = logits_to_tokens(outputs.logits)
-        for _ in range(GENERATION_LENGTHS):
-            outputs = model(input_ids, past_key_values=outputs.past_key_values, output_attentions=True)
-            attention_maps.append(torch.stack([attention.cpu().squeeze(0) for attention in outputs.attentions], dim=0).float())
+        output = model.generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            max_new_tokens=GENERATION_LENGTHS,
+            do_sample=False,
+            temperature=1.0,
+            pad_token_id=tokenizer.eos_token_id,
+        )[0]
     
-    out = torch.zeros_like(attention_maps[-1])
-    for idx in range(GENERATION_LENGTHS):
-        k_len = attention_maps[idx].size(3)
-        out[:,:,:,:k_len] += attention_maps[idx]
-    values, indices = out[:,:,:,:-GENERATION_LENGTHS-LOCAL_WINDOW].topk(k=SELECT_BUDGET, dim=3)
+    # Decode only the generated part (excluding the input prompt)
+    context_length = input_ids.size(1)
+    generated_text = tokenizer.decode(output[context_length:], skip_special_tokens=True)
     
-    values /= 128
-    scores = torch.sum(-values*torch.log(values), dim=3)
-    scores = 2/(1 + torch.exp(-1.2*scores)) - 1
-    
-    scores = scores.squeeze(2)
-    indices = indices.squeeze(2)
-    
-    return prompt, indices, scores
+    return prompt, generated_text
 
 def load_longbench_dataset(dataset_name: str, num_samples: int = 10) -> List[Dict[str, Any]]:
     dataset_path = f"./datasets/longbench/{dataset_name}.jsonl"
@@ -117,13 +108,12 @@ def process_dataset(
     
     for i, sample in enumerate(tqdm(samples, desc=f"Processing {dataset_name}")):
         prompt = sample["input_prompt"]
-        prompt, selected_indices, scores = generate_answer(model, tokenizer, prompt, dataset_name, model_name)
+        prompt, generated_text = generate_answer(model, tokenizer, prompt, dataset_name, model_name)
         
         training_sample = {
             "dataset": dataset_name,
             "input_prompt": prompt,
-            "selected_indices": selected_indices.cpu().tolist(),
-            "scores": scores.cpu().tolist(),
+            "generated_text": generated_text,
         }
         
         # separators 옵션을 추가하여 공백 없이 한 줄로 저장

@@ -2,8 +2,51 @@ import torch
 from typing import Dict, Any, Tuple
 from dataclasses import dataclass
 
-from .features import ContextEncoder
-from .config import A2SFRLConfig
+from transformers import AutoTokenizer, AutoModel
+from .main import A2SFRLConfig
+
+class ContextEncoder:
+    """Encodes text using jina-embeddings model with CLS token"""
+    
+    def __init__(self, model_name: str = "jinaai/jina-embeddings-v2-small-en", device: str = "cpu"):
+        self.device = device
+        self.model_name = model_name
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.model = AutoModel.from_pretrained(model_name).to(device)
+        self.model.eval()
+        self.embedding_dim = self.model.config.hidden_size
+    
+    def encode_context(self, text: str) -> torch.Tensor:
+        """
+        Encode entire text and extract CLS token
+        
+        Args:
+            text: Input text string
+            
+        Returns:
+            torch.Tensor: CLS token embedding (embedding_dim dimensions)
+        """
+        if not text or not text.strip():
+            # Empty text, return zero vector
+            return torch.zeros(self.embedding_dim, device=self.device)
+        
+        # Encode entire text at once
+        with torch.no_grad():
+            # Tokenize entire text
+            input_ids = self.tokenizer(
+                text,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=8192
+            ).input_ids.to(self.device)
+            
+            outputs = self.model(input_ids)
+            # Extract CLS token (first token)
+            cls_embedding = outputs.last_hidden_state[:, 0, :]  # [1, hidden_size]
+            cls_embedding = cls_embedding.squeeze(0)  # [hidden_size]
+        
+        return cls_embedding
 
 @dataclass
 class EpisodeResult:
@@ -23,22 +66,19 @@ class A2SFEnv:
         
         # Context encoder
         self.context_encoder = ContextEncoder(
-            model_name=config.sentence_transformer_model,
-            device=config.device,
-            context_window=config.context_window,
-            max_context=config.max_context
+            model_name=config.context_encoder_model,
+            device=config.device
         )
         
         # Current episode cache
         self.current_prompt = None
         self.current_dataset = None
-        self.current_selected_indices = None
+        self.current_generated_text_full = None
     
-    def encode_to_state(self, prompt: str, selected_indices: list, rbo_ps: list, dataset: str = None) -> torch.Tensor:
+    def encode_to_state(self, prompt: str, generated_text_full: str, dataset: str = None) -> torch.Tensor:
         self.current_prompt = prompt
         self.current_dataset = dataset
-        self.current_selected_indices = selected_indices
-        self.current_rbo_ps = rbo_ps
+        self.current_generated_text_full = generated_text_full
         
         context_embedding = self.context_encoder.encode_context(prompt).to(self.device, dtype=torch.float32)
         
@@ -60,8 +100,7 @@ class A2SFEnv:
                 prompt=self.current_prompt,
                 a=a_val,
                 b=b_val,
-                selected_indices=self.current_selected_indices,
-                rbo_ps=self.current_rbo_ps,
+                generated_text_full=self.current_generated_text_full,
                 dataset=self.current_dataset
             )
         
@@ -70,7 +109,8 @@ class A2SFEnv:
         info = {
             "a": a_val,
             "b": b_val,
-            "reward": result.reward
+            "reward": result.reward,
+            "generated_text": result.generated_text
         }
         
         return reward, info

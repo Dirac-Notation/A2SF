@@ -6,44 +6,41 @@ This directory contains the reinforcement learning system for training an A2SF m
 
 The RL system consists of:
 
-1. **RL Agent**: Neural network that takes recent context (64 tokens) as input and outputs a compression ratio (0.0 to 1.0)
+1. **RL Agent**: Neural network that takes context (encoded with m2-bert-80M-8k) as input and outputs compression parameters (a, b)
 2. **Environment**: A2SF model environment that executes actions and returns rewards
-3. **Reward Function**: Based on model accuracy (ROUGE, F1 scores) and efficiency
-4. **Training**: PPO algorithm for policy optimization
+3. **Reward Function**: Based on similarity between full cache and compressed cache generated texts
+4. **Training**: NeuralUCB algorithm for policy optimization
 
 ## Architecture
 
 ### Input
-- Recent 64 tokens from LLM prompt, encoded using sentence-transformer
-- Task type embedding
-- History of compression ratios and rewards
+- Full prompt text, encoded using m2-bert-80M-8k CLS token
+- Fixed-length embedding vector (768 dimensions)
 
 ### Output
-- Single continuous action: compression ratio (0.0 to 1.0)
+- Discrete action: tuple of (a, b) parameters for sigmoid cache compression
 
 ### Reward
-- Primary: Model accuracy (ROUGE, F1 scores)
-- Secondary: Efficiency (compression ratio)
+- Cosine similarity between full cache and compressed cache generated texts
 
 ## Files
 
 - `config.py`: Configuration class for RL training
-- `policy.py`: PPO policy network implementation
+- `policy.py`: NeuralUCB policy network implementation
 - `env.py`: RL environment for A2SF model
 - `runner.py`: A2SF model runner with RL integration
 - `trainer.py`: Main training loop
 - `features.py`: Context encoding and state building
-- `buffer.py`: Experience buffer for PPO
-- `main.py`: Command-line interface
-- `run_training.py`: Training script
+- `buffer.py`: Experience buffer for NeuralUCB
+- `main.py`: Command-line interface and training script
 
 ## Usage
 
 ### Basic Training
 
 ```bash
-python RL/run_training.py \
-    --model llama2 \
+python -m RL.main \
+    --model_name llama2 \
     --gpus 0 \
     --iterations 1000 \
     --episodes_per_update 256 \
@@ -54,16 +51,14 @@ python RL/run_training.py \
 ### Advanced Training
 
 ```bash
-python RL/run_training.py \
-    --model llama2 \
+python -m RL.main \
+    --model_name llama2 \
     --gpus 0 1 2 3 \
     --iterations 2000 \
     --episodes_per_update 512 \
     --lr 1e-4 \
-    --accuracy_weight 1.0 \
-    --efficiency_weight 0.2 \
-    --tasks "Code Complete" "Summarization" \
-    --max_samples_per_task 200 \
+    --ucb_beta 1.0 \
+    --uncertainty_coef 0.1 \
     --eval_frequency 20 \
     --save_dir runs/a2sf_rl_advanced
 ```
@@ -71,7 +66,7 @@ python RL/run_training.py \
 ### Resume Training
 
 ```bash
-python RL/run_training.py \
+python -m RL.main \
     --resume runs/a2sf_rl/policy_500.pt \
     --iterations 1000
 ```
@@ -82,10 +77,10 @@ Key parameters in `config.py`:
 
 - `model_name`: LLM model to use (llama, llama2, llama3, opt)
 - `gpus`: List of GPU IDs
-- `accuracy_weight`: Weight for accuracy-based reward
-- `efficiency_weight`: Weight for efficiency-based reward
-- `context_window`: Number of recent tokens to encode (default: 64)
-- `episodes_per_update`: Number of episodes per PPO update
+- `context_encoder_model`: Context encoder model (default: togethercomputer/m2-bert-80M-8k)
+- `ucb_beta`: UCB exploration parameter (default: 1.0)
+- `uncertainty_coef`: Uncertainty regularization coefficient (default: 0.1)
+- `episodes_per_update`: Number of episodes per update
 - `lr`: Learning rate for policy network
 
 ## Monitoring
@@ -106,8 +101,8 @@ See `../pip.txt` for required packages. RL training requires:
 
 ## Notes
 
-- The system uses sentence-transformers to encode context tokens
-- PPO algorithm with GAE for advantage estimation
-- Continuous action space for compression ratio
+- The system uses m2-bert-80M-8k to encode full prompt text (CLS token)
+- NeuralUCB algorithm for bandit-style learning
+- Discrete action space for (a, b) compression parameters
 - Multi-task training on LongBench datasets
 - Automatic checkpointing and evaluation

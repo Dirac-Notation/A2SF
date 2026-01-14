@@ -1,8 +1,8 @@
 import torch
 import math
-from . import KVCache
+from . import LayerCache
 
-class SigmoidCache(KVCache):
+class SigmoidCache(LayerCache):
     """Sigmoid cache implementation"""
     
     def __init__(self, num_key_value_heads: int, seq_dim: int = 2):
@@ -15,8 +15,8 @@ class SigmoidCache(KVCache):
         
     def init_cache(self, compression_config, layer_idx):
         """Initialize Sigmoid cache settings"""
-        self.total_budget = max(round(compression_config.total_budget * compression_config.layerwise_ratios[layer_idx]), 2)
-        self.recent_budget = round(self.total_budget * compression_config.local_ratios)
+        self.total_budget = compression_config.total_budget
+        self.recent_budget = int(self.total_budget * 0.125)
         self.select_budget = self.total_budget - self.recent_budget
         self.a = compression_config.a
         self.b = compression_config.b
@@ -40,6 +40,17 @@ class SigmoidCache(KVCache):
             self.value_data.gather(self.seq_dim, selected_indices),
             self.value_data[:,:,-self.recent_budget:,:]
         ), dim=self.seq_dim)
+        
+        # Update cache lists for compatibility with transformers 4.46.2
+        if len(self.key_cache) > 0:
+            self.key_cache[0] = self.key_data
+            self.value_cache[0] = self.value_data
+        else:
+            self.key_cache = [self.key_data]
+            self.value_cache = [self.value_data]
+        
+        # Update seq_length after selection
+        self.seq_length = self.key_data.size(self.seq_dim)
 
     def flash_prepare_scores(self, attn_scores, q_start, q_end):
         seq_len = attn_scores.size(2)
