@@ -174,14 +174,14 @@ class KVCache(Cache):
 class LayerCache(Cache):
     """Base class for per-layer cache implementations with compression support."""
     
-    def __init__(self, num_key_value_heads: int, seq_dim: int = 2):
+    def __init__(self, num_key_value_heads: int, device: torch.device, seq_dim: int = 2):
         super().__init__()
         self.seq_dim = seq_dim
         self.seq_length = 0
         self.key_data = None
         self.value_data = None
         self.num_key_value_heads = num_key_value_heads
-        self.device = None
+        self.device = device
         self.total_budget = 0
         self.recent_budget = 0
         self.select_budget = 0

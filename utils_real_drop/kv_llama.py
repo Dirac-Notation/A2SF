@@ -303,7 +303,7 @@ class LlamaModel(LlamaPreTrainedModel):
         # Set exponents in cache
         for layer_cache in past_key_values.layer_caches:
             if hasattr(layer_cache, 'exponents'):
-                device = layer_cache.device if layer_cache.device is not None else input_ids.device
+                device = layer_cache.device
                 layer_cache.exponents = exponents.to(device) if exponents is not None else None
 
     def get_input_embeddings(self):
@@ -515,21 +515,22 @@ class KVLlamaForCausalLM(LlamaForCausalLM):
         layer_caches = []
         
         for idx, layer in enumerate(self.model.layers):
+            device = next(layer.parameters()).device
             if self.compression_config.compression_method == "full":
                 from .kv_cache.full_cache import FullCache
-                layer_cache = FullCache(layer.self_attn.num_key_value_heads)
+                layer_cache = FullCache(layer.self_attn.num_key_value_heads, device=device)
             elif self.compression_config.compression_method == "h2o":
                 from .kv_cache.h2o_cache import H2OCache
-                layer_cache = H2OCache(layer.self_attn.num_key_value_heads)
+                layer_cache = H2OCache(layer.self_attn.num_key_value_heads, device=device)
             elif self.compression_config.compression_method == "a2sf":
                 from .kv_cache.a2sf_cache import A2SFCache
-                layer_cache = A2SFCache(layer.self_attn.num_key_value_heads)
+                layer_cache = A2SFCache(layer.self_attn.num_key_value_heads, device=device)
             elif self.compression_config.compression_method == "snap":
                 from .kv_cache.snap_cache import SnapCache
-                layer_cache = SnapCache(layer.self_attn.num_key_value_heads)
+                layer_cache = SnapCache(layer.self_attn.num_key_value_heads, device=device)
             elif self.compression_config.compression_method == "sigmoid":
                 from .kv_cache.sigmoid_cache import SigmoidCache
-                layer_cache = SigmoidCache(layer.self_attn.num_key_value_heads)
+                layer_cache = SigmoidCache(layer.self_attn.num_key_value_heads, device=device)
             else:
                 raise ValueError(f"Unsupported compression method: {self.compression_config.compression_method}")
             

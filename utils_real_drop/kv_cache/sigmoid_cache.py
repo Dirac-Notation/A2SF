@@ -5,13 +5,14 @@ from . import LayerCache
 class SigmoidCache(LayerCache):
     """Sigmoid cache implementation"""
     
-    def __init__(self, num_key_value_heads: int, seq_dim: int = 2):
+    def __init__(self, num_key_value_heads: int, device: torch.device, seq_dim: int = 2):
         super().__init__(num_key_value_heads, seq_dim)
         self.a = None
         self.b = None
         self.exponents = None
         self.prompt = False
         self.selected_indices = None
+        self.device = device
         
     def init_cache(self, compression_config, layer_idx):
         """Initialize Sigmoid cache settings"""
@@ -53,7 +54,10 @@ class SigmoidCache(LayerCache):
         seq_len = attn_scores.size(2)
         
         forgetting = self.window[:,:,q_start:q_end].view(1, 1, seq_len, 1)
-        return (forgetting * attn_scores).sum(dim=self.seq_dim)
+        try:
+            return (forgetting * attn_scores).sum(dim=self.seq_dim)
+        except:
+            import pdb; pdb.set_trace()
 
     def prompt_flash_attention(self, query, key, value, attn_mask, head_dim, block_size=1024):
         """
