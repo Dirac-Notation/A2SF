@@ -13,13 +13,27 @@ from RL.main import A2SFRLConfig
 from RL.policy import NeuralUCBPolicy
 from RL.env import ContextEncoder
 
+# Import metrics and evaluation functions from longbench.py
+from longbench import (
+    dataset2metric,
+    data_group,
+    scorer,
+    calculate_group_averages,
+    evaluate_results
+)
+
+# ============================================================================
+# Prediction Functions (from longbench_pred_RL.py)
+# ============================================================================
+
 def parse_args(args=None):
-    parser = argparse.ArgumentParser(description="LongBench evaluation with RL-trained A2SF model")
+    parser = argparse.ArgumentParser(description="LongBench end-to-end evaluation with RL-trained A2SF model")
     parser.add_argument('--gpus', type=int, nargs='+', default=[0], help="List of GPU IDs (e.g., --gpus 0 1 2 3)")
     parser.add_argument('--model', type=str, required=True, choices=["llama", "llama2", "llama3", "opt"])
     parser.add_argument('--budget', type=int, default=100)
-    parser.add_argument('--task', type=int, nargs='*', default=None, help="List of task numbers (0-5). If not specified, all tasks will be executed. 0: Code Complete, 1: Few Shot, 2: Single-doc QA, 3: Multi-doc QA, 4: Passage Retrieval, 5: Summarization")
+    parser.add_argument('--task', type=int, nargs='*', default=None, help="List of task numbers (0-5). If not specified, all tasks will be executed.")
     parser.add_argument('--rl_checkpoint', type=str, required=True, help="Path to RL model checkpoint (.pt file)")
+    parser.add_argument('--skip_eval', action='store_true', help="Skip evaluation after prediction")
     return parser.parse_args(args)
 
 def load_jsonl_file(file_path):
@@ -83,11 +97,9 @@ def get_rl_action(policy, context_encoder, prompt, dataset, model_name, device, 
     context_embedding = context_encoder.encode_context(prompt)
     
     # Build state (ensure it's on the correct device and dtype)
-    # forward() method handles 1D -> 2D conversion, but we ensure proper device/dtype here
     state = context_embedding.to(device, dtype=torch.float32)
     
     # Get action from policy using UCB
-    # During inference, we still use UCB for action selection (beta can be adjusted)
     with torch.no_grad():
         action, ucb_value = policy.act(state, beta=ucb_beta)
     
@@ -202,7 +214,7 @@ if __name__ == '__main__':
     print(f"RL Policy loaded successfully")
     print(f"Config: {rl_config}")
 
-    # Task 이름 리스트 (번호로 접근하기 위해 명시적으로 정의)
+    # Task 이름 리스트
     task_list = [
         "Code Complete",
         "Few Shot",
@@ -212,21 +224,10 @@ if __name__ == '__main__':
         "Summarization",
     ]
     
-    data_group = {
-        "Code Complete": ["repobench-p", "lcc"],
-        "Few Shot": ["trec", "triviaqa", "samsum"],
-        "Single-doc QA": ["narrativeqa", "qasper", "multifieldqa_en"],
-        "Multi-doc QA": ["hotpotqa", "2wikimqa", "musique"],
-        "Summarization": ["gov_report", "qmsum", "multi_news"],
-        "Passage Retrieval": ["passage_retrieval_en", "passage_count"],
-    }
-    
     # Task 번호를 task 이름으로 변환
     if args.task is None:
-        # 기본값: 전체 task 실행
         selected_tasks = task_list
     else:
-        # 번호로 선택된 task들
         selected_tasks = []
         for task_num in args.task:
             if 0 <= task_num < len(task_list):
@@ -238,6 +239,8 @@ if __name__ == '__main__':
     
     if not os.path.exists("result_txt/pred"):
         os.makedirs("result_txt/pred")
+    
+    output_dir = None
     
     for task in selected_tasks:
         datasets = data_group[task]
@@ -257,6 +260,10 @@ if __name__ == '__main__':
                 os.makedirs(output_dir)
             out_path = f"{output_dir}/{dataset}.jsonl"
             
+            # Clear existing file
+            if os.path.exists(out_path):
+                os.remove(out_path)
+            
             max_gen = dataset2maxlen[dataset]
             
             get_pred_rl(data, max_length, max_gen, dataset, model, tokenizer, out_path, 
@@ -264,5 +271,9 @@ if __name__ == '__main__':
             
             print(f"Completed {dataset} with RL policy")
     
+    # Evaluate results if not skipped
+    if not args.skip_eval and output_dir and os.path.exists(output_dir):
+        evaluate_results(output_dir)
+    
     print("\nRL LongBench evaluation completed!")
-    print(f"Results saved in: result_txt/pred/{args.model}_sigmoid_{args.budget}_RL/")
+
