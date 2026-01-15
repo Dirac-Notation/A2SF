@@ -5,10 +5,11 @@ from . import LayerCache
 class SnapCache(LayerCache):
     """Snap cache implementation"""
     
-    def __init__(self, num_key_value_heads: int, seq_dim: int = 2):
+    def __init__(self, num_key_value_heads: int, device: torch.device, seq_dim: int = 2):
         super().__init__(num_key_value_heads, seq_dim)
         self.prompt = False
         self.selected_indices = None
+        self.device = device
     
     def init_cache(self, compression_config, layer_idx):
         """Initialize Snap cache settings"""
