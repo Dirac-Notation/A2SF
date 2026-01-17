@@ -64,12 +64,11 @@ def load_rl_policy(checkpoint_path, device, target_model, target_tokenizer):
         print("Warning: Config not found in checkpoint, using default config")
     
     # Initialize attention encoder using target model's embeddings
-    # device should be a string, not torch.device object
-    device_str = str(device) if isinstance(device, torch.device) else device
     context_encoder = AttentionEncoder(
         target_model=target_model,
         target_tokenizer=target_tokenizer,
-        device=device_str,
+        device=device,
+        query_dim=128,
         output_dim=8192,
         num_query_tokens=16
     ).to(device)
