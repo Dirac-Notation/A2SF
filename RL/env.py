@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from typing import Dict, Any, Tuple
 from dataclasses import dataclass
 
@@ -17,11 +18,11 @@ except ImportError:
 
 class AttentionEncoder(nn.Module):
     """
-    Attention-based encoder using target model's first layer, first head parameters
-    - Uses target model's embedding layer for token embeddings
-    - Uses first layer's first head Q, K projections from target model
+    Attention-based encoder using cloned parameters from target model's first layer, first head
+    - Clones target model's embedding layer weights
+    - Clones first layer's first head Q, K projections from target model
     - Query: last 16 tokens, Key: all tokens
-    - Applies RoPE from first layer
+    - Creates independent RoPE from first layer's config
     - Performs attention: softmax(Q*K^T/sqrt(head_dim))
     - Sums over query dimension to get (1, seq_len) vector
     - Pads to 8192 dimensions
@@ -30,16 +31,12 @@ class AttentionEncoder(nn.Module):
     
     def __init__(self, target_model, target_tokenizer, device: str = "cpu", output_dim: int = 8192, num_query_tokens: int = 16):
         super().__init__()
-        self.device = device
-        self.target_model = target_model
+        self.device = device if isinstance(device, torch.device) else torch.device(device)
         self.target_tokenizer = target_tokenizer
         self.output_dim = output_dim
         self.num_query_tokens = num_query_tokens
         
-        # Get first layer's attention module
-        self.first_layer_attn = self._get_first_layer_attention()
-        
-        # Get embedding dimension and head dimension from target model
+        # Get config from target model
         if hasattr(target_model, 'config'):
             config = target_model.config
         elif hasattr(target_model, 'model') and hasattr(target_model.model, 'config'):
@@ -51,22 +48,34 @@ class AttentionEncoder(nn.Module):
         self.num_heads = config.num_attention_heads
         self.head_dim = self.embedding_dim // self.num_heads
         
+        # Get first layer's attention module to clone parameters
+        first_layer_attn = self._get_first_layer_attention(target_model)
+        
+        # Clone embedding layer weights
+        embed_layer = self._get_embedding_layer(target_model)
+        with torch.no_grad():
+            # Clone embedding weights: (vocab_size, hidden_size)
+            embed_weight = embed_layer.weight.clone().to(dtype=torch.float32)
+        
+        # Register embedding as buffer
+        self.register_buffer('embed_weight', embed_weight)
+        
         # Extract only first head's parameters from q_proj and k_proj
         # q_proj.weight shape: (num_heads * head_dim, hidden_size)
         # k_proj.weight shape: (num_key_value_heads * head_dim, hidden_size)
         # First head: weight[0:head_dim, :]
         with torch.no_grad():
-            q_proj_first_head_weight = self.first_layer_attn.q_proj.weight[0:self.head_dim, :].clone().to(dtype=torch.float32)  # (head_dim, hidden_size)
-            k_proj_first_head_weight = self.first_layer_attn.k_proj.weight[0:self.head_dim, :].clone().to(dtype=torch.float32)  # (head_dim, hidden_size)
+            q_proj_first_head_weight = first_layer_attn.q_proj.weight[0:self.head_dim, :].clone().to(dtype=torch.float32)  # (head_dim, hidden_size)
+            k_proj_first_head_weight = first_layer_attn.k_proj.weight[0:self.head_dim, :].clone().to(dtype=torch.float32)  # (head_dim, hidden_size)
             
             # Extract bias if exists (first head only)
-            if self.first_layer_attn.q_proj.bias is not None:
-                q_proj_first_head_bias = self.first_layer_attn.q_proj.bias[0:self.head_dim].clone().to(dtype=torch.float32)  # (head_dim,)
+            if first_layer_attn.q_proj.bias is not None:
+                q_proj_first_head_bias = first_layer_attn.q_proj.bias[0:self.head_dim].clone().to(dtype=torch.float32)  # (head_dim,)
             else:
                 q_proj_first_head_bias = None
                 
-            if self.first_layer_attn.k_proj.bias is not None:
-                k_proj_first_head_bias = self.first_layer_attn.k_proj.bias[0:self.head_dim].clone().to(dtype=torch.float32)  # (head_dim,)
+            if first_layer_attn.k_proj.bias is not None:
+                k_proj_first_head_bias = first_layer_attn.k_proj.bias[0:self.head_dim].clone().to(dtype=torch.float32)  # (head_dim,)
             else:
                 k_proj_first_head_bias = None
         
@@ -82,32 +91,63 @@ class AttentionEncoder(nn.Module):
         else:
             self.register_buffer('k_proj_first_head_bias', None)
         
+        # Create independent RoPE from first layer's config
+        # Clone rotary embedding parameters
+        from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
+        with torch.no_grad():
+            # Get rotary embedding config from first layer
+            rope_head_dim = first_layer_attn.head_dim
+            rope_max_position_embeddings = first_layer_attn.max_position_embeddings
+            rope_theta = first_layer_attn.rope_theta
+            
+            # Create independent rotary embedding
+            self.rotary_emb = LlamaRotaryEmbedding(
+                rope_head_dim,
+                max_position_embeddings=rope_max_position_embeddings,
+                base=rope_theta,
+            )
+            # Clone inv_freq if it exists
+            if hasattr(first_layer_attn.rotary_emb, 'inv_freq'):
+                self.rotary_emb.inv_freq = first_layer_attn.rotary_emb.inv_freq.clone()
+        
         # Scale factor for attention (using head_dim instead of query_dim)
         self.scale = 1.0 / (self.head_dim ** 0.5)
+        
+        # Move all buffers to specified device
+        self.to(self.device)
         
         # Freeze all parameters (encoder should not be trained)
         self.eval()
         for param in self.parameters():
             param.requires_grad = False
     
-    def _get_first_layer_attention(self):
+    def _get_first_layer_attention(self, target_model):
         """Get the first layer's attention module from target model"""
         # Try different model structures
-        if hasattr(self.target_model, 'model') and hasattr(self.target_model.model, 'layers'):
+        if hasattr(target_model, 'model') and hasattr(target_model.model, 'layers'):
             # Standard structure: model.model.layers[0].self_attn
-            if len(self.target_model.model.layers) == 0:
+            if len(target_model.model.layers) == 0:
                 raise ValueError("Target model has no layers")
-            return self.target_model.model.layers[0].self_attn
-        elif hasattr(self.target_model, 'layers'):
+            return target_model.model.layers[0].self_attn
+        elif hasattr(target_model, 'layers'):
             # Alternative structure: model.layers[0].self_attn
-            if len(self.target_model.layers) == 0:
+            if len(target_model.layers) == 0:
                 raise ValueError("Target model has no layers")
-            return self.target_model.layers[0].self_attn
+            return target_model.layers[0].self_attn
         else:
             raise ValueError("Cannot find layers in target model")
     
+    def _get_embedding_layer(self, target_model):
+        """Get the embedding layer from target model"""
+        if hasattr(target_model, 'embed_tokens'):
+            return target_model.embed_tokens
+        elif hasattr(target_model, 'model') and hasattr(target_model.model, 'embed_tokens'):
+            return target_model.model.embed_tokens
+        else:
+            raise ValueError("Cannot find embedding layer in target model")
+    
     def _init_weights(self):
-        """No initialization needed - using target model's parameters"""
+        """No initialization needed - using cloned parameters"""
         pass
     
     def trainable_parameters(self):
@@ -115,15 +155,6 @@ class AttentionEncoder(nn.Module):
         Return empty list - encoder is frozen and not trained.
         """
         return []
-    
-    def get_embedding_layer(self):
-        """Get the embedding layer from target model"""
-        if hasattr(self.target_model, 'embed_tokens'):
-            return self.target_model.embed_tokens
-        elif hasattr(self.target_model, 'model') and hasattr(self.target_model.model, 'embed_tokens'):
-            return self.target_model.model.embed_tokens
-        else:
-            raise ValueError("Cannot find embedding layer in target model")
     
     def encode_context(self, text: str) -> torch.Tensor:
         """
@@ -149,13 +180,11 @@ class AttentionEncoder(nn.Module):
         input_ids = tokenized.input_ids.to(self.device)  # (1, seq_len)
         seq_len = input_ids.size(1)
         
-        # Get embeddings from target model (detached to prevent gradient flow to target model)
-        embed_layer = self.get_embedding_layer()
+        # Get embeddings using cloned embedding weights
         with torch.no_grad():
-            # Get token embeddings: (1, seq_len, embedding_dim)
-            token_embeddings = embed_layer(input_ids)
-        # Detach to ensure no gradient flows to target model's embedding layer
-        token_embeddings = token_embeddings.detach().to(dtype=torch.float32)
+            # Use cloned embedding weights: (1, seq_len, embedding_dim)
+            # F.embedding(input_ids, embed_weight) is equivalent to embed_layer(input_ids)
+            token_embeddings = F.embedding(input_ids, self.embed_weight).to(dtype=torch.float32)  # (1, seq_len, embedding_dim)
         
         # Extract query (last num_query_tokens) and key (all tokens)
         if seq_len <= self.num_query_tokens:
@@ -206,10 +235,10 @@ class AttentionEncoder(nn.Module):
                 query_position_ids = torch.arange(seq_len - actual_query_len, seq_len, dtype=torch.long, device=self.device).unsqueeze(0)  # (1, actual_query_len)
                 key_position_ids = torch.arange(seq_len, dtype=torch.long, device=self.device).unsqueeze(0)  # (1, seq_len)
             
-            # Get RoPE embeddings from first layer
+            # Get RoPE embeddings using cloned rotary_emb
             # rotary_emb expects (tensor, position_ids) and returns (cos, sin)
-            cos_query, sin_query = self.first_layer_attn.rotary_emb(query_states, query_position_ids)
-            cos_key, sin_key = self.first_layer_attn.rotary_emb(key_states, key_position_ids)
+            cos_query, sin_query = self.rotary_emb(query_states, query_position_ids)
+            cos_key, sin_key = self.rotary_emb(key_states, key_position_ids)
             
             # Apply RoPE - apply_rotary_pos_emb(query, key, cos, sin) returns (rotated_query, rotated_key)
             # Since query and key have different position_ids, we apply RoPE separately

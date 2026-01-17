@@ -212,7 +212,10 @@ if __name__ == '__main__':
     model, tokenizer = load_model(model_name, args.gpus)
     
     # Load RL policy (requires target model and tokenizer for AttentionEncoder)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Get the actual device of the first layer (for multi-GPU setups)
+    # AttentionEncoder uses the first layer, so we need to match its device
+    first_layer_device = next(model.model.layers[0].parameters()).device
+    device = first_layer_device
     rl_policy, context_encoder, rl_config = load_rl_policy(args.rl_checkpoint, device, model, tokenizer)
     
     print(f"RL Policy loaded successfully")
