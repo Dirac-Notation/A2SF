@@ -63,20 +63,15 @@ def load_rl_policy(checkpoint_path, device, target_model, target_tokenizer):
         config = A2SFRLConfig()
         print("Warning: Config not found in checkpoint, using default config")
     
-    # Initialize attention encoder using target model's embeddings
+    # Initialize attention encoder using target model's first layer, first head parameters
+    # AttentionEncoder is frozen and uses target model's parameters, so no need to load from checkpoint
     context_encoder = AttentionEncoder(
         target_model=target_model,
         target_tokenizer=target_tokenizer,
         device=device,
-        query_dim=128,
         output_dim=8192,
         num_query_tokens=16
     ).to(device)
-    
-    # Load attention encoder weights if available in checkpoint
-    if "attention_encoder_state_dict" in checkpoint:
-        context_encoder.load_state_dict(checkpoint["attention_encoder_state_dict"])
-        print("Loaded attention encoder weights from checkpoint")
     
     # State dimension is fixed to 8192 (output_dim of AttentionEncoder)
     state_dim = 8192
