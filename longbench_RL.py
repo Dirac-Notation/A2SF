@@ -52,8 +52,12 @@ def load_rl_policy(checkpoint_path, device, target_model, target_tokenizer):
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
     
+    # Convert device to string if it's a torch.device object
+    device_str = str(device) if isinstance(device, torch.device) else device
+    device_obj = torch.device(device_str) if isinstance(device, str) else device
+    
     # Load checkpoint with weights_only=False to allow custom classes
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    checkpoint = torch.load(checkpoint_path, map_location=device_obj, weights_only=False)
     
     # Extract config from checkpoint
     if "config" in checkpoint:
@@ -64,34 +68,45 @@ def load_rl_policy(checkpoint_path, device, target_model, target_tokenizer):
         print("Warning: Config not found in checkpoint, using default config")
     
     # Initialize attention encoder using target model's embeddings
+    # Note: AttentionEncoder uses target model's first layer parameters (frozen)
+    # No need to load state_dict as it's extracted from target model
     context_encoder = AttentionEncoder(
         target_model=target_model,
         target_tokenizer=target_tokenizer,
-        device=device,
-        query_dim=128,
+        device=device_str,
         output_dim=8192,
         num_query_tokens=16
-    ).to(device)
+    ).to(device_obj)
     
-    # Load attention encoder weights if available in checkpoint
-    if "attention_encoder_state_dict" in checkpoint:
-        context_encoder.load_state_dict(checkpoint["attention_encoder_state_dict"])
-        print("Loaded attention encoder weights from checkpoint")
+    # Note: attention_encoder_state_dict is typically empty in checkpoints
+    # because the encoder uses target model's frozen parameters
+    if "attention_encoder_state_dict" in checkpoint and checkpoint["attention_encoder_state_dict"]:
+        try:
+            context_encoder.load_state_dict(checkpoint["attention_encoder_state_dict"], strict=False)
+            print("Loaded attention encoder weights from checkpoint")
+        except Exception as e:
+            print(f"Warning: Could not load attention encoder weights: {e}")
+            print("Note: Attention encoder uses target model's first layer parameters (frozen)")
     
     # State dimension is fixed to 8192 (output_dim of AttentionEncoder)
     state_dim = 8192
     
     # Initialize policy with config values
+    # Ensure a_values and b_values are tensors
+    a_values = config.a_values if isinstance(config.a_values, torch.Tensor) else torch.tensor(config.a_values)
+    b_values = config.b_values if isinstance(config.b_values, torch.Tensor) else torch.tensor(config.b_values)
+    
     policy = NeuralUCBPolicy(
         state_dim=state_dim,
-        a_values=config.a_values,
-        b_values=config.b_values
-    ).to(device)
+        a_values=a_values,
+        b_values=b_values
+    ).to(device_obj)
     
     # Load policy weights
     if "policy_state_dict" in checkpoint:
         policy.load_state_dict(checkpoint["policy_state_dict"])
-        print(f"Loaded policy from iteration {checkpoint.get('iteration', 'unknown')}")
+        iteration = checkpoint.get('iteration', 'unknown')
+        print(f"Loaded policy from iteration {iteration}")
     else:
         raise ValueError("Policy state dict not found in checkpoint")
     
@@ -217,8 +232,10 @@ if __name__ == '__main__':
     model, tokenizer = load_model(model_name, args.gpus)
     
     # Load RL policy (requires target model and tokenizer for AttentionEncoder)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    rl_policy, context_encoder, rl_config = load_rl_policy(args.rl_checkpoint, device, model, tokenizer)
+    # Use device string for compatibility with AttentionEncoder
+    device_str = "cuda" if torch.cuda.is_available() else "cpu"
+    device_obj = torch.device(device_str)
+    rl_policy, context_encoder, rl_config = load_rl_policy(args.rl_checkpoint, device_str, model, tokenizer)
     
     print(f"RL Policy loaded successfully")
     print(f"Config: {rl_config}")
@@ -276,7 +293,7 @@ if __name__ == '__main__':
             max_gen = dataset2maxlen[dataset]
             
             get_pred_rl(data, max_length, max_gen, dataset, model, tokenizer, out_path, 
-                       model_name, rl_policy, context_encoder, rl_config, device, args.budget)
+                       model_name, rl_policy, context_encoder, rl_config, device_obj, args.budget)
             
             print(f"Completed {dataset} with RL policy")
     
