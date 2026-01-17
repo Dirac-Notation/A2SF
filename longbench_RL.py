@@ -159,8 +159,18 @@ def get_pred_rl(data, max_length, max_gen, dataset, model, tokenizer, out_path, 
         
         input = tokenizer(prompt, truncation=False, return_tensors="pt")
         
-        input_ids = input.input_ids.to(model.device)
-        attention_mask = input.attention_mask.to(torch.bfloat16).to(model.device)
+        # Get the device from the first layer of the model to handle multi-GPU setups
+        # For models with device_map="auto", we need to get the device of the first layer
+        if hasattr(model, 'model') and hasattr(model.model, 'layers') and len(model.model.layers) > 0:
+            first_layer_device = next(model.model.layers[0].parameters()).device
+        elif hasattr(model, 'layers') and len(model.layers) > 0:
+            first_layer_device = next(model.layers[0].parameters()).device
+        else:
+            # Fallback to model.device if available, otherwise use the device parameter
+            first_layer_device = getattr(model, 'device', device)
+        
+        input_ids = input.input_ids.to(first_layer_device)
+        attention_mask = input.attention_mask.to(torch.bfloat16).to(first_layer_device)
         
         context_length = input_ids.shape[-1]
         
