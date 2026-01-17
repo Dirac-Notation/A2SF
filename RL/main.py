@@ -16,30 +16,32 @@ class A2SFRLConfig:
     model: str = "llama3"  # llama, llama2, llama3, opt
     gpus: List[int] = field(default_factory=lambda: [0])
     
-    # ----- Context Features -----
-    context_encoder_model: str = "jinaai/jina-embeddings-v2-small-en"
-    
     # ----- Policy Action Spaces -----
     a_values: torch.Tensor = field(default_factory=lambda: torch.tensor([10.0]))
-    b_values: torch.Tensor = field(default_factory=lambda: torch.tensor([1, 2, 4, 8, 16, 32, 64, 128, 512, 1024, 4096, 8192]))
+    b_values: torch.Tensor = field(default_factory=lambda: torch.tensor([1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]))
     
     # ----- NeuralUCB Hyperparameters -----
-    lr: float = 1e-4
-    max_grad_norm: float = 1.0
+    lr: float = 1e-2
     ucb_beta: float = 1.0  # Exploration parameter for UCB
+    l2_coef: float = 1e-5  # L2 regularization coefficient for weight decay
+    
+    # ----- Learning Rate Scheduler -----
+    scheduler_type: str = "cosine"  # "step", "cosine", "exponential", "none"
+    scheduler_step_size: int = 200  # For StepLR: decay every N iterations
+    scheduler_gamma: float = 0.5  # For StepLR/ExponentialLR: decay factor
+    scheduler_T_max: int = 3000  # For CosineAnnealingLR: maximum iterations
     
     # ----- Training Configuration -----
-    iterations: int = 1000  # Number of training iterations
+    iterations: int = 3000  # Number of training iterations
     episodes_per_update: int = 16  # Number of episodes per update
     
     # ----- Evaluation Configuration -----
     eval_frequency: int = 50
-    eval_samples: int = 160
+    eval_samples: int = 100
     
     # ----- Misc -----
     seed: int = 42
     save_dir: str = "runs/a2sf_rl"
-    log_frequency: int = 1
     resume: Optional[str] = None  # Path to checkpoint to resume from
     
     @property
@@ -61,7 +63,7 @@ class A2SFRLConfig:
         default_config = cls()
         
         parser = argparse.ArgumentParser(description="Train A2SF RL Agent")
-        
+    
         # Minimal command line arguments
         parser.add_argument('--gpu', type=int, nargs='+', default=default_config.gpus, help="GPU ID(s) to use (default: [0])")
         parser.add_argument('--model', type=str, default=default_config.model, choices=["llama", "llama2", "llama3", "opt"], help="Model name")
@@ -82,20 +84,17 @@ class A2SFRLConfig:
             save_dir=args.save_dir,
             seed=seed,
             # All other fields use defaults
-            context_encoder_model=default_config.context_encoder_model,
             a_values=default_config.a_values,
             b_values=default_config.b_values,
             lr=default_config.lr,
             ucb_beta=default_config.ucb_beta,
-            max_grad_norm=default_config.max_grad_norm,
+            l2_coef=default_config.l2_coef,
             iterations=default_config.iterations,
             episodes_per_update=default_config.episodes_per_update,
             eval_frequency=default_config.eval_frequency,
             eval_samples=default_config.eval_samples,
-            log_frequency=default_config.log_frequency,
-            resume=default_config.resume,
+            resume=default_config.resume
         )
-
 
 def main():
     """Main function"""
@@ -111,9 +110,16 @@ def main():
     print(f"  GPUs: {config.gpus}")
     print(f"  Device: {config.device}")
     print(f"  Seed: {config.seed}")
-    print(f"  Context encoder: {config.context_encoder_model}")
     print(f"  Episodes per update: {config.episodes_per_update}")
     print(f"  Learning rate: {config.lr}")
+    print(f"  LR Scheduler: {config.scheduler_type}")
+    if config.scheduler_type != "none":
+        if config.scheduler_type == "step":
+            print(f"    Step size: {config.scheduler_step_size}, Gamma: {config.scheduler_gamma}")
+        elif config.scheduler_type == "cosine":
+            print(f"    T_max: {config.scheduler_T_max}")
+        elif config.scheduler_type == "exponential":
+            print(f"    Gamma: {config.scheduler_gamma}")
     print(f"  UCB beta: {config.ucb_beta}")
     print(f"  Save directory: {config.save_dir}")
     print()
@@ -134,6 +140,7 @@ def main():
     final_checkpoint_path = os.path.join(config.save_dir, "policy_final.pt")
     torch.save({
         "policy_state_dict": trainer.policy.state_dict(),
+        "attention_encoder_state_dict": trainer.env.context_encoder.state_dict(),
         "optimizer_state_dict": trainer.optimizer.state_dict(),
         "config": config,
     }, final_checkpoint_path)

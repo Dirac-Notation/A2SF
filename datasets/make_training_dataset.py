@@ -1,16 +1,28 @@
 #!/usr/bin/env python3
 import json
 import os
+import sys
 import random
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 import torch
 import argparse
 from tqdm import tqdm
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer
+from datasets import load_dataset
+
+# Add project root to Python path
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+from utils_real_drop import KVLlamaForCausalLM
+from utils import CompressionConfig
 import numpy as np
 
 PROMPT_LENGTH = 7500
 GENERATION_LENGTHS = 16
+MIN_TOKENS = 1024  # 필터링을 위한 최소 토큰 수
+MAX_TOKENS = 7500  # 필터링을 위한 최대 토큰 수
 
 def set_seed(seed):
     torch.manual_seed(seed)
@@ -30,30 +42,177 @@ def load_model_for_generation(model_name, gpu_list=None):
     if gpu_list is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpu_list))
     
-    print(f"Loading model: {model_name} from {model_path}")
+    print(f"Loading KVLlamaForCausalLM: {model_name} from {model_path}")
     
     tokenizer = AutoTokenizer.from_pretrained(model_path)
-    model = AutoModelForCausalLM.from_pretrained(
+    model = KVLlamaForCausalLM.from_pretrained(
         model_path, 
         torch_dtype=torch.bfloat16, 
         device_map="auto"
     )
     model = model.eval()
+    
     return model, tokenizer
 
-def logits_to_tokens(logits):
-    return torch.argmax(logits[:, -1, :], dim=-1).unsqueeze(-1)
+def count_tokens(tokenizer, text: str) -> int:
+    """Count tokens in text"""
+    if not text:
+        return 0
+    return len(tokenizer.encode(text, add_special_tokens=False))
+
+def format_prompt_for_task(task_type: str, context: str = "", question: str = "") -> str:
+    """Format prompt based on task type, similar to LongBench prompt formats"""
+    
+    if task_type in ["summarization", "summary"]:
+        return f"You are given a document and a query. Write a summary based on the query.\n\nDocument:\n{context}\n\nQuery: {question}"
+    elif task_type in ["qa", "question_answering", "question"]:
+        return f"Answer the question based on the given context. Only give me the answer and do not output any other words.\n\nContext:\n{context}\n\nAnswer the question based on the given context. Only give me the answer and do not output any other words.\n\nQuestion: {question}\nAnswer:"
+    elif task_type in ["retrieval", "retrieve"]:
+        return f"Here are some paragraphs, along with a query. Please determine which paragraph the query is from.\n\nParagraphs:\n{context}\n\nThe following is a query.\n\n{question}\n\nPlease enter the number of the paragraph that the query is from.\n\nThe answer is: "
+    else:
+        return f"{question}"
+
+def load_zeroscrolls_datasets(tokenizer) -> List[Dict[str, Any]]:
+    """Load all ZeroSCROLLS datasets from HuggingFace with 8K token filtering"""
+    all_samples = []
+    
+    # All ZeroSCROLLS subsets
+    subsets = [
+        "gov_report", "summ_screen_fd", "qmsum", "quality", "qasper",
+        "narrative_qa", "musique", "hotpot_qa", "space_digest", "book_sum_sort"
+    ]
+    
+    task_type_mapping = {
+        "gov_report": "summarization",
+        "summ_screen_fd": "summarization",
+        "qmsum": "summarization",
+        "quality": "qa",
+        "qasper": "qa",
+        "narrative_qa": "qa",
+        "musique": "qa",
+        "space_digest": "summarization",
+        "book_sum_sort": "retrieval"
+    }
+    
+    for subset in subsets:
+        print(f"Loading ZeroSCROLLS subset: {subset}")
+        try:
+            dataset = load_dataset("tau/zero_scrolls", subset, split="test", trust_remote_code=True)
+        except Exception as e:
+            print(f"  Error loading {subset}: {e}")
+            continue
+        
+        task_type = task_type_mapping.get(subset, "qa")
+        
+        for example in tqdm(dataset, desc=f"Processing {subset}"):
+            # Extract fields from ZeroSCROLLS
+            all_input = example.get("input", "")
+            # Format prompt
+            prompt = format_prompt_for_task(task_type, context="", question=all_input)
+            
+            # Filter by token length (8K 근처)
+            token_count = count_tokens(tokenizer, prompt)
+            if token_count < MIN_TOKENS or token_count > MAX_TOKENS:
+                continue
+            
+            sample = {
+                "input_prompt": prompt,
+                "dataset": f"zeroscrolls_{subset}",
+                "source": "ZeroSCROLLS",
+                "length": token_count,
+                "task_type": task_type
+            }
+            all_samples.append(sample)
+        
+        print(f"  Loaded {len([s for s in all_samples if s['dataset'] == f'zeroscrolls_{subset}'])} samples from {subset} (after filtering)")
+    
+    return all_samples
+
+def load_leval_datasets(tokenizer) -> List[Dict[str, Any]]:
+    """Load all L-Eval datasets from HuggingFace with 8K token filtering"""
+    all_samples = []
+    
+    # All available L-Eval subsets (from error message)
+    subsets = [
+        "codeU", "coursera", "financial_qa", "gov_report_summ", "gsm100",
+        "legal_contract_qa", "meeting_summ", "multidoc_qa", "narrative_qa",
+        "natural_question", "news_summ", "paper_assistant", "patent_summ",
+        "quality", "review_summ", "sci_fi", "scientific_qa", "topic_retrieval_longchat",
+        "tpo", "tv_show_summ"
+    ]
+    
+    task_type_mapping = {
+        "codeU": "qa",
+        "coursera": "qa",
+        "financial_qa": "qa",
+        "gov_report_summ": "summarization",
+        "gsm100": "qa",
+        "legal_contract_qa": "qa",
+        "meeting_summ": "summarization",
+        "multidoc_qa": "qa",
+        "narrative_qa": "qa",
+        "natural_question": "qa",
+        "news_summ": "summarization",
+        "paper_assistant": "qa",
+        "patent_summ": "summarization",
+        "quality": "qa",
+        "review_summ": "summarization",
+        "sci_fi": "qa",
+        "scientific_qa": "qa",
+        "topic_retrieval_longchat": "retrieval",
+        "tpo": "qa",
+        "tv_show_summ": "summarization"
+    }
+    
+    for subset in subsets:
+        print(f"Loading L-Eval subset: {subset}")
+        try:
+            dataset = load_dataset("L4NLP/LEval", subset, split="test", trust_remote_code=True)
+        except Exception as e:
+            print(f"  Error loading {subset}: {e}")
+            continue
+        
+        task_type = task_type_mapping.get(subset, "qa")
+        
+        for example in tqdm(dataset, desc=f"Processing {subset}"):
+            # Extract fields from L-Eval
+            context = example.get("input", "")
+            question = example.get("instructions", "")
+            
+            # Format prompt
+            prompt = format_prompt_for_task(task_type, context=context, question=question)
+            
+            # Filter by token length (8K 근처)
+            token_count = count_tokens(tokenizer, prompt)
+            
+            if token_count < MIN_TOKENS or token_count > MAX_TOKENS:
+                continue
+            
+            sample = {
+                "input_prompt": prompt,
+                "dataset": f"leval_{subset}",
+                "source": "L-Eval",
+                "length": token_count,
+                "task_type": task_type
+            }
+            all_samples.append(sample)
+                
+        print(f"  Loaded {len([s for s in all_samples if s['dataset'] == f'leval_{subset}'])} samples from {subset} (after filtering)")
+    
+    return all_samples
 
 def generate_answer(model, tokenizer, prompt: str, dataset: str, model_name: str) -> tuple:
-    tokenized_prompt = tokenizer(prompt, truncation=False, return_tensors="pt").input_ids[0]
+    # Initialize full cache (no compression) before each generation
+    compression_config = CompressionConfig()
+    compression_config.compression_method = "full"
+    compression_config.total_budget = None
+    compression_config.layerwise_ratios = None
+    compression_config.local_ratios = None
+    model.init_cache(compression_config)
     
-    if len(tokenized_prompt) > PROMPT_LENGTH:
-        half = int(PROMPT_LENGTH/2)
-        prompt = tokenizer.decode(tokenized_prompt[:half], skip_special_tokens=True) + tokenizer.decode(tokenized_prompt[-half:], skip_special_tokens=True)
-    
-    if dataset not in ["trec", "triviaqa", "samsum", "lsht", "lcc", "repobench-p"]:
-        if "llama" in model_name:
-            prompt = f"[INST]{prompt}[/INST]"
+    # Add system prompt for llama models
+    if "llama" in model_name:
+        prompt = f"[INST]{prompt}[/INST]"
     
     input = tokenizer(prompt, truncation=False, return_tensors="pt")
     input_ids = input.input_ids.to(model.device)
@@ -68,110 +227,111 @@ def generate_answer(model, tokenizer, prompt: str, dataset: str, model_name: str
             do_sample=False,
             temperature=1.0,
             pad_token_id=tokenizer.eos_token_id,
-        )[0]
+        )
     
     # Decode only the generated part (excluding the input prompt)
     context_length = input_ids.size(1)
-    generated_text = tokenizer.decode(output[context_length:], skip_special_tokens=True)
+    
+    # model.generate() returns tensor of shape [batch_size, seq_len]
+    # Get the first sequence (batch index 0) and only the generated part
+    if isinstance(output, torch.Tensor):
+        # output shape: [1, total_length] or [total_length]
+        if output.dim() == 2:
+            # Batch dimension exists
+            generated_ids = output[0, context_length:]
+        else:
+            # No batch dimension
+            generated_ids = output[context_length:]
+    else:
+        # Handle dict output if return_dict_in_generate was used
+        generated_ids = output.sequences[0, context_length:] if hasattr(output, 'sequences') else output[0, context_length:]
+    
+    # Decode the generated token IDs
+    generated_text = tokenizer.decode(generated_ids, skip_special_tokens=True)
     
     return prompt, generated_text
 
-def load_longbench_dataset(dataset_name: str, num_samples: int = 10) -> List[Dict[str, Any]]:
-    dataset_path = f"./datasets/longbench/{dataset_name}.jsonl"
-    
-    if not os.path.exists(dataset_path):
-        print(f"Dataset file not found: {dataset_path}")
-        return []
-    
-    samples = []
-    with open(dataset_path, 'r', encoding='utf-8') as f:
-        for line in f:
-            if line.strip():
-                sample = json.loads(line.strip())
-                samples.append(sample)
-    
-    if len(samples) > num_samples:
-        samples = random.sample(samples, num_samples)
-    
-    return samples
-
-def process_dataset(
-    dataset_name: str, 
-    samples: List[Dict[str, Any]], 
-    model, 
-    tokenizer, 
-    model_name: str,
-    output_file_handle
-) -> int:
-    count = 0
-    print(f"Processing {dataset_name}")
-    
-    for i, sample in enumerate(tqdm(samples, desc=f"Processing {dataset_name}")):
-        prompt = sample["input_prompt"]
-        prompt, generated_text = generate_answer(model, tokenizer, prompt, dataset_name, model_name)
-        
-        training_sample = {
-            "dataset": dataset_name,
-            "input_prompt": prompt,
-            "generated_text": generated_text,
-        }
-        
-        # separators 옵션을 추가하여 공백 없이 한 줄로 저장
-        output_file_handle.write(json.dumps(training_sample, ensure_ascii=False, separators=(',', ':')) + "\n")
-        output_file_handle.flush()
-        count += 1
-    
-    return count
-
 def main():
-    parser = argparse.ArgumentParser(description="Generate training data from LongBench datasets")
+    parser = argparse.ArgumentParser(description="Generate training data from ZeroSCROLLS and L-Eval datasets")
     parser.add_argument("--output_file", type=str, default="./datasets/training_data.jsonl", help="Output file for training data")
-    parser.add_argument("--num_samples_per_dataset", type=int, default=10,help="Number of samples per dataset")
-    parser.add_argument("--seed", type=int, default=42,help="Random seed")
     parser.add_argument("--gpus", type=int, nargs='+', default=[0], help="List of GPU IDs")
     parser.add_argument("--model", type=str, default="llama3", choices=["llama", "llama2", "llama3", "opt"], help="Model to use")
     
     args = parser.parse_args()
-    set_seed(args.seed)
+    set_seed(42)
     
     model_name = args.model
     model, tokenizer = load_model_for_generation(model_name, args.gpus)
     
-    dataset_names = os.listdir("./datasets/longbench")
-    dataset_names = [dataset_name.replace(".jsonl", "") for dataset_name in dataset_names]
-    print(f"Processing {len(dataset_names)} datasets: {dataset_names}")
+    print(f"\n{'='*50}")
+    print(f"Loading datasets with 8K token filtering ({MIN_TOKENS}-{MAX_TOKENS} tokens)")
+    print(f"{'='*50}")
     
+    # Load all datasets
+    all_samples = []
+    
+    # Load ZeroSCROLLS
+    print(f"\nLoading ZeroSCROLLS datasets...")
+    zeroscrolls_samples = load_zeroscrolls_datasets(tokenizer)
+    all_samples.extend(zeroscrolls_samples)
+    print(f"Total ZeroSCROLLS samples: {len(zeroscrolls_samples)}")
+    
+    # Load L-Eval
+    print(f"\nLoading L-Eval datasets...")
+    leval_samples = load_leval_datasets(tokenizer)
+    all_samples.extend(leval_samples)
+    print(f"Total L-Eval samples: {len(leval_samples)}")
+    
+    print(f"\n{'='*50}")
+    print(f"Total samples collected: {len(all_samples)}")
+    print(f"{'='*50}")
+    
+    # Shuffle all samples
+    random.shuffle(all_samples)
+    
+    # Process all samples and generate training data
     os.makedirs(os.path.dirname(args.output_file), exist_ok=True)
     
     total_samples = 0
-    dataset_counts = {}
+    processed_counts = {}
     
     with open(args.output_file, 'w', encoding='utf-8') as f:
-        for dataset_name in dataset_names:
-            print(f"\n{'='*50}")
-            print(f"Processing dataset: {dataset_name}")
-            print(f"{'='*50}")
+        for sample in tqdm(all_samples, desc="Generating training data"):
+            dataset_name = sample.get("dataset", "unknown")
+            prompt = sample["input_prompt"]
             
-            samples = load_longbench_dataset(dataset_name, args.num_samples_per_dataset)
-            
-            if not samples:
-                print(f"No samples loaded for {dataset_name}, skipping...")
+            try:
+                prompt, generated_text = generate_answer(model, tokenizer, prompt, dataset_name, model_name)
+                
+                training_sample = {
+                    "dataset": dataset_name,
+                    "input_prompt": prompt,
+                    "generated_text": generated_text,
+                    "length": sample.get("length", 0),
+                    "source": sample.get("source", "unknown"),
+                    "task_type": sample.get("task_type", "unknown")
+                }
+                
+                f.write(json.dumps(training_sample, ensure_ascii=False, separators=(',', ':')) + "\n")
+                f.flush()
+                
+                total_samples += 1
+                if dataset_name not in processed_counts:
+                    processed_counts[dataset_name] = 0
+                processed_counts[dataset_name] += 1
+                
+            except Exception as e:
+                print(f"\nError processing sample: {e}")
                 continue
-            
-            count = process_dataset(dataset_name, samples, model, tokenizer, model_name, f)
-            
-            dataset_counts[dataset_name] = count
-            total_samples += count
-            print(f"Generated {count} training samples for {dataset_name}")
     
     print(f"\n{'='*50}")
     print(f"Training data generation complete!")
-    print(f"Total samples: {total_samples}")
+    print(f"Total samples generated: {total_samples}")
     print(f"Saved to: {args.output_file}")
     print(f"{'='*50}")
     
     print(f"\nSamples per dataset:")
-    for dataset, count in sorted(dataset_counts.items()):
+    for dataset, count in sorted(processed_counts.items()):
         print(f"  {dataset}: {count}")
 
 if __name__ == "__main__":

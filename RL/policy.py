@@ -8,16 +8,6 @@ from typing import Dict, Tuple
 
 EPS = 1e-6
 
-# Default a values: discrete set for a parameter (sigmoid cache)
-# Note: These defaults should match A2SFRLConfig defaults
-# The actual values used should come from config when initializing policy
-DEFAULT_A_VALUES = [0.0, 0.01, 0.1, 10.0]
-
-# Default b values: discrete set for b parameter (sigmoid cache)
-# Note: These defaults should match A2SFRLConfig defaults
-# The actual values used should come from config when initializing policy
-DEFAULT_B_VALUES = [1, 2, 4, 8, 16, 32, 64, 128, 512, 1024, 4096, 8192]
-
 class NeuralUCBPolicy(nn.Module):
     """
     NeuralUCB policy network for A2SF RL agent (single-step / bandit) with sigmoid cache
@@ -28,15 +18,11 @@ class NeuralUCBPolicy(nn.Module):
 
     def __init__(self, state_dim: int, a_values: torch.Tensor = None, b_values: torch.Tensor = None, lambda_reg: float = 0.1):
         super().__init__()
-        if a_values is None:
-            a_values = torch.tensor(DEFAULT_A_VALUES)
-        if b_values is None:
-            b_values = torch.tensor(DEFAULT_B_VALUES)
         self.register_buffer('a_values', a_values)
         self.register_buffer('b_values', b_values)
         self.num_a_values = len(a_values)
         self.num_b_values = len(b_values)
-        
+
         # Total number of actions (all combinations of a and b)
         self.num_actions = self.num_a_values * self.num_b_values
         
@@ -48,7 +34,7 @@ class NeuralUCBPolicy(nn.Module):
             nn.Linear(state_dim, 512), nn.ReLU(),
             nn.Linear(512, 512), nn.ReLU()
         )
-        
+
         # Feature dimension (output of backbone)
         self.feature_dim = 512
 
@@ -66,7 +52,7 @@ class NeuralUCBPolicy(nn.Module):
             'inverse_lambdas',
             torch.eye(self.feature_dim, device=a_values.device).unsqueeze(0).repeat(self.num_actions, 1, 1) / lambda_reg
         )
-        
+
         # Action counts for tracking
         self.register_buffer('action_counts', torch.zeros(self.num_actions, dtype=torch.long))
 
@@ -236,58 +222,3 @@ class NeuralUCBPolicy(nn.Module):
             # Store updated inverse lambda
             self.inverse_lambdas[action_idx] = lambda_inv
     
-
-    def neural_ucb_update(
-        self,
-        buffer,
-        config,
-        optimizer: torch.optim.Optimizer
-    ) -> Dict[str, float]:
-        """
-        NeuralUCB update: minimize prediction error (MSE only)
-        Uncertainty is computed from covariance matrices, not learned
-        
-        Args:
-            buffer: Experience buffer containing (state, action, reward)
-            config: Configuration object
-            optimizer: Optimizer for training
-        
-        Returns:
-            dict with loss statistics
-        """
-        self.train()
-
-        states, actions, rewards = buffer.get()
-        
-        # Forward pass to get predictions and feature vectors
-        out = self.forward(states)
-        reward_pred = out["reward_pred"]  # (N, num_a_values, num_b_values)
-        feature_vectors = out["feature_vector"]  # (N, feature_dim)
-        
-        # Get action indices
-        a_idx, b_idx = self._get_action_indices(actions)
-        batch_indices = torch.arange(states.size(0), device=states.device)
-        
-        # Get predicted reward for selected actions
-        selected_predict = reward_pred[batch_indices, a_idx, b_idx]  # (N,)
-        actual_rewards = rewards.squeeze(-1)  # (N,)
-        
-        # NeuralUCB: Update neural network (backbone) to minimize prediction error
-        # The loss is computed using current theta_a predictions
-        loss = F.mse_loss(selected_predict, actual_rewards)
-        
-        # Optimize backbone network (feature extractor)
-        optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.parameters(), config.max_grad_norm)
-        optimizer.step()
-
-        # Update inverse covariance matrices and theta_a (no gradient)
-        # These are updated using closed-form solutions, not gradient descent
-        with torch.no_grad():
-            self._update_inverse_covariances(feature_vectors, a_idx, b_idx)
-
-        return {
-            "prediction_loss": float(loss.item()),
-            "total_loss": float(loss.item()),
-        }

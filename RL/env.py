@@ -1,52 +1,258 @@
 import torch
+import torch.nn as nn
 from typing import Dict, Any, Tuple
 from dataclasses import dataclass
 
-from transformers import AutoTokenizer, AutoModel
 from .main import A2SFRLConfig
 
-class ContextEncoder:
-    """Encodes text using jina-embeddings model with CLS token"""
+# Import RoPE functions from transformers
+try:
+    from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
+except ImportError:
+    # Fallback: try to import from utils_real_drop if transformers import fails
+    import sys
+    import os
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from utils_real_drop.kv_llama import apply_rotary_pos_emb
+
+class AttentionEncoder(nn.Module):
+    """
+    Attention-based encoder using target model's first layer, first head parameters
+    - Uses target model's embedding layer for token embeddings
+    - Uses first layer's first head Q, K projections from target model
+    - Query: last 16 tokens, Key: all tokens
+    - Applies RoPE from first layer
+    - Performs attention: softmax(Q*K^T/sqrt(head_dim))
+    - Sums over query dimension to get (1, seq_len) vector
+    - Pads to 8192 dimensions
+    - All parameters are frozen (no training)
+    """
     
-    def __init__(self, model_name: str = "jinaai/jina-embeddings-v2-small-en", device: str = "cpu"):
+    def __init__(self, target_model, target_tokenizer, device: str = "cpu", output_dim: int = 8192, num_query_tokens: int = 16):
+        super().__init__()
         self.device = device
-        self.model_name = model_name
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModel.from_pretrained(model_name).to(device)
-        self.model.eval()
-        self.embedding_dim = self.model.config.hidden_size
+        self.target_model = target_model
+        self.target_tokenizer = target_tokenizer
+        self.output_dim = output_dim
+        self.num_query_tokens = num_query_tokens
+        
+        # Get first layer's attention module
+        self.first_layer_attn = self._get_first_layer_attention()
+        
+        # Get embedding dimension and head dimension from target model
+        if hasattr(target_model, 'config'):
+            config = target_model.config
+        elif hasattr(target_model, 'model') and hasattr(target_model.model, 'config'):
+            config = target_model.model.config
+        else:
+            raise ValueError("Cannot determine config from target model")
+        
+        self.embedding_dim = config.hidden_size
+        self.num_heads = config.num_attention_heads
+        self.head_dim = self.embedding_dim // self.num_heads
+        
+        # Extract only first head's parameters from q_proj and k_proj
+        # q_proj.weight shape: (num_heads * head_dim, hidden_size)
+        # k_proj.weight shape: (num_key_value_heads * head_dim, hidden_size)
+        # First head: weight[0:head_dim, :]
+        with torch.no_grad():
+            q_proj_first_head_weight = self.first_layer_attn.q_proj.weight[0:self.head_dim, :].clone().to(dtype=torch.float32)  # (head_dim, hidden_size)
+            k_proj_first_head_weight = self.first_layer_attn.k_proj.weight[0:self.head_dim, :].clone().to(dtype=torch.float32)  # (head_dim, hidden_size)
+            
+            # Extract bias if exists (first head only)
+            if self.first_layer_attn.q_proj.bias is not None:
+                q_proj_first_head_bias = self.first_layer_attn.q_proj.bias[0:self.head_dim].clone().to(dtype=torch.float32)  # (head_dim,)
+            else:
+                q_proj_first_head_bias = None
+                
+            if self.first_layer_attn.k_proj.bias is not None:
+                k_proj_first_head_bias = self.first_layer_attn.k_proj.bias[0:self.head_dim].clone().to(dtype=torch.float32)  # (head_dim,)
+            else:
+                k_proj_first_head_bias = None
+        
+        # Register as buffers (not parameters, so they won't be trained)
+        self.register_buffer('q_proj_first_head', q_proj_first_head_weight)
+        self.register_buffer('k_proj_first_head', k_proj_first_head_weight)
+        if q_proj_first_head_bias is not None:
+            self.register_buffer('q_proj_first_head_bias', q_proj_first_head_bias)
+        else:
+            self.register_buffer('q_proj_first_head_bias', None)
+        if k_proj_first_head_bias is not None:
+            self.register_buffer('k_proj_first_head_bias', k_proj_first_head_bias)
+        else:
+            self.register_buffer('k_proj_first_head_bias', None)
+        
+        # Scale factor for attention (using head_dim instead of query_dim)
+        self.scale = 1.0 / (self.head_dim ** 0.5)
+        
+        # Freeze all parameters (encoder should not be trained)
+        self.eval()
+        for param in self.parameters():
+            param.requires_grad = False
+    
+    def _get_first_layer_attention(self):
+        """Get the first layer's attention module from target model"""
+        # Try different model structures
+        if hasattr(self.target_model, 'model') and hasattr(self.target_model.model, 'layers'):
+            # Standard structure: model.model.layers[0].self_attn
+            if len(self.target_model.model.layers) == 0:
+                raise ValueError("Target model has no layers")
+            return self.target_model.model.layers[0].self_attn
+        elif hasattr(self.target_model, 'layers'):
+            # Alternative structure: model.layers[0].self_attn
+            if len(self.target_model.layers) == 0:
+                raise ValueError("Target model has no layers")
+            return self.target_model.layers[0].self_attn
+        else:
+            raise ValueError("Cannot find layers in target model")
+    
+    def _init_weights(self):
+        """No initialization needed - using target model's parameters"""
+        pass
+    
+    def trainable_parameters(self):
+        """
+        Return empty list - encoder is frozen and not trained.
+        """
+        return []
+    
+    def get_embedding_layer(self):
+        """Get the embedding layer from target model"""
+        if hasattr(self.target_model, 'embed_tokens'):
+            return self.target_model.embed_tokens
+        elif hasattr(self.target_model, 'model') and hasattr(self.target_model.model, 'embed_tokens'):
+            return self.target_model.model.embed_tokens
+        else:
+            raise ValueError("Cannot find embedding layer in target model")
     
     def encode_context(self, text: str) -> torch.Tensor:
         """
-        Encode entire text and extract CLS token
+        Encode text using attention mechanism with target model's first layer, first head
         
         Args:
             text: Input text string
             
         Returns:
-            torch.Tensor: CLS token embedding (embedding_dim dimensions)
+            torch.Tensor: Encoded vector of shape (output_dim,)
         """
         if not text or not text.strip():
             # Empty text, return zero vector
-            return torch.zeros(self.embedding_dim, device=self.device)
+            return torch.zeros(self.output_dim, device=self.device)
         
-        # Encode entire text at once
+        # Tokenize text
+        tokenized = self.target_tokenizer(
+            text,
+            return_tensors="pt",
+            padding=False,
+            truncation=False
+        )
+        input_ids = tokenized.input_ids.to(self.device)  # (1, seq_len)
+        seq_len = input_ids.size(1)
+        
+        # Get embeddings from target model (detached to prevent gradient flow to target model)
+        embed_layer = self.get_embedding_layer()
         with torch.no_grad():
-            # Tokenize entire text
-            input_ids = self.tokenizer(
-                text,
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=8192
-            ).input_ids.to(self.device)
-            
-            outputs = self.model(input_ids)
-            # Extract CLS token (first token)
-            cls_embedding = outputs.last_hidden_state[:, 0, :]  # [1, hidden_size]
-            cls_embedding = cls_embedding.squeeze(0)  # [hidden_size]
+            # Get token embeddings: (1, seq_len, embedding_dim)
+            token_embeddings = embed_layer(input_ids)
+        # Detach to ensure no gradient flows to target model's embedding layer
+        token_embeddings = token_embeddings.detach().to(dtype=torch.float32)
         
-        return cls_embedding
+        # Extract query (last num_query_tokens) and key (all tokens)
+        if seq_len <= self.num_query_tokens:
+            # If sequence is shorter than num_query_tokens, use all tokens for query
+            query_embeddings = token_embeddings  # (1, seq_len, embedding_dim)
+            key_embeddings = token_embeddings  # (1, seq_len, embedding_dim)
+            actual_query_len = seq_len
+        else:
+            # Query: last num_query_tokens
+            query_embeddings = token_embeddings[:, -self.num_query_tokens:, :]  # (1, num_query_tokens, embedding_dim)
+            # Key: all tokens
+            key_embeddings = token_embeddings  # (1, seq_len, embedding_dim)
+            actual_query_len = self.num_query_tokens
+        
+        # Use first head's parameters directly (already extracted in __init__)
+        with torch.no_grad():
+            # Project using first head's q_proj and k_proj parameters
+            # query_embeddings: (1, actual_query_len, embedding_dim)
+            # key_embeddings: (1, seq_len, embedding_dim)
+            # q_proj_first_head: (head_dim, hidden_size)
+            # k_proj_first_head: (head_dim, hidden_size)
+            # Ensure both are float32 for matmul
+            query_embeddings_f32 = query_embeddings.to(dtype=torch.float32)
+            key_embeddings_f32 = key_embeddings.to(dtype=torch.float32)
+            query_states = torch.matmul(query_embeddings_f32, self.q_proj_first_head.t())  # (1, actual_query_len, head_dim)
+            key_states = torch.matmul(key_embeddings_f32, self.k_proj_first_head.t())  # (1, seq_len, head_dim)
+            
+            # Add bias if exists
+            if self.q_proj_first_head_bias is not None:
+                query_states = query_states + self.q_proj_first_head_bias.unsqueeze(0)  # (1, actual_query_len, head_dim)
+            if self.k_proj_first_head_bias is not None:
+                key_states = key_states + self.k_proj_first_head_bias.unsqueeze(0)  # (1, seq_len, head_dim)
+            
+            # Reshape for RoPE: need (batch, num_heads, seq_len, head_dim) format
+            # Add head dimension: (1, 1, seq_len, head_dim)
+            query_states = query_states.unsqueeze(1)  # (1, 1, actual_query_len, head_dim)
+            key_states = key_states.unsqueeze(1)  # (1, 1, seq_len, head_dim)
+            
+            # Apply RoPE from first layer
+            # Create position_ids for query and key
+            if actual_query_len == seq_len:
+                # Same sequence, use same position_ids
+                position_ids = torch.arange(seq_len, dtype=torch.long, device=self.device).unsqueeze(0)  # (1, seq_len)
+                query_position_ids = position_ids
+                key_position_ids = position_ids
+            else:
+                # Query is last num_query_tokens, key is all tokens
+                query_position_ids = torch.arange(seq_len - actual_query_len, seq_len, dtype=torch.long, device=self.device).unsqueeze(0)  # (1, actual_query_len)
+                key_position_ids = torch.arange(seq_len, dtype=torch.long, device=self.device).unsqueeze(0)  # (1, seq_len)
+            
+            # Get RoPE embeddings from first layer
+            # rotary_emb expects (tensor, position_ids) and returns (cos, sin)
+            cos_query, sin_query = self.first_layer_attn.rotary_emb(query_states, query_position_ids)
+            cos_key, sin_key = self.first_layer_attn.rotary_emb(key_states, key_position_ids)
+            
+            # Apply RoPE - apply_rotary_pos_emb(query, key, cos, sin) returns (rotated_query, rotated_key)
+            # Since query and key have different position_ids, we apply RoPE separately
+            # For query: use query's cos/sin
+            query_states_rotated, _ = apply_rotary_pos_emb(query_states, query_states, cos_query, sin_query)
+            query_states = query_states_rotated
+            # For key: use key's cos/sin
+            _, key_states_rotated = apply_rotary_pos_emb(key_states, key_states, cos_key, sin_key)
+            key_states = key_states_rotated
+            
+            # Now query_states: (1, 1, actual_query_len, head_dim)
+            # key_states: (1, 1, seq_len, head_dim)
+            # Squeeze head dimension for attention computation
+            query_states = query_states.squeeze(1)  # (1, actual_query_len, head_dim)
+            key_states = key_states.squeeze(1)  # (1, seq_len, head_dim)
+        
+        # Compute attention scores: Q * K^T
+        # Q: (1, actual_query_len, head_dim)
+        # K: (1, seq_len, head_dim)
+        # Q * K^T: (1, actual_query_len, seq_len)
+        attention_scores = torch.bmm(query_states, key_states.transpose(1, 2))  # (1, actual_query_len, seq_len)
+        
+        # Scale by sqrt(head_dim)
+        attention_scores = attention_scores * self.scale
+        
+        # Apply softmax
+        attention_weights = torch.softmax(attention_scores, dim=-1)  # (1, actual_query_len, seq_len)
+        
+        # Sum over query dimension (axis 1) to get (1, seq_len)
+        attention_output = attention_weights.sum(dim=1)  # (1, seq_len)
+        
+        # Squeeze batch dimension
+        attention_output = attention_output.squeeze(0)  # (seq_len,)
+        
+        # Pad to output_dim (8192) from the left with zeros
+        if seq_len < self.output_dim:
+            padding = torch.zeros(self.output_dim - seq_len, device=self.device)
+            attention_output = torch.cat([padding, attention_output], dim=0)  # (output_dim,)
+        elif seq_len > self.output_dim:
+            # If longer, truncate from the left (keep rightmost output_dim tokens)
+            attention_output = attention_output[-self.output_dim:]  # (output_dim,)
+        
+        return attention_output
 
 @dataclass
 class EpisodeResult:
@@ -64,10 +270,13 @@ class A2SFEnv:
         self.config = config
         self.device = torch.device(config.device if torch.cuda.is_available() else "cpu")
         
-        # Context encoder
-        self.context_encoder = ContextEncoder(
-            model_name=config.context_encoder_model,
-            device=config.device
+        # Attention encoder using target model's first layer, first head parameters
+        self.context_encoder = AttentionEncoder(
+            target_model=runner.model,
+            target_tokenizer=runner.tokenizer,
+            device=config.device,
+            output_dim=8192,
+            num_query_tokens=16
         )
         
         # Current episode cache
