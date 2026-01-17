@@ -46,7 +46,7 @@ total_losses = np.array(total_losses)
 # ---------------------------------------------------------
 # 2.5. Data Smoothing (5-point moving average)
 # ---------------------------------------------------------
-window_size = 5
+window_size = 10
 
 def smooth_data(data, window_size):
     """5개씩 묶어서 평균 계산"""
@@ -77,7 +77,7 @@ ax1.plot(
     linewidth=4,
     markersize=8,
     color="#4C72B0",  # Muted Blue
-    label="Average Reward (5-point average)",
+    label=f"Average Reward ({window_size}-point average)",
     zorder=5
 )
 
@@ -96,7 +96,7 @@ ax2.plot(
     linewidth=4,
     markersize=8,
     color="#C44E52",  # Muted Red
-    label="Total Loss (5-point average)",
+    label=f"Total Loss ({window_size}-point average)",
     zorder=5
 )
 

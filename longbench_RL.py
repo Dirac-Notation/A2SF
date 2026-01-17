@@ -11,7 +11,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from utils import load_model, set_seed
 from RL.main import A2SFRLConfig
 from RL.policy import NeuralUCBPolicy
-from RL.env import ContextEncoder
+from RL.env import AttentionEncoder
 
 # Import metrics and evaluation functions from longbench.py
 from longbench import (
@@ -45,7 +45,7 @@ def load_jsonl_file(file_path):
                 data.append(json.loads(line))
     return data
 
-def load_rl_policy(checkpoint_path, device):
+def load_rl_policy(checkpoint_path, device, target_model, target_tokenizer):
     """Load RL policy from checkpoint"""
     print(f"Loading RL policy from: {checkpoint_path}")
     
@@ -63,15 +63,23 @@ def load_rl_policy(checkpoint_path, device):
         config = A2SFRLConfig()
         print("Warning: Config not found in checkpoint, using default config")
     
-    # Initialize context encoder
-    context_encoder = ContextEncoder(
-        model_name=config.context_encoder_model,
-        device=device
-    )
+    # Initialize attention encoder using target model's embeddings
+    context_encoder = AttentionEncoder(
+        target_model=target_model,
+        target_tokenizer=target_tokenizer,
+        device=device,
+        query_dim=128,
+        output_dim=8192,
+        num_query_tokens=16
+    ).to(device)
     
-    # Calculate state dimension: just embedding_dim (CLS token only)
-    embedding_dim = context_encoder.embedding_dim
-    state_dim = embedding_dim
+    # Load attention encoder weights if available in checkpoint
+    if "attention_encoder_state_dict" in checkpoint:
+        context_encoder.load_state_dict(checkpoint["attention_encoder_state_dict"])
+        print("Loaded attention encoder weights from checkpoint")
+    
+    # State dimension is fixed to 8192 (output_dim of AttentionEncoder)
+    state_dim = 8192
     
     # Initialize policy with config values
     policy = NeuralUCBPolicy(
@@ -88,6 +96,7 @@ def load_rl_policy(checkpoint_path, device):
         raise ValueError("Policy state dict not found in checkpoint")
     
     policy.eval()  # Set to evaluation mode
+    context_encoder.eval()  # Set to evaluation mode
     
     return policy, context_encoder, config
 
@@ -207,9 +216,9 @@ if __name__ == '__main__':
     # Load base model
     model, tokenizer = load_model(model_name, args.gpus)
     
-    # Load RL policy
+    # Load RL policy (requires target model and tokenizer for AttentionEncoder)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    rl_policy, context_encoder, rl_config = load_rl_policy(args.rl_checkpoint, device)
+    rl_policy, context_encoder, rl_config = load_rl_policy(args.rl_checkpoint, device, model, tokenizer)
     
     print(f"RL Policy loaded successfully")
     print(f"Config: {rl_config}")
