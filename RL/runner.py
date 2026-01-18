@@ -82,7 +82,7 @@ class A2SFModelRunner:
             generated_text=generated_text_compressed
         )
     
-    def _generate_text(self, input_ids: torch.Tensor, attention_mask: torch.Tensor, max_new_tokens: int = 16) -> str:
+    def _generate_text(self, input_ids: torch.Tensor, attention_mask: torch.Tensor, max_new_tokens: int = 64) -> str:
         """Generate text using the model with current cache configuration"""
         context_length = input_ids.size(1)
         

@@ -20,7 +20,7 @@ from utils import CompressionConfig
 import numpy as np
 
 PROMPT_LENGTH = 7500
-GENERATION_LENGTHS = 16
+GENERATION_LENGTHS = 64
 MIN_TOKENS = 1024  # 필터링을 위한 최소 토큰 수
 MAX_TOKENS = 7500  # 필터링을 위한 최대 토큰 수
 
@@ -109,6 +109,7 @@ def load_zeroscrolls_datasets(tokenizer) -> List[Dict[str, Any]]:
             all_input = example.get("input", "")
             # Format prompt
             prompt = format_prompt_for_task(task_type, context="", question=all_input)
+            import pdb; pdb.set_trace()
             
             # Filter by token length (8K 근처)
             token_count = count_tokens(tokenizer, prompt)
@@ -178,6 +179,7 @@ def load_leval_datasets(tokenizer) -> List[Dict[str, Any]]:
             # Extract fields from L-Eval
             context = example.get("input", "")
             question = example.get("instructions", "")
+            import pdb; pdb.set_trace()
             
             # Format prompt
             prompt = format_prompt_for_task(task_type, context=context, question=question)
