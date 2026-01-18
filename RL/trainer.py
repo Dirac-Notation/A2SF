@@ -319,10 +319,8 @@ class A2SFTrainer:
 
             self._log_progress(iteration, avg_loss_stats, iteration_rewards, iteration_actions_a, iteration_actions_b)
             
-            if iteration % 100 == 0 and iteration > 0:
-                self._save_checkpoint(iteration)
-            
             if iteration % self.config.eval_frequency == 0 and iteration > 0:
+                self._save_checkpoint(iteration)
                 self._evaluate(iteration)
     
     def _evaluate(self, iteration: int):
