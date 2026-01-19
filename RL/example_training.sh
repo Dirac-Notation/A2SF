@@ -10,7 +10,7 @@ echo "Running basic training..."
 python -m RL.main \
     --model llama3 \
     --gpu 0 \
-    --save_dir runs/a2sf_rl
+    --save_dir runs/a2sf_rl_test
 
 echo "Training completed!"
-echo "Check the results in runs/a2sf_rl/"
+echo "Check the results in runs/a2sf_rl_test/"

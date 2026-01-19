@@ -20,7 +20,6 @@ from utils import CompressionConfig
 import numpy as np
 
 PROMPT_LENGTH = 7500
-GENERATION_LENGTHS = 64
 MIN_TOKENS = 1024  # 필터링을 위한 최소 토큰 수
 MAX_TOKENS = 7500  # 필터링을 위한 최대 토큰 수
 
@@ -63,11 +62,11 @@ def count_tokens(tokenizer, text: str) -> int:
 def format_prompt_for_task(task_type: str, context: str = "", question: str = "") -> str:
     """Format prompt based on task type, similar to LongBench prompt formats"""
     
-    if task_type in ["summarization", "summary"]:
+    if task_type == "summarization":
         return f"You are given a document and a query. Write a summary based on the query.\n\nDocument:\n{context}\n\nQuery: {question}"
-    elif task_type in ["qa", "question_answering", "question"]:
+    elif task_type == "qa":
         return f"Answer the question based on the given context. Only give me the answer and do not output any other words.\n\nContext:\n{context}\n\nAnswer the question based on the given context. Only give me the answer and do not output any other words.\n\nQuestion: {question}\nAnswer:"
-    elif task_type in ["retrieval", "retrieve"]:
+    elif task_type == "retrieval":
         return f"Here are some paragraphs, along with a query. Please determine which paragraph the query is from.\n\nParagraphs:\n{context}\n\nThe following is a query.\n\n{question}\n\nPlease enter the number of the paragraph that the query is from.\n\nThe answer is: "
     else:
         return f"{question}"
@@ -178,7 +177,6 @@ def load_leval_datasets(tokenizer) -> List[Dict[str, Any]]:
             # Extract fields from L-Eval
             context = example.get("input", "")
             question = example.get("instructions", "")
-            import pdb; pdb.set_trace()
             
             # Format prompt
             prompt = format_prompt_for_task(task_type, context=context, question=question)
@@ -202,7 +200,7 @@ def load_leval_datasets(tokenizer) -> List[Dict[str, Any]]:
     
     return all_samples
 
-def generate_answer(model, tokenizer, prompt: str, dataset: str, model_name: str) -> tuple:
+def generate_answer(model, tokenizer, prompt: str, dataset: str, model_name: str, generation_length: int) -> tuple:
     # Initialize full cache (no compression) before each generation
     compression_config = CompressionConfig()
     compression_config.compression_method = "full"
@@ -224,7 +222,7 @@ def generate_answer(model, tokenizer, prompt: str, dataset: str, model_name: str
         output = model.generate(
             input_ids=input_ids,
             attention_mask=attention_mask,
-            max_new_tokens=GENERATION_LENGTHS,
+            max_new_tokens=generation_length,
             do_sample=False,
             temperature=1.0,
             pad_token_id=tokenizer.eos_token_id,
@@ -287,30 +285,32 @@ def main():
     print(f"Total samples collected: {len(all_samples)}")
     print(f"{'='*50}")
     
-    # Shuffle all samples
-    random.shuffle(all_samples)
-    
     # Process all samples and generate training data
     os.makedirs(os.path.dirname(args.output_file), exist_ok=True)
     
     total_samples = 0
     processed_counts = {}
     
+    task_length_map = {
+        "summarization": 512,
+        "retrieval": 32,
+        "qa": 128,
+    }
+    
     with open(args.output_file, 'w', encoding='utf-8') as f:
         for sample in tqdm(all_samples, desc="Generating training data"):
             dataset_name = sample.get("dataset", "unknown")
             prompt = sample["input_prompt"]
+            generation_length = task_length_map[sample["task_type"]]
             
             try:
-                prompt, generated_text = generate_answer(model, tokenizer, prompt, dataset_name, model_name)
+                prompt, generated_text = generate_answer(model, tokenizer, prompt, dataset_name, model_name, generation_length)
                 
                 training_sample = {
                     "dataset": dataset_name,
                     "input_prompt": prompt,
                     "generated_text": generated_text,
-                    "length": sample.get("length", 0),
-                    "source": sample.get("source", "unknown"),
-                    "task_type": sample.get("task_type", "unknown")
+                    "generation_length": generation_length
                 }
                 
                 f.write(json.dumps(training_sample, ensure_ascii=False, separators=(',', ':')) + "\n")
