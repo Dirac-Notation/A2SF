@@ -53,7 +53,8 @@ class A2SFModelRunner:
         prompt: str, 
         a: float,
         b: float,
-        generated_text_full: str,  # Full cache generated text (baseline)
+        generation_length: int,
+        answer: str,
         dataset: str = None
     ) -> ModelResult:
         start_time = time.time()
@@ -69,12 +70,12 @@ class A2SFModelRunner:
         self.model.init_cache(compression_config)
         
         # Generate text with compression
-        generated_text_compressed = self._generate_text(input_ids, attention_mask)
+        generated_text_compressed = self._generate_text(input_ids, attention_mask, max_new_tokens=generation_length)
         
         inference_time = time.time() - start_time
         
         # Compute similarity between full cache and compressed cache generated texts
-        reward = self._compute_text_similarity(generated_text_full, generated_text_compressed)
+        reward = self._compute_text_similarity(answer, generated_text_compressed)
         
         return ModelResult(
             reward=reward,
@@ -82,7 +83,7 @@ class A2SFModelRunner:
             generated_text=generated_text_compressed
         )
     
-    def _generate_text(self, input_ids: torch.Tensor, attention_mask: torch.Tensor, max_new_tokens: int = 64) -> str:
+    def _generate_text(self, input_ids: torch.Tensor, attention_mask: torch.Tensor, max_new_tokens: int) -> str:
         """Generate text using the model with current cache configuration"""
         context_length = input_ids.size(1)
         

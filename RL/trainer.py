@@ -1,16 +1,18 @@
 import os
+import sys
 import json
 import random
+
 import torch
 import torch.optim as optim
 import torch.optim.lr_scheduler as lr_scheduler
+import torch.nn.functional as F
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from torch.utils.data import Dataset, DataLoader
 from typing import Dict, List, Any, Optional, Tuple
 from tqdm import tqdm
-
-import sys
-import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from .main import A2SFRLConfig
 from .policy import NeuralUCBPolicy
@@ -50,7 +52,7 @@ class A2SFTrainer:
         self.env = A2SFEnv(self.model_runner, config)
         
         # State dimension is fixed to 8192 (output_dim of AttentionEncoder)
-        state_dim = 8192
+        state_dim = 8192 + 1
         
         self.policy = NeuralUCBPolicy(
             state_dim=state_dim,
@@ -149,7 +151,7 @@ class A2SFTrainer:
     
     def _neural_ucb_update(
         self,
-        prompt: str,
+        state: torch.Tensor,
         action: Tuple[torch.Tensor, torch.Tensor],
         reward: torch.Tensor,
         config,
@@ -161,7 +163,7 @@ class A2SFTrainer:
         Online update: each sample is updated immediately.
         
         Args:
-            prompt: Input prompt string
+            state: Encoded state tensor (already on device)
             action: Tuple of (a, b) action values
             reward: Observed reward (scalar tensor)
             config: Configuration object
@@ -174,11 +176,11 @@ class A2SFTrainer:
         # Encoder is frozen, keep it in eval mode
         self.env.context_encoder.eval()
         
-        # Encode prompt to state (with gradient flow)
-        state = self.env.context_encoder.encode_context(prompt).to(self.device, dtype=torch.float32)
-        state = state.unsqueeze(0)  # (1, state_dim) for batch dimension
+        # Ensure state has batch dimension
+        if state.ndim == 1:
+            state = state.unsqueeze(0)  # (1, state_dim) for batch dimension
         
-        # Forward pass to get predictions and feature vectors
+        # Forward pass to get predictions and feature vectors (with gradient)
         out = self.policy.forward(state)
         reward_pred = out["reward_pred"]  # (1, num_a_values, num_b_values)
         feature_vector = out["feature_vector"]  # (1, feature_dim)
@@ -197,7 +199,6 @@ class A2SFTrainer:
 
         # NeuralUCB: Update neural network (backbone) to minimize prediction error
         # The loss is computed using current theta_a predictions
-        import torch.nn.functional as F
         prediction_loss = F.mse_loss(selected_predict, actual_reward)
         
         # L2 regularization: penalize large weights for stability
@@ -277,23 +278,25 @@ class A2SFTrainer:
             
             # Process each episode in the batch
             for episode_data in batch:
-                # Encode state
+                # Encode state (only once)
                 state = self.env.encode_to_state(
                     prompt=episode_data["input_prompt"],
-                    generated_text_full=episode_data["generated_text"],
+                    output_length=episode_data["generation_length"],
+                    answer=episode_data["generated_text"],
                     dataset=episode_data["dataset"],
                 )
                 state = state.to(self.device)
 
-                # Get action
+                # Get action (forward pass happens inside act, but we'll reuse state for update)
                 action, ucb_value = self.policy.act(state, beta=self.config.ucb_beta)
                 
                 # Get reward
                 reward, info = self.env.step(action)
 
                 # Online update: update immediately with this sample
+                # Reuse the same state (no need to re-encode)
                 loss_stats = self._neural_ucb_update(
-                    prompt=episode_data["input_prompt"],
+                    state=state,
                     action=action,
                     reward=reward,
                     config=self.config,
@@ -340,7 +343,8 @@ class A2SFTrainer:
             
             state = self.env.encode_to_state(
                 prompt=episode_data["input_prompt"],
-                generated_text_full=episode_data["generated_text"],
+                output_length=episode_data["generation_length"],
+                answer=episode_data["generated_text"],
                 dataset=episode_data["dataset"],
             )
             state = state.to(self.device)

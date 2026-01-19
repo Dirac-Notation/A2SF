@@ -12,34 +12,33 @@ import sys
 # Add the current directory to the path for imports
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from utils import load_model, set_seed
-from RL.config import A2SFRLConfig
-from RL.policy import A2SFPolicy
-from RL.features import ContextEncoder
+from utils import load_model, set_seed, CompressionConfig
 
 
-def calculate_lcs_ratio(expected, predicted):
-    """Calculate the ratio of longest common subsequence length to expected answer length."""
+def check_exact_match(expected, predicted):
+    """Check if the expected answer appears exactly in the predicted text."""
     if not expected or not predicted:
-        return 0.0
+        return False
     
-    # Create a matrix for LCS calculation
-    m, n = len(expected), len(predicted)
-    dp = [[0] * (n + 1) for _ in range(m + 1)]
+    # Strip whitespace
+    expected_clean = expected.strip()
+    predicted_clean = predicted.strip()
     
-    # Fill the dp table
-    for i in range(1, m + 1):
-        for j in range(1, n + 1):
-            if expected[i-1] == predicted[j-1]:
-                dp[i][j] = dp[i-1][j-1] + 1
-            else:
-                dp[i][j] = max(dp[i-1][j], dp[i][j-1])
+    # Check exact match
+    if expected_clean == predicted_clean:
+        return True
     
-    # Get the LCS length
-    lcs_length = dp[m][n]
+    # Check if expected is contained in predicted (for cases where model adds extra text)
+    if expected_clean in predicted_clean:
+        return True
     
-    # Calculate ratio
-    return lcs_length / len(expected)
+    # Extract numbers from predicted text and check if expected number is present
+    import re
+    numbers_in_pred = re.findall(r'\d+', predicted_clean)
+    if expected_clean in numbers_in_pred:
+        return True
+    
+    return False
 
 def load_dataset(file_path):
     """Load the needle-in-haystack dataset from a JSONL file."""
@@ -49,77 +48,16 @@ def load_dataset(file_path):
             data.append(json.loads(line))
     return data
 
-def load_rl_policy(checkpoint_path, device):
-    """Load RL policy from checkpoint"""
-    print(f"Loading RL policy from: {checkpoint_path}")
-    
-    if not os.path.exists(checkpoint_path):
-        raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
-    
-    # Load checkpoint with weights_only=False to allow custom classes
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    
-    # Extract config from checkpoint
-    if "config" in checkpoint:
-        config = checkpoint["config"]
-    else:
-        # Create default config if not found in checkpoint
-        config = A2SFRLConfig()
-        print("Warning: Config not found in checkpoint, using default config")
-    
-    # Initialize context encoder
-    context_encoder = ContextEncoder(
-        model_name=config.sentence_transformer_model,
-        device=device,
-        context_window=config.context_window,
-        max_context=config.max_context
-    )
-    
-    # Initialize policy with config values
-    policy = A2SFPolicy(
-        state_dim=config.max_context,
-        a_values=config.a_values,
-        b_values=config.b_values
-    ).to(device)
-    
-    # Load policy weights
-    if "policy_state_dict" in checkpoint:
-        policy.load_state_dict(checkpoint["policy_state_dict"])
-        print(f"Loaded policy from iteration {checkpoint.get('iteration', 'unknown')}")
-    else:
-        raise ValueError("Policy state dict not found in checkpoint")
-    
-    policy.eval()  # Set to evaluation mode
-    
-    return policy, context_encoder, config
-
-def get_rl_action(policy, context_encoder, prompt, model_name, device):
-    """Get RL action (forgetting factor) for given prompt"""
-    # Encode context
-    context_embedding = context_encoder.encode_context(prompt)
-    
-    # Build state
-    state = context_embedding.to(device, dtype=torch.float32)
-    
-    # Get action from policy (no exploration during inference)
-    with torch.no_grad():
-        action, _, _ = policy.act(state)
-    
-    # action is a tuple of (a, b) tensors
-    # For a2sf compression, we use a as forgetting_factor
-    a = action[0].item() if isinstance(action[0], torch.Tensor) else action[0]
-    return a
-
-def evaluate_model(model, tokenizer, dataset, device, method, config=None, rl_policy=None, context_encoder=None, model_name=None):
+def evaluate_model(model, tokenizer, dataset, device, method, config=None, model_name=None, window=None, budget=None):
     """Evaluate the model on the needle-in-haystack task with budget settings."""
     results = defaultdict(list)
     
     # Create directory for saving results
     os.makedirs("result_txt/needle", exist_ok=True)
-    if rl_policy and context_encoder:
-        result_file = f"result_txt/needle/{method}_RL.jsonl"
+    if method == "full":
+        result_file = f"result_txt/needle/{model_name}_{method}.jsonl"
     else:
-        result_file = f"result_txt/needle/{method}.jsonl"
+        result_file = f"result_txt/needle/{model_name}_{method}_window{window}_budget{budget}.jsonl"
     
     # Open file in write mode to overwrite any existing content
     with open(result_file, 'w', encoding='utf-8') as f:
@@ -131,25 +69,11 @@ def evaluate_model(model, tokenizer, dataset, device, method, config=None, rl_po
             total_tokens = sample["total_tokens"]
             
             # Add [INST] tags for Llama models
-            if "llama" in method.lower():
+            if "llama" in model_name.lower():
                 prompt = f"[INST]{prompt}[/INST]"
             
             # Initialize cache with budget settings if provided
-            if rl_policy and context_encoder:
-                # Use RL policy to determine forgetting factor
-                forgetting_factor = get_rl_action(rl_policy, context_encoder, prompt, model_name, device)
-                
-                # Create compression config with RL-determined forgetting factor
-                from utils import CompressionConfig
-                rl_config = CompressionConfig()
-                rl_config.compression_method = "a2sf"
-                rl_config.total_budget = 128
-                rl_config.layerwise_ratios = [1.0 for i in range(32)]
-                rl_config.local_ratios = 0.125
-                rl_config.forgetting_factors = [forgetting_factor for i in range(32)]
-                
-                model.init_cache(rl_config)
-            elif config:
+            if config:
                 model.init_cache(config)
 
             # Tokenize the input
@@ -173,19 +97,15 @@ def evaluate_model(model, tokenizer, dataset, device, method, config=None, rl_po
             # Decode the response
             model_answer = tokenizer.decode(outputs[context_length:], skip_special_tokens=True).strip()
 
-            # Calculate LCS ratio
-            lcs_ratio = calculate_lcs_ratio(expected_answer, model_answer)
+            # Check exact match
+            exact_match = check_exact_match(expected_answer, model_answer)
             
             # Record the result
             result_entry = {
                 "expected": expected_answer,
                 "model_answer": model_answer,
-                "lcs_ratio": lcs_ratio
+                "exact_match": exact_match
             }
-            
-            # Add forgetting factor if using RL
-            if rl_policy and context_encoder:
-                result_entry["forgetting_factor"] = forgetting_factor
             
             results[(total_tokens, needle_position)].append(result_entry)
             
@@ -195,12 +115,8 @@ def evaluate_model(model, tokenizer, dataset, device, method, config=None, rl_po
                 "position": needle_position,
                 "length": total_tokens,
                 "expected_answer": expected_answer,
-                "lcs_ratio": lcs_ratio
+                "exact_match": exact_match
             }
-            
-            # Add forgetting factor if using RL
-            if rl_policy and context_encoder:
-                jsonl_entry["forgetting_factor"] = forgetting_factor
             
             f.write(json.dumps(jsonl_entry, ensure_ascii=False) + '\n')
     
@@ -211,17 +127,17 @@ def calculate_metrics(results):
     metrics = {}
     
     for (total_tokens, position), samples in results.items():
-        # Calculate average LCS ratio
-        total_ratio = sum(sample["lcs_ratio"] for sample in samples)
         total_count = len(samples)
-        avg_ratio = total_ratio / total_count if total_count > 0 else 0
         
-        # Count correct predictions (LCS ratio > 0.5)
-        correct_count = sum(sample["lcs_ratio"] for sample in samples)
+        # Count exact matches
+        exact_match_count = sum(1 for sample in samples if sample.get("exact_match", False))
+        
+        # Calculate accuracy as exact match rate
+        accuracy = exact_match_count / total_count if total_count > 0 else 0.0
         
         metrics[(total_tokens, position)] = {
-            "accuracy": avg_ratio,
-            "correct_count": correct_count,
+            "accuracy": accuracy,
+            "correct_count": exact_match_count,
             "total_count": total_count
         }
     
@@ -274,14 +190,10 @@ def main(args):
     budget_list = args.budget
     methods = args.method
     models = args.model
-
-    # For RL mode, we don't need budget/method combinations
-    if args.use_rl:
-        budget_list = [0]  # Dummy budget for RL
-        methods = ["RL"]   # Dummy method for RL
+    window_list = args.window
     
     # Check and extend list lengths
-    max_len = len(datasets) * len(budget_list) * len(methods) * len(models)
+    max_len = len(datasets) * len(budget_list) * len(methods) * len(models) * len(window_list)
     
     # Create directory for saving results
     os.makedirs("result_json/needle", exist_ok=True)
@@ -293,7 +205,8 @@ def main(args):
             "models": models,
             "datasets": datasets,
             "budgets": budget_list,
-            "methods": methods
+            "methods": methods,
+            "windows": window_list
         },
         "results": {}
     }
@@ -310,25 +223,6 @@ def main(args):
         print(f"Loading model: {model_name}")
         model, tokenizer = load_model(model_name, args.gpus)
         print("Model loaded successfully!")
-        
-        # Load RL policy if requested
-        rl_policy = None
-        context_encoder = None
-        rl_config = None
-        if args.use_rl:
-            if not args.rl_checkpoint:
-                raise ValueError("--rl_checkpoint is required when --use_rl is specified")
-            
-            try:
-                device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-                rl_policy, context_encoder, rl_config = load_rl_policy(args.rl_checkpoint, device)
-                
-                print(f"RL Policy loaded successfully")
-                print(f"Config: {rl_config}")
-            except Exception as e:
-                print(f"Error loading RL policy: {e}")
-                print("Falling back to standard evaluation mode")
-                args.use_rl = False
 
         for dataset in datasets:
             dataset_name = os.path.basename(dataset).split('.')[0]
@@ -336,84 +230,74 @@ def main(args):
             # Load dataset
             dataset_data = load_dataset(dataset)
 
-            # Nested loops: budget → method
-            for cur_budget in budget_list:
-                for cur_method in methods:
-                    cur_idx += 1
-                    
-                    # Create compression config (skip if using RL)
-                    config = None
-                    if not args.use_rl:
-                        from utils import CompressionConfig
+            # Nested loops: window → budget → method
+            for cur_window in window_list:
+                for cur_budget in budget_list:
+                    for cur_method in methods:
+                        cur_idx += 1
+                        
+                        # Create compression config
                         config = CompressionConfig()
-                        config["method"] = cur_method
+                        config["compression_method"] = cur_method
+                        config["observation_window"] = cur_window
                         config["total_budget"] = cur_budget
+                        config["a"] = 10
+                        config["b"] = cur_window
 
-                    # Evaluate with current configuration
-                    results = evaluate_model(
-                        model=model,
-                        tokenizer=tokenizer,
-                        dataset=dataset_data,
-                        device=device,
-                        method=cur_method,
-                        config=config,
-                        rl_policy=rl_policy,
-                        context_encoder=context_encoder,
-                        model_name=model_name
-                    )
+                        # Evaluate with current configuration
+                        results = evaluate_model(
+                            model=model,
+                            tokenizer=tokenizer,
+                            dataset=dataset_data,
+                            device=device,
+                            method=cur_method,
+                            config=config,
+                            model_name=model_name,
+                            window=cur_window,
+                            budget=cur_budget
+                        )
 
-                    # Calculate metrics
-                    metrics = calculate_metrics(results)
-                    
-                    # Create heatmap
-                    if args.use_rl:
-                        output_file = f"plots/needle/needle_heatmap_{model_name}_RL.png"
-                    elif cur_method == "full":
-                        output_file = f"plots/needle/needle_heatmap_{model_name}_full.png"
-                    else:
-                        output_file = f"plots/needle/needle_heatmap_{model_name}_{cur_method}_budget{cur_budget}.png"
-                    
-                    create_heatmap(metrics, output_file)
-                    
-                    # Store results in the dictionary
-                    if args.use_rl:
-                        result_key = f"{model_name}_{dataset_name}_RL"
-                        method_info = "RL"
-                        budget_info = "RL"
-                    else:
-                        result_key = f"{model_name}_{dataset_name}_{cur_method}_{cur_budget}"
-                        method_info = cur_method
-                        budget_info = cur_budget
-                    
-                    all_results["results"][result_key] = {
-                        "model": model_name,
-                        "dataset": dataset_name,
-                        "method": method_info,
-                        "budget": budget_info,
-                        "metrics": {
-                            f"{length}_{position}": {
-                                "accuracy": metrics[(length, position)]["accuracy"],
-                                "correct_count": metrics[(length, position)]["correct_count"],
-                                "total_count": metrics[(length, position)]["total_count"]
+                        # Calculate metrics
+                        metrics = calculate_metrics(results)
+                        
+                        # Create heatmap
+                        if cur_method == "full":
+                            output_file = f"plots/needle/needle_heatmap_{model_name}_full.png"
+                        else:
+                            output_file = f"plots/needle/needle_heatmap_{model_name}_{cur_method}_window{cur_window}_budget{cur_budget}.png"
+                        
+                        create_heatmap(metrics, output_file)
+                        
+                        # Store results in the dictionary
+                        result_key = f"{model_name}_{dataset_name}_{cur_method}_window{cur_window}_budget{cur_budget}"
+                        
+                        all_results["results"][result_key] = {
+                            "model": model_name,
+                            "dataset": dataset_name,
+                            "method": cur_method,
+                            "window": cur_window,
+                            "budget": cur_budget,
+                            "metrics": {
+                                f"{length}_{position}": {
+                                    "accuracy": metrics[(length, position)]["accuracy"],
+                                    "correct_count": metrics[(length, position)]["correct_count"],
+                                    "total_count": metrics[(length, position)]["total_count"]
+                                }
+                                for length, position in metrics.keys()
                             }
-                            for length, position in metrics.keys()
                         }
-                    }
-                    
-                    # Print summary
-                    if args.use_rl:
-                        print(f"\nConfig {cur_idx}/{max_len} | model={model_name}, dataset={dataset_name}, method=RL")
-                    else:
-                        print(f"\nConfig {cur_idx}/{max_len} | model={model_name}, dataset={dataset_name}, method={cur_method}, budget={cur_budget}")
-                    print("Position | Accuracy | Correct/Total")
-                    print("-" * 40)
-                    for position in sorted(set(k[1] for k in metrics.keys())):
-                        # Calculate average accuracy across all context lengths for this position
-                        position_samples = [(k[0], v) for k, v in metrics.items() if k[1] == position]
-                        total_correct = sum(sample[1]["correct_count"] for sample in position_samples)
-                        total_samples = sum(sample[1]["total_count"] for sample in position_samples)
-                        avg_accuracy = total_correct / total_samples if total_samples > 0 else 0
-                        print(f"{position:3.2f} | {avg_accuracy:.2%} | {total_correct}/{total_samples}")
+                        
+                        # Print summary
+                        print(f"\nConfig {cur_idx}/{max_len} | model={model_name}, dataset={dataset_name}, method={cur_method}, window={cur_window}, budget={cur_budget}")
+                        print("Position | Accuracy | Correct/Total")
+                        print("-" * 40)
+                        for position in sorted(set(k[1] for k in metrics.keys())):
+                            # Calculate average accuracy across all context lengths for this position
+                            position_samples = [(k[0], v) for k, v in metrics.items() if k[1] == position]
+                            total_correct = sum(sample[1]["correct_count"] for sample in position_samples)
+                            total_samples = sum(sample[1]["total_count"] for sample in position_samples)
+                            avg_accuracy = total_correct / total_samples if total_samples > 0 else 0
+                            print(f"{position:3.2f} | {avg_accuracy:.2%} | {total_correct}/{total_samples}")
         
         # Clear GPU memory after processing each model
         del model
@@ -421,10 +305,7 @@ def main(args):
     
     # Save all results to a JSON file
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    if args.use_rl:
-        result_file = f"result_json/needle/needle_results_RL_{timestamp}.json"
-    else:
-        result_file = f"result_json/needle/needle_results_{timestamp}.json"
+    result_file = f"result_json/needle/needle_results_{timestamp}.json"
     with open(result_file, 'w', encoding='utf-8') as f:
         json.dump(all_results, f, indent=2, ensure_ascii=False)
     print(f"\nAll results saved to {result_file}")
@@ -434,23 +315,13 @@ def parse_args(args=None):
     parser.add_argument("--gpus", type=int, nargs='+', default=[0], help="List of GPU IDs (e.g., --gpus 0 1 2 3)")
     parser.add_argument("--model", type=str, nargs='+', default=["llama2"], choices=["llama", "llama2", "llama3", "opt", "qwen2"])
     parser.add_argument("--dataset", type=str, nargs='+', default=["datasets/needle_dataset.jsonl"])
-    parser.add_argument("--budget", type=int, nargs='+', default=[100])
-    parser.add_argument("--method", type=str, nargs='+', default=["a2sf"])
-    
-    # RL-related arguments
-    parser.add_argument("--use_rl", action="store_true", help="Use RL policy for compression")
-    parser.add_argument("--rl_checkpoint", type=str, help="Path to RL model checkpoint (.pt file)")
+    parser.add_argument("--budget", type=int, nargs='+', default=[128], help="Total budget for compression")
+    parser.add_argument("--method", type=str, nargs='+', default=["snap"], help="Compression method (full, a2sf, h2o, snap, sigmoid)")
+    parser.add_argument("--window", type=int, nargs='+', default=[16], help="Observation window size")
     
     return parser.parse_args(args)
 
 if __name__ == "__main__":
     args = parse_args()
-    
-    # Example usage:
-    # Standard evaluation:
-    # python evaluate_needle.py --model llama2 --dataset datasets/needle_dataset.jsonl --method a2sf --budget 100
-    # 
-    # RL evaluation:
-    # python evaluate_needle.py --model llama2 --dataset datasets/needle_dataset.jsonl --use_rl --rl_checkpoint path/to/checkpoint.pt
     
     main(args)

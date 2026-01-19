@@ -156,20 +156,16 @@ class AttentionEncoder(nn.Module):
         """
         return []
     
-    def encode_context(self, text: str) -> torch.Tensor:
+    def encode_context(self, text: str, generation_length: int) -> torch.Tensor:
         """
         Encode text using attention mechanism with target model's first layer, first head
         
         Args:
             text: Input text string
-            
+            generation_length: Generation length
         Returns:
             torch.Tensor: Encoded vector of shape (output_dim,)
-        """
-        if not text or not text.strip():
-            # Empty text, return zero vector
-            return torch.zeros(self.output_dim, device=self.device)
-        
+        """  
         # Tokenize text
         tokenized = self.target_tokenizer(
             text,
@@ -281,6 +277,9 @@ class AttentionEncoder(nn.Module):
             # If longer, truncate from the left (keep rightmost output_dim tokens)
             attention_output = attention_output[-self.output_dim:]  # (output_dim,)
         
+        padding = torch.zeros(1, device=self.device) + (generation_length/512)
+        attention_output = torch.cat([attention_output, padding], dim=0)  # (output_dim,)
+        
         return attention_output
 
 @dataclass
@@ -311,16 +310,16 @@ class A2SFEnv:
         # Current episode cache
         self.current_prompt = None
         self.current_dataset = None
-        self.current_generated_text_full = None
+        self.current_answer = None
+        self.current_generation_length = None
     
-    def encode_to_state(self, prompt: str, generated_text_full: str, dataset: str = None) -> torch.Tensor:
+    def encode_to_state(self, prompt: str, generation_length: int, answer: str, dataset: str = None) -> torch.Tensor:
         self.current_prompt = prompt
         self.current_dataset = dataset
-        self.current_generated_text_full = generated_text_full
+        self.current_answer = answer
+        self.current_generation_length = generation_length
         
-        context_embedding = self.context_encoder.encode_context(prompt).to(self.device, dtype=torch.float32)
-        
-        return context_embedding
+        return self.context_encoder.encode_context(prompt, generation_length).to(self.device, dtype=torch.float32)
     
     def step(self, action: Tuple[torch.Tensor, torch.Tensor]) -> Tuple[torch.Tensor, Dict[str, Any]]:
         """
@@ -338,8 +337,9 @@ class A2SFEnv:
                 prompt=self.current_prompt,
                 a=a_val,
                 b=b_val,
-                generated_text_full=self.current_generated_text_full,
-                dataset=self.current_dataset
+                generation_length=self.current_generation_length,
+                answer=self.current_answer,
+                dataset=self.current_dataset,
             )
         
         reward = torch.tensor(float(result.reward), device=self.device)
