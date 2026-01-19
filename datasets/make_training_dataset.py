@@ -109,7 +109,6 @@ def load_zeroscrolls_datasets(tokenizer) -> List[Dict[str, Any]]:
             all_input = example.get("input", "")
             # Format prompt
             prompt = format_prompt_for_task(task_type, context="", question=all_input)
-            import pdb; pdb.set_trace()
             
             # Filter by token length (8K 근처)
             token_count = count_tokens(tokenizer, prompt)
