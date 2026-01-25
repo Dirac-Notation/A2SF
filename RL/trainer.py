@@ -281,7 +281,7 @@ class A2SFTrainer:
                 # Encode state (only once)
                 state = self.env.encode_to_state(
                     prompt=episode_data["input_prompt"],
-                    output_length=episode_data["generation_length"],
+                    generation_length=episode_data["generation_length"],
                     answer=episode_data["generated_text"],
                     dataset=episode_data["dataset"],
                 )
@@ -343,7 +343,7 @@ class A2SFTrainer:
             
             state = self.env.encode_to_state(
                 prompt=episode_data["input_prompt"],
-                output_length=episode_data["generation_length"],
+                generation_length=episode_data["generation_length"],
                 answer=episode_data["generated_text"],
                 dataset=episode_data["dataset"],
             )
