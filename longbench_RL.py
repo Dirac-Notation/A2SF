@@ -74,7 +74,7 @@ def load_rl_policy(checkpoint_path, device, target_model, target_tokenizer):
     ).to(device)
     
     # State dimension is fixed to 8192 (output_dim of AttentionEncoder)
-    state_dim = 8192
+    state_dim = 8193
     
     # Initialize policy with config values
     policy = NeuralUCBPolicy(
