@@ -95,10 +95,10 @@ def load_rl_policy(checkpoint_path, device, target_model, target_tokenizer):
     
     return policy, context_encoder, config
 
-def get_rl_action(policy, context_encoder, prompt, dataset, model_name, device, ucb_beta=1.0):
+def get_rl_action(policy, context_encoder, prompt, generation_length, dataset, model_name, device, ucb_beta=1.0):
     """Get RL action (a, b) for sigmoid cache from given prompt"""
-    # Encode context
-    context_embedding = context_encoder.encode_context(prompt)
+    # Encode context with generation_length
+    context_embedding = context_encoder.encode_context(prompt, generation_length)
     
     # Build state (ensure it's on the correct device and dtype)
     state = context_embedding.to(device, dtype=torch.float32)
@@ -121,8 +121,9 @@ def get_pred_rl(data, max_length, max_gen, dataset, model, tokenizer, out_path, 
         prompt = json_obj["input_prompt"]
 
         # Get RL action (a, b) for sigmoid cache from this prompt
+        # Pass max_gen as generation_length to consider generation length in state encoding
         a, b = get_rl_action(
-            rl_policy, context_encoder, prompt, dataset, model_name, device, 
+            rl_policy, context_encoder, prompt, max_gen, dataset, model_name, device, 
             ucb_beta=rl_config.ucb_beta
         )
 
