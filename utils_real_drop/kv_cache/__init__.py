@@ -6,8 +6,8 @@ from transformers.cache_utils import Cache
 
 class KVCache(Cache):
     """
-    Unified KV Cache that manages all layers and supports compression algorithms.
-    This completely replaces transformers' Cache structure and is fully compatible with DynamicCache.
+    Unified KV Cache that manages per-layer caches properly without data duplication.
+    Acts as a proxy to specific LayerCache implementations.
     """
     
     def __init__(self, layer_caches: Optional[List[Cache]] = None):
@@ -21,16 +21,6 @@ class KVCache(Cache):
         super().__init__()
         self.layer_caches = layer_caches if layer_caches is not None else []
         self._seen_tokens = 0
-        
-        # Initialize key_cache and value_cache lists for transformers compatibility
-        # These must be lists of tensors (one per layer), matching DynamicCache structure
-        self.key_cache: List[torch.Tensor] = []
-        self.value_cache: List[torch.Tensor] = []
-        
-        # Initialize with empty tensors for each layer (DynamicCache uses empty lists initially)
-        for _ in range(len(self.layer_caches)):
-            self.key_cache.append(torch.empty(0))
-            self.value_cache.append(torch.empty(0))
     
     def update(
         self,
@@ -41,135 +31,47 @@ class KVCache(Cache):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Updates the cache with the new `key_states` and `value_states` for the layer `layer_idx`.
-        This matches the DynamicCache.update() interface exactly.
+        Delegates to the specific layer cache.
         """
-        # Update the number of seen tokens (only for first layer)
+        # Update seen tokens count (only once per step usually tracked by layer 0)
         if layer_idx == 0:
             self._seen_tokens += key_states.shape[-2]
-        
-        # If we have layer caches (compression enabled), use them
+            
+        # Delegate update to the specific layer cache
         if len(self.layer_caches) > layer_idx:
-            layer_cache = self.layer_caches[layer_idx]
-            updated_key, updated_value = layer_cache.update(key_states, value_states, layer_idx, cache_kwargs)
+            return self.layer_caches[layer_idx].update(key_states, value_states, layer_idx, cache_kwargs)
         else:
-            # Fallback to simple concatenation (like DynamicCache)
-            if len(self.key_cache) <= layer_idx:
-                # Extend lists if needed (for skipped layers)
-                for _ in range(len(self.key_cache), layer_idx):
-                    self.key_cache.append(torch.empty(0))
-                    self.value_cache.append(torch.empty(0))
-                self.key_cache.append(key_states)
-                self.value_cache.append(value_states)
-            elif len(self.key_cache[layer_idx]) == 0 or self.key_cache[layer_idx].numel() == 0:
-                # First time for this layer
-                self.key_cache[layer_idx] = key_states
-                self.value_cache[layer_idx] = value_states
-            else:
-                # Concatenate with existing cache
-                self.key_cache[layer_idx] = torch.cat([self.key_cache[layer_idx], key_states], dim=-2)
-                self.value_cache[layer_idx] = torch.cat([self.value_cache[layer_idx], value_states], dim=-2)
-            updated_key = self.key_cache[layer_idx]
-            updated_value = self.value_cache[layer_idx]
-        
-        # Always update the transformers-compatible cache lists
-        if len(self.key_cache) <= layer_idx:
-            # Extend lists if needed
-            for _ in range(len(self.key_cache), layer_idx + 1):
-                self.key_cache.append(torch.empty(0))
-                self.value_cache.append(torch.empty(0))
-        
-        # Store the updated tensors (for compatibility with DynamicCache)
-        self.key_cache[layer_idx] = updated_key
-        self.value_cache[layer_idx] = updated_value
-        
-        return updated_key, updated_value
+            raise ValueError(f"Layer cache for layer {layer_idx} not found")
     
     def get_seq_length(self, layer_idx: Optional[int] = 0) -> int:
         """Returns the sequence length of the cached states for the given layer."""
-        if layer_idx is None:
-            layer_idx = 0
-        
-        # Check if we have layer caches (compression enabled)
         if len(self.layer_caches) > layer_idx:
             return self.layer_caches[layer_idx].get_seq_length()
-        
-        # Fallback to checking key_cache directly (like DynamicCache)
-        is_empty_layer = (
-            len(self.key_cache) == 0
-            or len(self.key_cache) <= layer_idx
-            or self.key_cache[layer_idx].numel() == 0
-        )
-        layer_seq_length = self.key_cache[layer_idx].shape[-2] if not is_empty_layer else 0
-        return layer_seq_length
+        return 0
     
     def get_max_cache_shape(self) -> Optional[int]:
         """Returns the maximum sequence length of the cache object. None means no limit."""
         return None
     
     def __getitem__(self, layer_idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Support for backwards-compatible `past_key_value` indexing.
-        Returns (key_cache[layer_idx], value_cache[layer_idx]) like DynamicCache.
-        """
-        if layer_idx < len(self.key_cache):
-            return (self.key_cache[layer_idx], self.value_cache[layer_idx])
-        raise KeyError(f"Cache only has {len(self.key_cache)} layers, attempted to access layer with index {layer_idx}")
-    
+        """Support for legacy access (cache[i]). Returns views/copies from layer cache."""
+        if layer_idx < len(self.layer_caches):
+            return (self.layer_caches[layer_idx].key_data, self.layer_caches[layer_idx].value_data)
+        raise KeyError(f"Layer index {layer_idx} out of bounds")
+
     def __iter__(self):
-        """
-        Support for backwards-compatible `past_key_value` iteration.
-        Yields (key, value) tuples for each layer like DynamicCache.
-        """
-        for layer_idx in range(len(self.key_cache)):
-            yield (self.key_cache[layer_idx], self.value_cache[layer_idx])
-    
+        for layer_cache in self.layer_caches:
+            yield (layer_cache.key_data, layer_cache.value_data)
+
     def __len__(self):
-        """
-        Support for backwards-compatible `past_key_value` length.
-        Returns the number of layers, matching DynamicCache behavior.
-        """
-        return len(self.key_cache)
+        return len(self.layer_caches)
     
     def reorder_cache(self, beam_idx: torch.LongTensor):
         """Reorders the cache for beam search."""
-        # Reorder layer caches if they exist
-        for layer_idx in range(len(self.layer_caches)):
-            layer_cache = self.layer_caches[layer_idx]
+        for layer_cache in self.layer_caches:
             if hasattr(layer_cache, 'reorder_cache'):
                 layer_cache.reorder_cache(beam_idx)
-        
-        # Reorder transformers-compatible cache lists
-        for layer_idx in range(len(self.key_cache)):
-            if self.key_cache[layer_idx].numel() > 0:
-                device = self.key_cache[layer_idx].device
-                self.key_cache[layer_idx] = self.key_cache[layer_idx].index_select(0, beam_idx.to(device))
-            if self.value_cache[layer_idx].numel() > 0:
-                device = self.value_cache[layer_idx].device
-                self.value_cache[layer_idx] = self.value_cache[layer_idx].index_select(0, beam_idx.to(device))
     
-    def to_legacy_cache(self) -> Tuple[Tuple[torch.Tensor], Tuple[torch.Tensor]]:
-        """Converts the cache to the legacy format (tuple of tuples)."""
-        legacy_key_cache = ()
-        legacy_value_cache = ()
-        for layer_idx in range(len(self.key_cache)):
-            if self.key_cache[layer_idx].numel() > 0:
-                legacy_key_cache += (self.key_cache[layer_idx],)
-                legacy_value_cache += (self.value_cache[layer_idx],)
-            else:
-                legacy_key_cache += (torch.empty(0),)
-                legacy_value_cache += (torch.empty(0),)
-        return (legacy_key_cache, legacy_value_cache)
-    
-    @property
-    def seen_tokens(self):
-        """Returns the number of tokens seen by the cache."""
-        return self._seen_tokens
-    
-    def get_usable_length(self, new_seq_length: int, layer_idx: Optional[int] = 0) -> int:
-        """Returns the usable length of the cache for the given layer."""
-        return self.get_seq_length(layer_idx)
-
-
 # Base class for per-layer cache implementations (compression algorithms)
 class LayerCache(Cache):
     """Base class for per-layer cache implementations with compression support."""
@@ -178,15 +80,12 @@ class LayerCache(Cache):
         super().__init__()
         self.seq_dim = seq_dim
         self.seq_length = 0
-        self.key_data = None
-        self.value_data = None
         self.num_key_value_heads = num_key_value_heads
         self.device = device
-        self.total_budget = 0
-        self.recent_budget = 0
-        self.select_budget = 0
-        self.key_cache: list = []
-        self.value_cache: list = []
+        
+        # Initialize as empty tensors
+        self.key_data: Optional[torch.Tensor] = None
+        self.value_data: Optional[torch.Tensor] = None
     
     def get_seq_length(self, layer_idx: Optional[int] = 0) -> int:
         """Returns the sequence length of the cached states"""
@@ -204,34 +103,16 @@ class LayerCache(Cache):
         cache_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Updates the cache with the new `key_states` and `value_states` for the layer.
-        This matches the Cache.update() interface from transformers.
+        Standard update: concatenate new states to cache.
         """
-        return self.cat(key_states, value_states)
-    
-    def cat(self, key_tensor: torch.Tensor, value_tensor: torch.Tensor):
-        """Concatenate new key-value pairs to existing cache"""
-        self.device = key_tensor.device
-        L = key_tensor.size(self.seq_dim)
-        
-        if self.seq_length == 0:
-            self.key_data = key_tensor
-            self.value_data = value_tensor
-            # Initialize cache lists (for compatibility with KVCache)
-            self.key_cache = [key_tensor]
-            self.value_cache = [value_tensor]
+        if self.key_data is None:
+            self.key_data = key_states
+            self.value_data = value_states
         else:
-            self.key_data = torch.cat((self.key_data, key_tensor), dim=self.seq_dim)
-            self.value_data = torch.cat((self.value_data, value_tensor), dim=self.seq_dim)
-            # Update cache lists (for compatibility with KVCache)
-            if len(self.key_cache) > 0:
-                self.key_cache[0] = self.key_data
-                self.value_cache[0] = self.value_data
-            else:
-                self.key_cache = [self.key_data]
-                self.value_cache = [self.value_data]
-
-        self.seq_length += L
+            self.key_data = torch.cat([self.key_data, key_states], dim=self.seq_dim)
+            self.value_data = torch.cat([self.value_data, value_states], dim=self.seq_dim)
+            
+        self.seq_length = self.key_data.shape[self.seq_dim]
         return self.key_data, self.value_data
     
     def init_cache(self, compression_config, layer_idx):
@@ -301,13 +182,6 @@ class LayerCache(Cache):
             self.key_data = self.key_data.index_select(0, beam_idx)
         if self.value_data is not None:
             self.value_data = self.value_data.index_select(0, beam_idx)
-        for layer_idx in range(len(self.key_cache)):
-            if len(self.key_cache) > layer_idx and self.key_cache[layer_idx] is not None:
-                device = self.key_cache[layer_idx].device
-                self.key_cache[layer_idx] = self.key_cache[layer_idx].index_select(0, beam_idx.to(device))
-            if len(self.value_cache) > layer_idx and self.value_cache[layer_idx] is not None:
-                device = self.value_cache[layer_idx].device
-                self.value_cache[layer_idx] = self.value_cache[layer_idx].index_select(0, beam_idx.to(device))
 
 
 __all__ = ["KVCache", "LayerCache"]
