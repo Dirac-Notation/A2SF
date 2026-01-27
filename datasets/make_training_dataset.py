@@ -4,6 +4,7 @@ import os
 import sys
 import random
 from typing import Dict, List, Any, Optional
+from collections import defaultdict
 import torch
 import argparse
 from tqdm import tqdm
@@ -226,6 +227,8 @@ def generate_answer(model, tokenizer, prompt: str, dataset: str, model_name: str
             do_sample=False,
             temperature=1.0,
             pad_token_id=tokenizer.eos_token_id,
+            stop_strings="[/INST]",
+            tokenizer=tokenizer
         )
     
     # Decode only the generated part (excluding the input prompt)
@@ -245,18 +248,13 @@ def generate_answer(model, tokenizer, prompt: str, dataset: str, model_name: str
         # Handle dict output if return_dict_in_generate was used
         generated_ids = output.sequences[0, context_length:] if hasattr(output, 'sequences') else output[0, context_length:]
     
+    generated_length = generated_ids.size(0)
     # Decode the generated token IDs
     generated_text = tokenizer.decode(generated_ids, skip_special_tokens=True)
     
-    return prompt, generated_text
+    return prompt, generated_text, generated_length
 
-def main():
-    parser = argparse.ArgumentParser(description="Generate training data from ZeroSCROLLS and L-Eval datasets")
-    parser.add_argument("--output_file", type=str, default="./datasets/training_data.jsonl", help="Output file for training data")
-    parser.add_argument("--gpus", type=int, nargs='+', default=[0], help="List of GPU IDs")
-    parser.add_argument("--model", type=str, default="llama3", choices=["llama", "llama2", "llama3", "opt"], help="Model to use")
-    
-    args = parser.parse_args()
+def main(args):
     set_seed(42)
     
     model_name = args.model
@@ -304,13 +302,13 @@ def main():
             generation_length = task_length_map[sample["task_type"]]
             
             try:
-                prompt, generated_text = generate_answer(model, tokenizer, prompt, dataset_name, model_name, generation_length)
+                prompt, generated_text, generated_length = generate_answer(model, tokenizer, prompt, dataset_name, model_name, generation_length)
                 
                 training_sample = {
                     "dataset": dataset_name,
                     "input_prompt": prompt,
                     "generated_text": generated_text,
-                    "generation_length": generation_length
+                    "generation_length": generated_length
                 }
                 
                 f.write(json.dumps(training_sample, ensure_ascii=False, separators=(',', ':')) + "\n")
@@ -334,6 +332,113 @@ def main():
     print(f"\nSamples per dataset:")
     for dataset, count in sorted(processed_counts.items()):
         print(f"  {dataset}: {count}")
+    
+    # Print detailed statistics after generation
+    print(f"\n{'='*50}")
+    print("Generating detailed statistics...")
+    print(f"{'='*50}")
+    check_training_data_stats(args.output_file)
+
+def check_training_data_stats(file_path):
+    """training_data.jsonl 파일에서 dataset별 데이터 개수를 확인"""
+    dataset_counts = defaultdict(int)
+    total_lines = 0
+    
+    print(f"Reading {file_path}...")
+    with open(file_path, 'r', encoding='utf-8') as f:
+        for line_num, line in enumerate(f, 1):
+            if not line.strip():
+                continue
+            
+            try:
+                # JSON 파싱 (실제 데이터 내용은 읽지 않고 구조만 확인)
+                data = json.loads(line)
+                dataset = data.get("dataset", "unknown")
+                dataset_counts[dataset] += 1
+                total_lines += 1
+            except json.JSONDecodeError as e:
+                print(f"Warning: Line {line_num} is not valid JSON: {e}")
+                continue
+    
+    print(f"\n{'='*60}")
+    print(f"Total samples: {total_lines}")
+    print(f"{'='*60}\n")
+    
+    print("Dataset counts:")
+    print("-" * 60)
+    for dataset in sorted(dataset_counts.keys()):
+        count = dataset_counts[dataset]
+        percentage = (count / total_lines * 100) if total_lines > 0 else 0
+        print(f"  {dataset:40s}: {count:5d} ({percentage:5.2f}%)")
+    
+    print("\n" + "="*60)
+    
+    # Task type별로도 집계 (dataset 이름에서 추론)
+    task_type_mapping = {
+        "gov_report": "summarization",
+        "summ_screen_fd": "summarization",
+        "qmsum": "summarization",
+        "space_digest": "summarization",
+        "book_sum_sort": "retrieval",
+        "quality": "qa",
+        "qasper": "qa",
+        "narrative_qa": "qa",
+        "musique": "qa",
+        "hotpot_qa": "qa",
+        "codeU": "qa",
+        "coursera": "qa",
+        "financial_qa": "qa",
+        "gov_report_summ": "summarization",
+        "gsm100": "qa",
+        "legal_contract_qa": "qa",
+        "meeting_summ": "summarization",
+        "multidoc_qa": "qa",
+        "natural_question": "qa",
+        "news_summ": "summarization",
+        "paper_assistant": "qa",
+        "patent_summ": "summarization",
+        "review_summ": "summarization",
+        "sci_fi": "qa",
+        "scientific_qa": "qa",
+        "topic_retrieval_longchat": "retrieval",
+        "tpo": "qa",
+        "tv_show_summ": "summarization"
+    }
+    
+    task_counts = defaultdict(int)
+    for dataset, count in dataset_counts.items():
+        # dataset 이름에서 subset 추출 (zeroscrolls_xxx 또는 leval_xxx)
+        if dataset.startswith("zeroscrolls_"):
+            subset = dataset.replace("zeroscrolls_", "")
+        elif dataset.startswith("leval_"):
+            subset = dataset.replace("leval_", "")
+        else:
+            subset = dataset
+        
+        task_type = task_type_mapping.get(subset, "unknown")
+        task_counts[task_type] += count
+    
+    print("\nTask type counts:")
+    print("-" * 60)
+    for task_type in sorted(task_counts.keys()):
+        count = task_counts[task_type]
+        percentage = (count / total_lines * 100) if total_lines > 0 else 0
+        print(f"  {task_type:20s}: {count:5d} ({percentage:5.2f}%)")
+    
+    print("="*60)
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Generate training data from ZeroSCROLLS and L-Eval datasets, or check statistics")
+    parser.add_argument("--output_file", type=str, default="./datasets/training_data.jsonl", help="Output file for training data")
+    parser.add_argument("--gpus", type=int, nargs='+', default=[0], help="List of GPU IDs")
+    parser.add_argument("--model", type=str, default="llama3", choices=["llama", "llama2", "llama3", "opt"], help="Model to use")
+    parser.add_argument("--stats-only", action="store_true", help="Only check statistics of existing file without generating new data")
+    
+    args = parser.parse_args()
+    
+    if args.stats_only:
+        # Only check statistics
+        check_training_data_stats(args.output_file)
+    else:
+        # Generate training data (original main function)
+        main(args)

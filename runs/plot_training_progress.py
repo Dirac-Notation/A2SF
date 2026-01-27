@@ -46,7 +46,7 @@ total_losses = np.array(total_losses)
 # ---------------------------------------------------------
 # 2.5. Data Smoothing (5-point moving average)
 # ---------------------------------------------------------
-window_size = 50
+window_size = 10
 
 def smooth_data(data, window_size):
     """5개씩 묶어서 평균 계산"""

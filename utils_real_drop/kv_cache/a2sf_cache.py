@@ -6,139 +6,117 @@ class A2SFCache(LayerCache):
     """A2SF cache implementation (forgetting_factor != 1)"""
     
     def __init__(self, num_key_value_heads: int, device: torch.device, seq_dim: int = 2):
-        super().__init__(num_key_value_heads, device, seq_dim)
+        super().__init__(num_key_value_heads, seq_dim)
         self.forgetting_factor = None
         self.exponents = None
         self.input_ids = None
+        self.prompt = False
+        self.selected_indices = None
+        self.device = device
         
     def init_cache(self, compression_config, layer_idx):
         """Initialize A2SF cache settings"""
+        self.seq_length = 0
         self.total_budget = max(round(compression_config.total_budget * compression_config.layerwise_ratios[layer_idx]), 2)
         self.recent_budget = round(self.total_budget * compression_config.local_ratios)
         self.select_budget = self.total_budget - self.recent_budget
         self.forgetting_factor = compression_config.forgetting_factors[layer_idx]
         self.input_ids = None
+        self.prompt = False
+        self.selected_indices = None
         
-    def select(self, acc_scores):
-        """
-        Compresses key_data and value_data based on accumulated scores.
-        Strategy: Keep 'Recent' tokens + Top-K 'History' tokens.
-        """
-        if self.key_data.size(self.seq_dim) <= self.total_budget:
+    def select(self, scores):
+        if self.seq_length <= self.total_budget:
             return
-
-        # Update sequence length
-        self.seq_length = self.key_data.shape[self.seq_dim]
-
-        # Split into History and Recent
-        seq_len = self.key_data.size(self.seq_dim)
-        num_history = seq_len - self.recent_budget
         
-        if num_history <= 0:
-            return
-
-        # acc_scores shape: (Batch, Num_KV_Heads, Seq_Len)
-        history_scores = acc_scores[:, :, :num_history]
+        # Select tokens to keep (common logic)
+        selected_indices = scores[:,:,:-self.recent_budget].topk(self.select_budget, dim=-1).indices.sort().values
+        self.selected_indices = selected_indices
         
-        # Select top-k indices from history
-        k = min(self.select_budget, num_history)
-        selected_indices = torch.topk(history_scores, k, dim=-1).indices # (B, H_kv, k)
+        # Update key-value cache
+        selected_indices = selected_indices.unsqueeze(-1).expand(-1,-1,-1,self.key_data.size(-1))
         
-        # Sort indices to maintain temporal order
-        selected_indices = selected_indices.sort(dim=-1).values
+        self.key_data = torch.cat((
+            self.key_data.gather(self.seq_dim, selected_indices),
+            self.key_data[:,:,-self.recent_budget:,:]
+        ), dim=self.seq_dim)
         
-        # Expand indices for gathering
-        head_dim = self.key_data.size(-1)
-        gather_indices = selected_indices.unsqueeze(-1).expand(-1, -1, -1, head_dim)
+        self.value_data = torch.cat((
+            self.value_data.gather(self.seq_dim, selected_indices),
+            self.value_data[:,:,-self.recent_budget:,:]
+        ), dim=self.seq_dim)
         
-        # Gather selected history
-        selected_keys = torch.gather(self.key_data[:, :, :num_history, :], self.seq_dim, gather_indices)
-        selected_values = torch.gather(self.value_data[:, :, :num_history, :], self.seq_dim, gather_indices)
-        
-        # Get recent window
-        recent_keys = self.key_data[:, :, -self.recent_budget:, :]
-        recent_values = self.value_data[:, :, -self.recent_budget:, :]
-        
-        # Concatenate: [Selected History, Recent]
-        self.key_data = torch.cat([selected_keys, recent_keys], dim=self.seq_dim)
-        self.value_data = torch.cat([selected_values, recent_values], dim=self.seq_dim)
+        # Update cache lists for compatibility with transformers 4.46.2
+        if len(self.key_cache) > 0:
+            self.key_cache[0] = self.key_data
+            self.value_cache[0] = self.value_data
+        else:
+            self.key_cache = [self.key_data]
+            self.value_cache = [self.value_data]
 
     def flash_prepare_scores(self, attn_scores, q_start, q_end):
-        """
-        Apply forgetting factor to attention scores and sum over query dimension.
-        attn_scores: (B, H, Q_chunk, K)
-        Returns: (B, H, K)
-        """
-        if self.exponents is None:
-            # Fallback: no forgetting factor
-            return attn_scores.sum(dim=-2)
+        seq_len = attn_scores.size(2)
         
-        # Apply forgetting factor
-        # exponents shape: (B, 1, Q_total), we need (B, 1, Q_chunk)
-        q_chunk_size = q_end - q_start
-        exponents_chunk = self.exponents[:, :, q_start:q_end].to(attn_scores.device)  # (B, 1, Q_chunk)
-        forgetting = (self.forgetting_factor ** exponents_chunk).view(1, 1, q_chunk_size, 1)  # (1, 1, Q_chunk, 1)
-        
-        # Apply forgetting and sum over query dimension
-        weighted_scores = forgetting * attn_scores  # (B, H, Q_chunk, K)
-        return weighted_scores.sum(dim=-2)  # (B, H, K)
+        forgetting = (self.forgetting_factor ** self.exponents[:,:,q_start:q_end].to(attn_scores.device)).view(1, 1, seq_len, 1)
+        return (forgetting * attn_scores).sum(dim=self.seq_dim)
 
     def prompt_flash_attention(self, query, key, value, attn_mask, head_dim, block_size=1024):
         """
-        Prompt Phase: Compute Output + Accumulate Attention Scores for A2SF.
+        Real Flash Attention implementation with chunked processing
+        Args:
+            query: [batch_size, num_heads, seq_len_q, head_dim]
+            key: [batch_size, num_heads, seq_len_k, head_dim]
+            value: [batch_size, num_heads, seq_len_k, head_dim]
+            attn_mask: [batch_size, 1, seq_len_q, seq_len_k] or None
+            head_dim: dimension of each attention head
+            block_size: size of chunks for memory-efficient processing
+        Returns:
+            output: [batch_size, num_heads, seq_len_q, head_dim]
         """
+        # Use BFloat16 for all computations
         batch_size, num_heads, seq_len_q, _ = query.shape
         _, _, seq_len_k, _ = key.shape
         
-        # Note: key and value are already repeated via repeat_kv
-        num_kv_heads = self.num_key_value_heads
+        # Scale factor (convert to same dtype as query)
+        sm_scale = torch.tensor(1.0 / math.sqrt(head_dim), device=query.device, dtype=query.dtype)
         
-        scale = 1.0 / math.sqrt(head_dim)
+        # Initialize output and running statistics with BFloat16
         output = torch.zeros_like(query)
         
-        # Accumulator for scores: (Batch, Num_Heads, Seq_Len_K) -> Reduced later for GQA
-        acc_score = torch.zeros((batch_size, num_heads, seq_len_k), dtype=torch.float32, device=query.device)
+        acc_score = torch.zeros((batch_size, num_heads, seq_len_k), dtype=query.dtype, device=query.device)
         
-        # Chunking over Query
+        # Process key-value pairs in chunks
         for q_start in range(0, seq_len_q, block_size):
-            q_end = min(q_start + block_size, seq_len_q)
-            q_chunk = query[:, :, q_start:q_end, :]
+            q_end = min(q_start + block_size, seq_len_k)
             
-            # Standard Q * K^T
-            scores = torch.matmul(q_chunk.to(torch.float32), key.transpose(-2, -1).to(torch.float32)) * scale
+            # Extract current chunk of key and value
+            q_chunk = query[:, :, q_start:q_end, :]  # [batch_size, num_heads, chunk_size, head_dim]
             
+            # Compute attention scores for this chunk
+            # Use float32 for numerical stability like original LlamaAttention
+            scores = torch.matmul(q_chunk.to(torch.float32), key.transpose(2, 3).to(torch.float32)) * sm_scale
+            
+            # Apply attention mask if provided (includes causal masking)
             if attn_mask is not None:
                 scores = scores + attn_mask[:, :, q_start:q_end, :].to(torch.float32)
             
-            # Standard Softmax
-            probs = torch.softmax(scores, dim=-1) # (B, H, Q_chunk, K_full)
+            # Softmax in float32 then convert back
+            scores = torch.softmax(scores, dim=-1).to(q_chunk.dtype)
             
-            # Compute Output
-            output[:, :, q_start:q_end, :] = torch.matmul(probs.to(query.dtype), value)
-            
-            # Apply forgetting factor and accumulate
-            chunk_scores = self.flash_prepare_scores(probs, q_start, q_end)  # (B, H, K)
-            acc_score += chunk_scores
+            output[:,:,q_start:q_end] = torch.matmul(scores, value)
 
-        # Reduce scores for GQA (Grouped Query Attention)
-        if num_heads != num_kv_heads:
-            num_groups = num_heads // num_kv_heads
-            acc_score = acc_score.view(batch_size, num_kv_heads, num_groups, seq_len_k).sum(dim=2)
-            
-        # Perform Compression
+            acc_score.add_(self.flash_prepare_scores(scores, q_start, q_end))
+        
+        # GQA Aware Accumulation
+        acc_score = acc_score.view(acc_score.shape[0], self.num_key_value_heads, -1, *acc_score.shape[2:]).sum(dim=2)
+        
         self.select(acc_score)
         
         return output
 
     def flash_attention(self, query, key, value, attn_mask, head_dim, block_size=1024):
-        """
-        Dispatch based on phase (Prompt vs Generation).
-        """
-        seq_len_q = query.shape[-2]
-        
-        # Heuristic: If Query Length > 1, it's the prompt phase (prefill).
-        if seq_len_q > 1:
+        if not self.prompt:
+            self.prompt = True
             return self.prompt_flash_attention(query, key, value, attn_mask, head_dim, block_size)
         else:
-            # Generation phase: Use standard implementation
             return super().flash_attention(query, key, value, attn_mask, head_dim, block_size)

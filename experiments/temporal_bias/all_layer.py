@@ -71,23 +71,83 @@ def analyze_version2(prefill_attention_maps, answer_indices, window_steps, block
     return np.array(window_sim)
 
 
-# ---------------------------------------------------------
-# 1. Global Style Settings
-# ---------------------------------------------------------
-rcParams.update({
-    "font.family": "sans-serif",
-    "font.sans-serif": ["Arial", "DejaVu Sans"],
-    "figure.figsize": (16, 9),
-    "figure.dpi": 200,
-    "font.size": 14,
-    "axes.labelsize": 18,
-    "axes.titlesize": 22,
-    "xtick.labelsize": 12,
-    "ytick.labelsize": 12,
-    "legend.fontsize": 14,
-    "axes.linewidth": 1.2,
-    "grid.alpha": 0.3
-})
+def plot_group_results(group_name, group_data, avg_prefill, avg_gen, workpath):
+    """
+    Plot temporal bias analysis results for a group
+    Args:
+        group_name: Name of the group
+        group_data: Dictionary with item indices as keys and (data_v1_mean, data_v2_mean, seq_len, gen_len) as values
+        avg_prefill: Average prefill length
+        avg_gen: Average generation length
+        workpath: Path to save the plot
+    """
+    print(f">>> Plotting group: {group_name} (Avg Prefill: {avg_prefill:.1f}, Avg Gen: {avg_gen:.1f})")
+    
+    # Apply style settings explicitly
+    plt.rcParams.update({
+        "font.family": "serif",
+        "font.size": 22,
+        "axes.labelsize": 22,
+        "axes.titlesize": 22,
+        "xtick.labelsize": 22,
+        "ytick.labelsize": 22,
+        "legend.fontsize": 22,
+        "axes.linewidth": 1.2,
+    })
+    
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
+    
+    num_items = len([k for k in group_data.keys() if isinstance(k, int)])
+    block_size = 8
+    window_steps = list(range(block_size, 33*block_size, block_size))
+    
+    # Get colors for different items
+    colors = plt.cm.tab20(np.linspace(0, 1, num_items))
+    
+    # Version 2: Left subplot (each block)
+    item_indices = sorted([k for k in group_data.keys() if isinstance(k, int)])
+    for item_idx, color in zip(item_indices, colors):
+        data_v2_mean = group_data[item_idx][1]
+        ax1.plot(window_steps, data_v2_mean, 
+                alpha=0.9, linewidth=2.5, linestyle='--',
+                color=color)
+    ax1.set_title(f"Hit rate of each query", fontweight='bold', fontsize=22)
+    ax1.set_xlabel("Query Index", fontweight='bold', fontsize=22)
+    ax1.set_ylabel("Hit rate", fontweight='bold', fontsize=22)
+    ax1.tick_params(labelsize=22)
+    ax1.grid(True, linestyle='--', alpha=0.5, linewidth=0.8)
+    ax1.set_ylim(0, 0.8)
+    ax1.text(0.02, 0.98, f"Avg Prefill: {avg_prefill:.1f}\nAvg Gen: {avg_gen:.1f}", 
+             transform=ax1.transAxes, fontsize=16, verticalalignment='top',
+             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    
+    # Version 1: Right subplot (sum of previous blocks)
+    for item_idx, color in zip(item_indices, colors):
+        data_v1_mean = group_data[item_idx][0]
+        ax2.plot(window_steps, data_v1_mean, 
+                alpha=0.9, linewidth=2.5, linestyle='-',
+                color=color)
+    ax2.set_title(f"Hit rate of the sum of previous queries", fontweight='bold', fontsize=22)
+    ax2.set_xlabel("The number of accumulated queries", fontweight='bold', fontsize=22)
+    ax2.set_ylabel("Hit rate", fontweight='bold', fontsize=22)
+    ax2.tick_params(labelsize=22)
+    ax2.grid(True, linestyle='--', alpha=0.5, linewidth=0.8)
+    ax2.set_ylim(0, 0.8)
+    ax2.yaxis.set_ticklabels([])  # Remove y-axis labels on right subplot to avoid overlap
+    ax2.text(0.02, 0.98, f"Avg Prefill: {avg_prefill:.1f}\nAvg Gen: {avg_gen:.1f}", 
+             transform=ax2.transAxes, fontsize=16, verticalalignment='top',
+             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    
+    # Overall figure title
+    fig.suptitle(f"{group_name}", fontsize=24, fontweight='bold')
+    
+    # 저장
+    os.makedirs(os.path.join(workpath, "plots"), exist_ok=True)
+    plt.tight_layout()
+    save_path = os.path.join(workpath, f"plots/temporal_bias_{group_name.replace(' ', '_')}.png")
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"Saved plot to {save_path}")
+    plt.close()
 
 # ---------------------------------------------------------
 # 2. 데이터 준비 및 프롬프트 구성
@@ -165,14 +225,12 @@ def get_attn_hook(module, input, output):
 for layer in attention_model.model.layers:
     layer.self_attn.register_forward_hook(get_attn_hook)
 
-# Store data for all groups: {group_name: {prompt_idx: (data_v1_mean, data_v2_mean, avg_prefill_len, avg_gen_len)}}
-all_groups_data = {}
-
 # Process each group
 for group_name, selected_items in selected_data.items():
     print(f"\n>>> Processing group: {group_name} ({len(selected_items)} items)")
-    all_groups_data[group_name] = {}
     
+    # Store data for this group: {item_idx: (data_v1_mean, data_v2_mean, seq_len, gen_len)}
+    group_data = {}
     prefill_lengths = []
     gen_lengths = []
     
@@ -230,8 +288,8 @@ for group_name, selected_items in selected_data.items():
         answer_score.squeeze_(dim=2)
         answer_indices = answer_score.topk(token_budget, dim=2).indices
         
-        block_size = 16
-        window_steps = list(range(block_size, 17*block_size, block_size))
+        block_size = 8
+        window_steps = list(range(block_size, 33*block_size, block_size))
         
         # 두 버전의 데이터 계산
         data_v1 = analyze_version1(prefill_attention_maps, answer_indices, window_steps, block_size, token_budget)
@@ -242,70 +300,13 @@ for group_name, selected_items in selected_data.items():
         data_v2_mean = data_v2.mean(axis=1)  # (Windows,)
         
         # Store data for this item
-        all_groups_data[group_name][idx] = (data_v1_mean, data_v2_mean, seq_len, generated_token_length)
+        group_data[idx] = (data_v1_mean, data_v2_mean, seq_len, generated_token_length)
     
     # Calculate averages for the group
     avg_prefill = np.mean(prefill_lengths)
     avg_gen = np.mean(gen_lengths)
-    all_groups_data[group_name]["_avg"] = (avg_prefill, avg_gen)
-
-# Generate plots for each group
-for group_name, group_data in all_groups_data.items():
-    if "_avg" not in group_data:
-        continue
-        
-    avg_prefill, avg_gen = group_data["_avg"]
-    print(f">>> Plotting group: {group_name} (Avg Prefill: {avg_prefill:.1f}, Avg Gen: {avg_gen:.1f})")
     
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 7))
-    
-    num_items = len([k for k in group_data.keys() if k != "_avg"])
-    window_steps = list(range(16, 17*16, 16))  # block_size = 16
-    
-    # Get colors for different items
-    colors = plt.cm.tab20(np.linspace(0, 1, num_items))
-    
-    # Version 2: Left subplot (each block)
-    item_indices = sorted([k for k in group_data.keys() if k != "_avg"])
-    for item_idx, color in zip(item_indices, colors):
-        data_v2_mean = group_data[item_idx][1]
-        ax1.plot(window_steps, data_v2_mean, 
-                alpha=0.9, linewidth=2.5, linestyle='--',
-                color=color)
-    ax1.set_title(f"Hit rate of each block (Layer Average)", pad=20, fontweight='bold')
-    ax1.set_xlabel("Block offset from end", labelpad=15, fontweight='bold')
-    ax1.set_ylabel("Jaccard Similarity", labelpad=15, fontweight='bold')
-    ax1.grid(True, linestyle='--', alpha=0.5, linewidth=0.8)
-    ax1.set_ylim(0, 0.8)
-    ax1.text(0.02, 0.98, f"Avg Prefill: {avg_prefill:.1f}\nAvg Gen: {avg_gen:.1f}", 
-             transform=ax1.transAxes, fontsize=12, verticalalignment='top',
-             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-    
-    # Version 1: Right subplot (sum of previous blocks)
-    for item_idx, color in zip(item_indices, colors):
-        data_v1_mean = group_data[item_idx][0]
-        ax2.plot(window_steps, data_v1_mean, 
-                alpha=0.9, linewidth=2.5, linestyle='-',
-                color=color)
-    ax2.set_title(f"Hit rate of the sum of previous every blocks (Layer Average)", pad=20, fontweight='bold')
-    ax2.set_xlabel("Window size (Number of queries)", labelpad=15, fontweight='bold')
-    ax2.set_ylabel("Jaccard Similarity", labelpad=15, fontweight='bold')
-    ax2.grid(True, linestyle='--', alpha=0.5, linewidth=0.8)
-    ax2.set_ylim(0, 0.8)
-    ax2.yaxis.set_ticklabels([])  # Remove y-axis labels on right subplot to avoid overlap
-    ax2.text(0.02, 0.98, f"Avg Prefill: {avg_prefill:.1f}\nAvg Gen: {avg_gen:.1f}", 
-             transform=ax2.transAxes, fontsize=12, verticalalignment='top',
-             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-    
-    # Overall figure title
-    fig.suptitle(f"Temporal Bias Analysis - {group_name}", fontsize=24, fontweight='bold', y=1.02)
-    
-    # 저장
-    os.makedirs(os.path.join(workpath, "plots"), exist_ok=True)
-    plt.tight_layout()
-    save_path = os.path.join(workpath, f"plots/temporal_bias_{group_name.replace(' ', '_')}.png")
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    print(f"Saved plot to {save_path}")
-    plt.close()
+    # Plot immediately after processing the group
+    plot_group_results(group_name, group_data, avg_prefill, avg_gen, workpath)
 
 print(">>> All analysis and visualization completed")
