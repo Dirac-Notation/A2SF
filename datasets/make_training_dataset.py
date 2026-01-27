@@ -115,8 +115,15 @@ def load_zeroscrolls_datasets(tokenizer) -> List[Dict[str, Any]]:
             if token_count < MIN_TOKENS or token_count > MAX_TOKENS:
                 continue
             
+            answer = example.get("output", "")
+            output_count = count_tokens(tokenizer, answer)
+            if output_count == 0:
+                continue
+
             sample = {
                 "input_prompt": prompt,
+                "answer": answer,
+                "generation_length": output_count,
                 "dataset": f"zeroscrolls_{subset}",
                 "source": "ZeroSCROLLS",
                 "length": token_count,
@@ -188,8 +195,15 @@ def load_leval_datasets(tokenizer) -> List[Dict[str, Any]]:
             if token_count < MIN_TOKENS or token_count > MAX_TOKENS:
                 continue
             
+            answer = example.get("outputs", "")[0]
+            output_count = count_tokens(tokenizer, answer)
+            if output_count == 0:
+                continue
+
             sample = {
                 "input_prompt": prompt,
+                "answer": answer,
+                "generation_length": output_count,
                 "dataset": f"leval_{subset}",
                 "source": "L-Eval",
                 "length": token_count,
@@ -288,27 +302,21 @@ def main(args):
     
     total_samples = 0
     processed_counts = {}
-    
-    task_length_map = {
-        "summarization": 512,
-        "retrieval": 32,
-        "qa": 128,
-    }
+
     
     with open(args.output_file, 'w', encoding='utf-8') as f:
         for sample in tqdm(all_samples, desc="Generating training data"):
             dataset_name = sample.get("dataset", "unknown")
             prompt = sample["input_prompt"]
-            generation_length = task_length_map[sample["task_type"]]
+            generated_text = sample["answer"]
+            generation_length = sample["generation_length"]
             
             try:
-                prompt, generated_text, generated_length = generate_answer(model, tokenizer, prompt, dataset_name, model_name, generation_length)
-                
                 training_sample = {
                     "dataset": dataset_name,
                     "input_prompt": prompt,
                     "generated_text": generated_text,
-                    "generation_length": generated_length
+                    "generation_length": generation_length
                 }
                 
                 f.write(json.dumps(training_sample, ensure_ascii=False, separators=(',', ':')) + "\n")

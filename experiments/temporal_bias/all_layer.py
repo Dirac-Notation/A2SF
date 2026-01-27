@@ -4,11 +4,9 @@ import os
 import sys
 import numpy as np
 import matplotlib.pyplot as plt
-import seaborn as sns
 import random
 import glob
 
-from matplotlib import rcParams
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -71,7 +69,7 @@ def analyze_version2(prefill_attention_maps, answer_indices, window_steps, block
     return np.array(window_sim)
 
 
-def plot_group_results(group_name, group_data, avg_prefill, avg_gen, workpath):
+def plot_group_results(group_name, group_data, avg_prefill, avg_gen, workpath, sentences_info=None):
     """
     Plot temporal bias analysis results for a group
     Args:
@@ -80,6 +78,7 @@ def plot_group_results(group_name, group_data, avg_prefill, avg_gen, workpath):
         avg_prefill: Average prefill length
         avg_gen: Average generation length
         workpath: Path to save the plot
+        sentences_info: Dictionary with item indices as keys and sentence information dicts as values
     """
     print(f">>> Plotting group: {group_name} (Avg Prefill: {avg_prefill:.1f}, Avg Gen: {avg_gen:.1f})")
     
@@ -95,7 +94,8 @@ def plot_group_results(group_name, group_data, avg_prefill, avg_gen, workpath):
         "axes.linewidth": 1.2,
     })
     
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
+    plt.rcParams.update({"legend.fontsize": 18})
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 6))
     
     num_items = len([k for k in group_data.keys() if isinstance(k, int)])
     block_size = 8
@@ -111,14 +111,14 @@ def plot_group_results(group_name, group_data, avg_prefill, avg_gen, workpath):
         ax1.plot(window_steps, data_v2_mean, 
                 alpha=0.9, linewidth=2.5, linestyle='--',
                 color=color)
-    ax1.set_title(f"Hit rate of each query", fontweight='bold', fontsize=22)
-    ax1.set_xlabel("Query Index", fontweight='bold', fontsize=22)
-    ax1.set_ylabel("Hit rate", fontweight='bold', fontsize=22)
+    ax1.set_title(f"Hit rate of each query", fontsize=22)
+    ax1.set_xlabel("Query Index", fontsize=22)
+    ax1.set_ylabel("Hit rate", fontsize=22)
     ax1.tick_params(labelsize=22)
     ax1.grid(True, linestyle='--', alpha=0.5, linewidth=0.8)
-    ax1.set_ylim(0, 0.8)
-    ax1.text(0.02, 0.98, f"Avg Prefill: {avg_prefill:.1f}\nAvg Gen: {avg_gen:.1f}", 
-             transform=ax1.transAxes, fontsize=16, verticalalignment='top',
+    # ax1.set_ylim(0, 0.8)
+    ax1.text(0.98, 0.98, f"Avg Prefill: {avg_prefill:.1f}\nAvg Gen: {avg_gen:.1f}", 
+             transform=ax1.transAxes, fontsize=16, verticalalignment='top', horizontalalignment='right',
              bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
     
     # Version 1: Right subplot (sum of previous blocks)
@@ -127,23 +127,22 @@ def plot_group_results(group_name, group_data, avg_prefill, avg_gen, workpath):
         ax2.plot(window_steps, data_v1_mean, 
                 alpha=0.9, linewidth=2.5, linestyle='-',
                 color=color)
-    ax2.set_title(f"Hit rate of the sum of previous queries", fontweight='bold', fontsize=22)
-    ax2.set_xlabel("The number of accumulated queries", fontweight='bold', fontsize=22)
-    ax2.set_ylabel("Hit rate", fontweight='bold', fontsize=22)
+    ax2.set_title(f"Hit rate of the sum of previous queries", fontsize=22)
+    ax2.set_xlabel("The number of accumulated queries", fontsize=22)
+    ax2.set_ylabel("Hit rate", fontsize=22)
     ax2.tick_params(labelsize=22)
     ax2.grid(True, linestyle='--', alpha=0.5, linewidth=0.8)
-    ax2.set_ylim(0, 0.8)
-    ax2.yaxis.set_ticklabels([])  # Remove y-axis labels on right subplot to avoid overlap
-    ax2.text(0.02, 0.98, f"Avg Prefill: {avg_prefill:.1f}\nAvg Gen: {avg_gen:.1f}", 
-             transform=ax2.transAxes, fontsize=16, verticalalignment='top',
+    # ax2.set_ylim(0, 0.8)
+    ax2.text(0.98, 0.98, f"Avg Prefill: {avg_prefill:.1f}\nAvg Gen: {avg_gen:.1f}", 
+             transform=ax2.transAxes, fontsize=16, verticalalignment='top', horizontalalignment='right',
              bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-    
-    # Overall figure title
-    fig.suptitle(f"{group_name}", fontsize=24, fontweight='bold')
     
     # 저장
     os.makedirs(os.path.join(workpath, "plots"), exist_ok=True)
-    plt.tight_layout()
+    plt.tight_layout(rect=[0, 0, 1, 0.92])
+    
+    # Overall figure title (after tight_layout to position correctly)
+    fig.suptitle(f"{group_name}", fontsize=24, fontweight='bold', y=0.95)
     save_path = os.path.join(workpath, f"plots/temporal_bias_{group_name.replace(' ', '_')}.png")
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     print(f"Saved plot to {save_path}")
@@ -152,52 +151,21 @@ def plot_group_results(group_name, group_data, avg_prefill, avg_gen, workpath):
 # ---------------------------------------------------------
 # 2. 데이터 준비 및 프롬프트 구성
 # ---------------------------------------------------------
-# Load dataset groups from longbench.py
-data_group = {
-    "Code Complete": ["repobench-p", "lcc"],
-    "Few Shot": ["trec", "triviaqa", "samsum", "lsht"],
-    "Single-doc QA": ["narrativeqa", "qasper", "multifieldqa_en", "multifieldqa_zh"],
-    "Multi-doc QA": ["hotpotqa", "2wikimqa", "musique", "dureader"],
-    "Summarization": ["gov_report", "qmsum", "multi_news", "vcsum"],
-    "Passage Retrieval": ["passage_retrieval_en", "passage_retrieval_zh", "passage_count"],
-}
-
 # Load max generation lengths
 dataset2maxlen_path = os.path.join(root_path, "config", "dataset2maxlen.json")
 dataset2maxlen = json.load(open(dataset2maxlen_path, "r"))
 
-# Load data from longbench datasets
-datasets_path = os.path.join(root_path, "datasets", "longbench")
-all_data = {}  # {dataset_name: [items with length <= 6000]}
-
-for jsonl_file in glob.glob(os.path.join(datasets_path, "*.jsonl")):
-    dataset_name = os.path.basename(jsonl_file).replace(".jsonl", "")
-    all_data[dataset_name] = []
-    
-    with open(jsonl_file, "r") as f:
-        for line in f:
-            item = json.loads(line)
-            if item.get("length", 0) <= 6000:
-                all_data[dataset_name].append(item)
-
-# Group data by category
-grouped_data = {}  # {group_name: {dataset_name: [items]}}
-for group_name, dataset_names in data_group.items():
-    grouped_data[group_name] = {}
-    for dataset_name in dataset_names:
-        if dataset_name in all_data and len(all_data[dataset_name]) > 0:
-            grouped_data[group_name][dataset_name] = all_data[dataset_name]
-
-# Select random 10 items per group
+# Load data from data.jsonl
+data_jsonl_path = os.path.join(workpath, "data.jsonl")
 selected_data = {}  # {group_name: [selected_items]}
-for group_name, datasets in grouped_data.items():
-    all_items = []
-    for dataset_name, items in datasets.items():
-        all_items.extend([(dataset_name, item) for item in items])
-    
-    if len(all_items) > 0:
-        random.shuffle(all_items)
-        selected_data[group_name] = all_items[:10]
+
+with open(data_jsonl_path, "r", encoding="utf-8") as f:
+    for line in f:
+        item = json.loads(line)
+        group_name = item.get("group_name")
+        if group_name not in selected_data:
+            selected_data[group_name] = []
+        selected_data[group_name].append((item.get("dataset"), item))
 
 model_name = "llama3"
 model2path = json.load(open(os.path.join(root_path, "config", "model2path.json"), "r"))
@@ -231,6 +199,8 @@ for group_name, selected_items in selected_data.items():
     
     # Store data for this group: {item_idx: (data_v1_mean, data_v2_mean, seq_len, gen_len)}
     group_data = {}
+    # Store sentence information for this group: {item_idx: {dataset, input_prompt, seq_len, gen_len}}
+    sentences_info = {}
     prefill_lengths = []
     gen_lengths = []
     
@@ -301,12 +271,30 @@ for group_name, selected_items in selected_data.items():
         
         # Store data for this item
         group_data[idx] = (data_v1_mean, data_v2_mean, seq_len, generated_token_length)
+        
+        # Store sentence information for this item
+        sentences_info[idx] = {
+            "index": idx,
+            "group_name": group_name,
+            "dataset": dataset_name,
+            "input_prompt": item.get("input_prompt", ""),
+            "seq_len": int(seq_len),
+            "gen_len": int(generated_token_length)
+        }
     
     # Calculate averages for the group
     avg_prefill = np.mean(prefill_lengths)
     avg_gen = np.mean(gen_lengths)
     
+    # Save sentences information to jsonl file
+    os.makedirs(os.path.join(workpath, "sentences"), exist_ok=True)
+    sentences_file = os.path.join(workpath, f"sentences/{group_name.replace(' ', '_')}_sentences.jsonl")
+    with open(sentences_file, 'w', encoding='utf-8') as f:
+        for idx in sorted(sentences_info.keys()):
+            f.write(json.dumps(sentences_info[idx], ensure_ascii=False) + "\n")
+    print(f"Saved sentences info to {sentences_file}")
+    
     # Plot immediately after processing the group
-    plot_group_results(group_name, group_data, avg_prefill, avg_gen, workpath)
+    plot_group_results(group_name, group_data, avg_prefill, avg_gen, workpath, sentences_info)
 
 print(">>> All analysis and visualization completed")

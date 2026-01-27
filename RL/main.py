@@ -63,12 +63,13 @@ class A2SFRLConfig:
         default_config = cls()
         
         parser = argparse.ArgumentParser(description="Train A2SF RL Agent")
-    
+
         # Minimal command line arguments
         parser.add_argument('--gpu', type=int, nargs='+', default=default_config.gpus, help="GPU ID(s) to use (default: [0])")
         parser.add_argument('--model', type=str, default=default_config.model, choices=["llama", "llama2", "llama3", "opt"], help="Model name")
         parser.add_argument('--save_dir', type=str, default=default_config.save_dir, help="Directory to save checkpoints and logs")
-        
+        parser.add_argument('--resume', type=str, default=default_config.resume, help="Path to checkpoint to resume from (e.g., runs/a2sf_rl/policy_300.pt)")
+
         args = parser.parse_args()
         
         # Get seed from environment variable if set, otherwise use default
@@ -77,7 +78,7 @@ class A2SFRLConfig:
         # Create config from args
         # Handle gpu: nargs='+' returns list, but ensure it's always a list
         gpus = args.gpu if isinstance(args.gpu, list) else [args.gpu]
-        
+
         return cls(
             model=args.model,
             gpus=gpus,
@@ -93,7 +94,7 @@ class A2SFRLConfig:
             episodes_per_update=default_config.episodes_per_update,
             eval_frequency=default_config.eval_frequency,
             eval_samples=default_config.eval_samples,
-            resume=default_config.resume
+            resume=args.resume,
         )
 
 def main():
