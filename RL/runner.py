@@ -11,7 +11,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils import load_model, set_seed, CompressionConfig
 from .main import A2SFRLConfig
-from rouge_score import rouge_scorer
+from transformers import AutoModel, AutoTokenizer
+import torch.nn.functional as F
 
 @dataclass
 class ModelResult:
@@ -31,8 +32,13 @@ class A2SFModelRunner:
         
         self.max_length = self.model2maxlen[config.model_name]
         
-        # Initialize ROUGE scorer for text similarity
-        self.rouge_scorer = rouge_scorer.RougeScorer(['rouge1', 'rouge2', 'rougeL'], use_stemmer=True)
+        # Initialize BERT model for text similarity using CLS embeddings
+        self.bert_model_name = "bert-base-uncased"
+        self.bert_tokenizer = AutoTokenizer.from_pretrained(self.bert_model_name)
+        self.bert_model = AutoModel.from_pretrained(self.bert_model_name)
+        self.bert_model.to(self.device)
+        self.bert_model.eval()  # Set to evaluation mode
+        self.bert_max_length = 512  # BERT's maximum input length
     
     def prepare_prompt(self, prompt: str, dataset: str) -> Tuple[torch.Tensor, List[str]]:
         tokenized_prompt = self.tokenizer(prompt, truncation=False, return_tensors="pt").input_ids[0]
@@ -104,18 +110,51 @@ class A2SFModelRunner:
         return generated_text
     
     def _compute_text_similarity(self, text1: str, text2: str) -> float:
-        """Compute ROUGE-L F1 score between two texts"""
+        """Compute cosine similarity between BERT CLS embeddings of two texts"""
         if not text1 or not text2:
             return 0.0
         
-        # Compute ROUGE scores
-        scores = self.rouge_scorer.score(text1, text2)
-        
-        # Use ROUGE-L F1 score as the similarity metric
-        # ROUGE-L considers longest common subsequence
-        rouge_l_f1 = scores['rougeL'].fmeasure
-        
-        return rouge_l_f1
+        with torch.no_grad():
+            # Tokenize and encode text1 (truncation=True automatically truncates from the end if exceeds max_length)
+            encoded1 = self.bert_tokenizer(
+                text1,
+                max_length=self.bert_max_length,
+                truncation=True,
+                padding=True,
+                return_tensors="pt"
+            )
+            
+            # Tokenize and encode text2 (truncation=True automatically truncates from the end if exceeds max_length)
+            encoded2 = self.bert_tokenizer(
+                text2,
+                max_length=self.bert_max_length,
+                truncation=True,
+                padding=True,
+                return_tensors="pt"
+            )
+            
+            # Move to device
+            input_ids1 = encoded1["input_ids"].to(self.device)
+            attention_mask1 = encoded1["attention_mask"].to(self.device)
+            input_ids2 = encoded2["input_ids"].to(self.device)
+            attention_mask2 = encoded2["attention_mask"].to(self.device)
+            
+            # Get BERT CLS embeddings
+            outputs1 = self.bert_model(input_ids=input_ids1, attention_mask=attention_mask1)
+            cls_embedding1 = outputs1.last_hidden_state[:, 0, :]  # CLS token embedding (batch_size, hidden_size)
+            
+            outputs2 = self.bert_model(input_ids=input_ids2, attention_mask=attention_mask2)
+            cls_embedding2 = outputs2.last_hidden_state[:, 0, :]  # CLS token embedding (batch_size, hidden_size)
+            
+            # Compute cosine similarity
+            # Normalize embeddings
+            cls_embedding1_norm = F.normalize(cls_embedding1, p=2, dim=1)
+            cls_embedding2_norm = F.normalize(cls_embedding2, p=2, dim=1)
+            
+            # Cosine similarity: dot product of normalized vectors
+            cosine_sim = torch.sum(cls_embedding1_norm * cls_embedding2_norm, dim=1)
+            
+            return float(cosine_sim.item())
     
     def _create_compression_config(self, a: float, b: float) -> Dict[str, Any]:
         base_config = CompressionConfig()

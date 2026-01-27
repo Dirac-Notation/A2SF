@@ -5,18 +5,14 @@ import matplotlib.patches as patches
 import numpy as np
 import os
 import gc
+import sys
 from matplotlib import rcParams
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from datasets import load_dataset
 
-# 사용자 정의 모듈 (utils.py가 같은 경로에 있어야 함)
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from utils import load_model, CompressionConfig
-
-try:
-    from rouge_score import rouge_scorer
-except ImportError:
-    print("Warning: rouge-score not found. Install with: pip install rouge-score")
-    rouge_scorer = None
+from rouge_score import rouge_scorer
 
 workpath = os.path.dirname(os.path.abspath(__file__))
 
@@ -140,23 +136,21 @@ seq_len = attention_maps.size(2)
 
 # --- Multi-Window Observation (SNAP Logic) ---
 LOCAL_WINDOW = 16
-windows = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, "H2O"]
+windows = [16, 64, 256, 1024, "ALL"]
 heatmap_data = []
 
 for w in windows:
-    if w == "H2O":
+    if w == "ALL":
         sliced_attn = attention_maps
     else:
         curr_w = min(w, seq_len)
         sliced_attn = attention_maps[:, :, -curr_w:, :]
     
     snap_score = sliced_attn.sum(dim=2)
-    # In-place 연산 주의: 복사본을 만들어 처리하거나 주의해서 사용
-    snap_score_mod = snap_score.clone()
-    snap_score_mod[:,:,-LOCAL_WINDOW:] = snap_score_mod.max()
+    snap_score[:,:,-LOCAL_WINDOW:] = snap_score.max()
     
     k = 128
-    selected_indices = snap_score_mod.topk(k=k, dim=-1).indices
+    selected_indices = snap_score.topk(k=k, dim=-1).indices
     
     count = torch.zeros(seq_len, device=attention_model.device)
     flat_indices = selected_indices.flatten()
@@ -178,8 +172,8 @@ for spine in ax.spines.values():
 ax.set_yticks(np.arange(len(windows)))
 ax.set_yticklabels([str(w) for w in windows])
 ax.set_xlabel("Token Index")
-ax.set_ylabel("Observation Window")
-ax.set_title("Token Selection Ratio by Observation Window")
+ax.set_ylabel("The number of accumulated queries")
+ax.set_title("Token Selection Ratio by the number of accumulated queries")
 
 # 박스 그리기 헬퍼 함수
 def add_rect(ax, start, end, label, color, style='-', zorder=5):
@@ -205,9 +199,9 @@ key_sentence_labels = [
 for idx, (token_range, color, label) in enumerate(zip(key_sentence_token_ranges, key_sentence_colors, key_sentence_labels)):
     add_rect(ax, token_range[0], token_range[1], label, color, zorder=6)
 
-# Observation Window (Green Dashed)
+# The number of accumulated queries (Green Dashed)
 for row_idx, w in enumerate(windows):
-    if w == "H2O":
+    if w == "ALL":
         w_size = seq_len; start_idx = 0
     else:
         w_size = min(w, seq_len); start_idx = seq_len - w_size
@@ -223,7 +217,7 @@ for row_idx, w in enumerate(windows):
 cbar = fig.colorbar(im, ax=ax, pad=0.02)
 cbar.set_label("Selection Ratio")
 legend_elements = [
-    patches.Patch(facecolor='none', edgecolor='#2ca02c', linewidth=2, linestyle='--', label='Observation Window')
+    patches.Patch(facecolor='none', edgecolor='#2ca02c', linewidth=2, linestyle='--', label='The number of accumulated queries')
 ]
 # 주요 문장 범례 추가
 for color, label in zip(key_sentence_colors, key_sentence_labels):
@@ -232,9 +226,8 @@ for color, label in zip(key_sentence_colors, key_sentence_labels):
     )
 ax.legend(handles=legend_elements, loc='best', framealpha=0.95, fontsize=16)
 
-os.makedirs("plots", exist_ok=True)
 plt.tight_layout()
-plt.savefig(os.path.join(workpath, "plots/snap.png"))
+plt.savefig(os.path.join(workpath, "snap.png"))
 plt.close()
 
 # **중요**: Phase 2를 위해 메모리 정리
@@ -265,7 +258,6 @@ def get_rouge_l(prediction, ground_truth):
 # Generation 설정
 MAX_GEN_TOKENS = 256
 BUDGET = 128
-token_lengths = [8, 16, 32, 64, 128, 256]
 context_length = input_ids.shape[-1]
 
 # (1) Full Generation (Baseline)
@@ -301,7 +293,7 @@ for w in windows:
     # Config 설정
     config = CompressionConfig(
         compression_method="snap",
-        observation_window=w if w != "H2O" else context_length,
+        observation_window=w if w != "ALL" else context_length,
         total_budget=BUDGET,
         local_ratios=0.125
     )
@@ -327,61 +319,51 @@ for w in windows:
     
     # 토큰 길이별 Rouge Score 계산 (최적화됨: 텍스트가 아닌 ID 슬라이싱)
     row_scores = []
-    for n_tokens in token_lengths:
-        # n_tokens 만큼 슬라이싱 후 디코딩
-        sliced_pred_ids = gen_ids[:n_tokens]
-        sliced_ref_ids = full_gen_ids[:n_tokens]
-        
-        pred_str = tokenizer.decode(sliced_pred_ids, skip_special_tokens=True)
-        ref_str = tokenizer.decode(sliced_ref_ids, skip_special_tokens=True)
-        
-        score = get_rouge_l(pred_str, ref_str)
-        row_scores.append(score)
+    # n_tokens 만큼 슬라이싱 후 디코딩
+    sliced_pred_ids = gen_ids[:MAX_GEN_TOKENS]
+    sliced_ref_ids = full_gen_ids[:MAX_GEN_TOKENS]
+    
+    pred_str = tokenizer.decode(sliced_pred_ids, skip_special_tokens=True)
+    ref_str = tokenizer.decode(sliced_ref_ids, skip_special_tokens=True)
+    
+    score = get_rouge_l(pred_str, ref_str)
+    row_scores.append(score)
     
     rouge_heatmap_data.append(row_scores)
 
 rouge_heatmap_matrix = np.array(rouge_heatmap_data)
 
-# (3) Rouge Heatmap 시각화
-print("\nRouge Score 히트맵 생성 중...")
+# (3) Rouge 시각화 - token_lengths가 512일 때만 바 그래프로
+print("\nRouge Score 시각화 중...")
 fig, ax = plt.subplots(figsize=(12, 10))
-im = ax.imshow(rouge_heatmap_matrix, cmap="Blues", aspect='auto', interpolation='none')
+
+# token_lengths의 마지막 인덱스(512)에 해당하는 데이터만 추출
+rouge_scores_512 = rouge_heatmap_matrix[:, 0]
+
+# 바 그래프로 시각화
+bars = ax.bar(range(len(windows)), rouge_scores_512, color='steelblue', alpha=0.8, edgecolor='black', linewidth=1.5)
+
+# 각 바 위에 값 표시
+for i, (bar, score) in enumerate(zip(bars, rouge_scores_512)):
+    height = bar.get_height()
+    ax.text(bar.get_x() + bar.get_width()/2., height,
+            f'{score:.3f}',
+            ha='center', va='bottom', fontsize=14, fontweight='bold')
+
+# 축 설정
+ax.set_xticks(np.arange(len(windows)))
+ax.set_xticklabels([str(w) for w in windows], rotation=45, ha='right')
+ax.set_xlabel("The number of accumulated queries", fontsize=26)
+ax.set_ylabel("Rouge-L F1 Score", fontsize=26)
+
+# 그리드 추가
+ax.grid(True, axis='y', linestyle='--', alpha=0.3)
+ax.set_ylim(0, max(rouge_scores_512) * 1.15)  # 상단 여백을 위해 15% 추가
 
 for spine in ax.spines.values():
-    spine.set_visible(True); spine.set_linewidth(1.5)
-
-ax.set_yticks(np.arange(len(windows)))
-ax.set_yticklabels([str(w) for w in windows])
-ax.set_xticks(np.arange(len(token_lengths)))
-ax.set_xticklabels([str(n) for n in token_lengths])
-ax.set_xlabel("Number of Tokens Considered", fontsize=26)
-ax.set_ylabel("Observation Window", fontsize=26)
-
-# 값 표시
-for i in range(len(windows)):
-    for j in range(len(token_lengths)):
-        ax.text(j, i, f'{rouge_heatmap_matrix[i, j]:.3f}',
-                ha="center", va="center", color="black", fontsize=16)
-
-cbar = fig.colorbar(im, ax=ax, pad=0.02)
-cbar.set_label("Rouge-L F1 Score", fontsize=22)
+    spine.set_visible(True)
+    spine.set_linewidth(1.5)
 
 plt.tight_layout()
-plt.savefig(os.path.join(workpath, "plots/rouge_heatmap.png"), dpi=150)
+plt.savefig(os.path.join(workpath, "rouge_heatmap.png"), dpi=150)
 plt.close()
-
-# 결과 JSON 저장
-results = {
-    "full_generation": generated_full_text,
-    "window_generations": generated_texts_log,
-    "rouge_scores": {
-        str(w): {str(n): float(rouge_heatmap_matrix[i, j]) 
-                 for j, n in enumerate(token_lengths)}
-        for i, w in enumerate(windows)
-    }
-}
-
-with open(os.path.join(workpath, "results/generation_results.json"), "w", encoding="utf-8") as f:
-    json.dump(results, f, ensure_ascii=False, indent=2)
-
-print("\n모든 작업 완료!")
