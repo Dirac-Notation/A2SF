@@ -13,14 +13,8 @@ from RL.main import A2SFRLConfig
 from RL.policy import NeuralUCBPolicy
 from RL.env import AttentionEncoder
 
-# Import metrics and evaluation functions from longbench.py
-from longbench import (
-    dataset2metric,
-    data_group,
-    scorer,
-    calculate_group_averages,
-    evaluate_results
-)
+# Import evaluation functions from longbench_eval.py
+from longbench_eval import data_group, evaluate_results
 
 # ============================================================================
 # Prediction Functions (from longbench_pred_RL.py)
