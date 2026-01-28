@@ -11,8 +11,6 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils import load_model, set_seed, CompressionConfig
 from .main import A2SFRLConfig
-from transformers import AutoModel, AutoTokenizer
-import torch.nn.functional as F
 from rouge import Rouge
 
 @dataclass
@@ -32,14 +30,6 @@ class A2SFModelRunner:
             self.model2maxlen = json.load(f)
         
         self.max_length = self.model2maxlen[config.model_name]
-        
-        # Initialize BERT model for text similarity using CLS embeddings
-        self.bert_model_name = "bert-base-uncased"
-        self.bert_tokenizer = AutoTokenizer.from_pretrained(self.bert_model_name)
-        self.bert_model = AutoModel.from_pretrained(self.bert_model_name)
-        self.bert_model.to(self.device)
-        self.bert_model.eval()  # Set to evaluation mode
-        self.bert_max_length = 512  # BERT's maximum input length
         
         # Initialize Rouge scorer for ROUGE score calculation
         self.rouge_scorer = Rouge()
@@ -115,72 +105,23 @@ class A2SFModelRunner:
     
     def _compute_text_similarity(self, text1: str, text2: str) -> float:
         """
-        Compute combined reward: 0.5 * ROUGE Score + 0.5 * BERT Score
+        Compute reward based on ROUGE score
         
         Args:
             text1: Reference text (ground truth answer)
             text2: Generated text (prediction)
         
         Returns:
-            Combined reward score in [0, 1]
+            ROUGE-based reward score in [0, 1]
         """
         if not text1 or not text2:
             return 0.0
         
-        # Compute BERT Score (cosine similarity between BERT CLS embeddings)
-        bert_score = self._compute_bert_score(text1, text2)
-        
         # Compute ROUGE Score
         rouge_score = self._compute_rouge_score(text1, text2)
         
-        # Combined reward: 0.5 * ROUGE Score + 0.5 * BERT Score
-        combined_score = 0.5 * rouge_score + 0.5 * bert_score
-        
-        return combined_score
-    
-    def _compute_bert_score(self, text1: str, text2: str) -> float:
-        """Compute cosine similarity between BERT CLS embeddings of two texts"""
-        with torch.no_grad():
-            # Tokenize and encode text1 (truncation=True automatically truncates from the end if exceeds max_length)
-            encoded1 = self.bert_tokenizer(
-                text1,
-                max_length=self.bert_max_length,
-                truncation=True,
-                padding=True,
-                return_tensors="pt"
-            )
-            
-            # Tokenize and encode text2 (truncation=True automatically truncates from the end if exceeds max_length)
-            encoded2 = self.bert_tokenizer(
-                text2,
-                max_length=self.bert_max_length,
-                truncation=True,
-                padding=True,
-                return_tensors="pt"
-            )
-            
-            # Move to device
-            input_ids1 = encoded1["input_ids"].to(self.device)
-            attention_mask1 = encoded1["attention_mask"].to(self.device)
-            input_ids2 = encoded2["input_ids"].to(self.device)
-            attention_mask2 = encoded2["attention_mask"].to(self.device)
-            
-            # Get BERT CLS embeddings
-            outputs1 = self.bert_model(input_ids=input_ids1, attention_mask=attention_mask1)
-            cls_embedding1 = outputs1.last_hidden_state[:, 0, :]  # CLS token embedding (batch_size, hidden_size)
-            
-            outputs2 = self.bert_model(input_ids=input_ids2, attention_mask=attention_mask2)
-            cls_embedding2 = outputs2.last_hidden_state[:, 0, :]  # CLS token embedding (batch_size, hidden_size)
-            
-            # Compute cosine similarity
-            # Normalize embeddings
-            cls_embedding1_norm = F.normalize(cls_embedding1, p=2, dim=1)
-            cls_embedding2_norm = F.normalize(cls_embedding2, p=2, dim=1)
-            
-            # Cosine similarity: dot product of normalized vectors
-            cosine_sim = torch.sum(cls_embedding1_norm * cls_embedding2_norm, dim=1)
-            
-            return float(cosine_sim.item())
+        # Reward is simply the ROUGE score
+        return rouge_score
     
     def _compute_rouge_score(self, text1: str, text2: str) -> float:
         """Compute ROUGE-L F1 score between two texts"""
