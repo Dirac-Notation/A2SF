@@ -181,10 +181,6 @@ def create_heatmap(metrics, output_file):
 def main(args):
     set_seed(42)
     
-    # Set GPU environment
-    gpus = args.gpus
-    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpus))
-    
     # Initialize budget and hyperparameter lists
     datasets = args.dataset
     budget_list = args.budget
@@ -217,11 +213,11 @@ def main(args):
         model_name = model_name.split("_")[0].lower()
         
         # Prepare device, model, and tokenizer
-        device = f"cuda:{args.gpus[0]}"  # Use first GPU for device reference
+        device = "cuda" if torch.cuda.is_available() else "cpu"
         
         # Load model and tokenizer using the utility function
         print(f"Loading model: {model_name}")
-        model, tokenizer = load_model(model_name, args.gpus)
+        model, tokenizer = load_model(model_name)
         print("Model loaded successfully!")
 
         for dataset in datasets:
@@ -312,7 +308,6 @@ def main(args):
 
 def parse_args(args=None):
     parser = argparse.ArgumentParser(description="Evaluate model predictions with various budgets on needle-in-haystack task.")
-    parser.add_argument("--gpus", type=int, nargs='+', default=[0], help="List of GPU IDs (e.g., --gpus 0 1 2 3)")
     parser.add_argument("--model", type=str, nargs='+', default=["llama2"], choices=["llama", "llama2", "llama3", "opt", "qwen2"])
     parser.add_argument("--dataset", type=str, nargs='+', default=["datasets/needle_dataset.jsonl"])
     parser.add_argument("--budget", type=int, nargs='+', default=[128], help="Total budget for compression")

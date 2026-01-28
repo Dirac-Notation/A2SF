@@ -299,7 +299,7 @@ class A2SFEnv:
     def __init__(self, runner, config: A2SFRLConfig):
         self.runner = runner
         self.config = config
-        self.device = torch.device(config.device if torch.cuda.is_available() else "cpu")
+        self.device = torch.device(config.device)
         
         # Attention encoder using target model's first layer, first head parameters
         self.context_encoder = AttentionEncoder(

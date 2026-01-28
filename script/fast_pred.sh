@@ -5,13 +5,14 @@ trap "kill 0" EXIT
 
 budget=128
 method=snap
-model=llama3
+model=llama2
 window=16
-python longbench_pred.py --gpus 0 1 --model $model --method $method --budget $budget --window $window --task 0 1 &
 
-python longbench_pred.py --gpus 2 3 --model $model --method $method --budget $budget --window $window --task 2 3 4 &
+CUDA_VISIBLE_DEVICES=0,1 python longbench.py --model $model --method $method --budget $budget --window $window --task 0 1 &
 
-python longbench_pred.py --gpus 4 5 --model $model --method $method --budget $budget --window $window --task 5 &
+CUDA_VISIBLE_DEVICES=2,3 python longbench.py --model $model --method $method --budget $budget --window $window --task 2 3 4 &
+
+CUDA_VISIBLE_DEVICES=4,5 python longbench.py --model $model --method $method --budget $budget --window $window --task 5 &
 
 # 모든 백그라운드 작업이 끝날 때까지 기다립니다.
 wait

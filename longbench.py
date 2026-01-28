@@ -13,7 +13,6 @@ from longbench_eval import data_group, evaluate_results
 
 def parse_args(args=None):
     parser = argparse.ArgumentParser(description="LongBench end-to-end evaluation")
-    parser.add_argument('--gpus', type=int, nargs='+', default=[0], help="List of GPU IDs (e.g., --gpus 0 1 2 3)")
     parser.add_argument('--model', type=str, required=True, choices=["llama", "llama2", "llama3", "opt"])
     parser.add_argument('--method', type=str, default="full")
     parser.add_argument('--window', type=int, default=16)
@@ -86,16 +85,12 @@ if __name__ == '__main__':
     set_seed(42)
     args = parse_args()
     
-    gpus = args.gpus
-    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpus))
-    
     model_name = args.model
     model_name = model_name.split("_")[0].lower()
     max_length = json.load(open("config/model2maxlen.json", "r"))[model_name]
     
-    model, tokenizer = load_model(model_name, args.gpus)
+    model, tokenizer = load_model(model_name)
 
-    # Task 이름 리스트
     task_list = [
         "Code Complete",
         "Few Shot",
@@ -105,7 +100,6 @@ if __name__ == '__main__':
         "Summarization",
     ]
     
-    # Task 번호를 task 이름으로 변환
     if args.task is None:
         selected_tasks = task_list
     else:
@@ -146,7 +140,6 @@ if __name__ == '__main__':
                 os.makedirs(output_dir)
             out_path = f"{output_dir}/{dataset}.jsonl"
             
-            # Clear existing file
             if os.path.exists(out_path):
                 os.remove(out_path)
             
@@ -154,7 +147,6 @@ if __name__ == '__main__':
             
             get_pred(data, max_length, max_gen, dataset, model, tokenizer, out_path, model_name, config)
     
-    # Evaluate results if not skipped
     if not args.skip_eval and output_dir and os.path.exists(output_dir):
         evaluate_results(output_dir)
     

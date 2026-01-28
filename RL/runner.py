@@ -22,9 +22,9 @@ class ModelResult:
 class A2SFModelRunner:
     def __init__(self, config: A2SFRLConfig):
         self.config = config
-        self.device = torch.device(config.device if torch.cuda.is_available() else "cpu")
+        self.device = torch.device(config.device)
         
-        self.model, self.tokenizer = load_model(config.model_name, config.gpus)
+        self.model, self.tokenizer = load_model(config.model_name)
         
         with open("config/model2maxlen.json", "r") as f:
             self.model2maxlen = json.load(f)

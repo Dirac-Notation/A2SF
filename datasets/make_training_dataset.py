@@ -21,7 +21,7 @@ from utils import CompressionConfig
 import numpy as np
 
 PROMPT_LENGTH = 7500
-MIN_TOKENS = 1024  # 필터링을 위한 최소 토큰 수
+MIN_TOKENS = 1000   # 필터링을 위한 최소 토큰 수
 MAX_TOKENS = 7500  # 필터링을 위한 최대 토큰 수
 
 def set_seed(seed):
@@ -39,18 +39,21 @@ def load_model_for_generation(model_name, gpu_list=None):
     
     model_path = model2path[model_name]
     
-    if gpu_list is not None:
-        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpu_list))
-    
     print(f"Loading KVLlamaForCausalLM: {model_name} from {model_path}")
     
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     model = KVLlamaForCausalLM.from_pretrained(
         model_path, 
         torch_dtype=torch.bfloat16, 
-        device_map="auto"
+        device_map="auto",
     )
     model = model.eval()
+
+    # Ensure pad_token is set for batch padding (use EOS as PAD if not set)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    if getattr(model.config, "pad_token_id", None) is None:
+        model.config.pad_token_id = tokenizer.eos_token_id
     
     return model, tokenizer
 
@@ -215,7 +218,16 @@ def load_leval_datasets(tokenizer) -> List[Dict[str, Any]]:
     
     return all_samples
 
-def generate_answer(model, tokenizer, prompt: str, dataset: str, model_name: str, generation_length: int) -> tuple:
+def generate_answer(model, tokenizer, sample: Dict[str, Any], model_name: str) -> Dict[str, Any]:
+    """
+    Generate answer for a single sample using full cache (no compression).
+    sample should contain: "input_prompt", "generation_length", "dataset", "task_type"
+    """
+    prompt = sample["input_prompt"]
+    generation_length = sample["generation_length"]
+    dataset_name = sample.get("dataset", "unknown")
+    task_type = sample.get("task_type", "unknown")
+
     # Initialize full cache (no compression) before each generation
     compression_config = CompressionConfig()
     compression_config.compression_method = "full"
@@ -223,15 +235,17 @@ def generate_answer(model, tokenizer, prompt: str, dataset: str, model_name: str
     compression_config.layerwise_ratios = None
     compression_config.local_ratios = None
     model.init_cache(compression_config)
-    
+
     # Add system prompt for llama models
     if "llama" in model_name:
-        prompt = f"[INST]{prompt}[/INST]"
-    
-    input = tokenizer(prompt, truncation=False, return_tensors="pt")
-    input_ids = input.input_ids.to(model.device)
-    attention_mask = input.attention_mask.to(model.device)
-    
+        prompt_for_gen = f"[INST]{prompt}[/INST]"
+    else:
+        prompt_for_gen = prompt
+
+    encoded = tokenizer(prompt_for_gen, truncation=False, return_tensors="pt")
+    input_ids = encoded.input_ids.to(model.device)
+    attention_mask = encoded.attention_mask.to(model.device)
+
     # Generate text using full cache (no compression) with model.generate()
     with torch.no_grad():
         output = model.generate(
@@ -242,31 +256,36 @@ def generate_answer(model, tokenizer, prompt: str, dataset: str, model_name: str
             temperature=1.0,
             pad_token_id=tokenizer.eos_token_id,
             stop_strings="[/INST]",
-            tokenizer=tokenizer
+            tokenizer=tokenizer,
         )
-    
-    # Decode only the generated part (excluding the input prompt)
-    context_length = input_ids.size(1)
-    
-    # model.generate() returns tensor of shape [batch_size, seq_len]
-    # Get the first sequence (batch index 0) and only the generated part
-    if isinstance(output, torch.Tensor):
-        # output shape: [1, total_length] or [total_length]
-        if output.dim() == 2:
-            # Batch dimension exists
-            generated_ids = output[0, context_length:]
+
+    # Handle output tensor or dict
+    if not isinstance(output, torch.Tensor):
+        if hasattr(output, "sequences"):
+            output_ids = output.sequences
         else:
-            # No batch dimension
-            generated_ids = output[context_length:]
+            output_ids = output[0]
     else:
-        # Handle dict output if return_dict_in_generate was used
-        generated_ids = output.sequences[0, context_length:] if hasattr(output, 'sequences') else output[0, context_length:]
-    
+        output_ids = output
+
+    if output_ids.dim() == 1:
+        output_ids = output_ids.unsqueeze(0)
+
+    # Original context length
+    context_length = int(attention_mask[0].sum().item())
+
+    # Generated token IDs after context
+    generated_ids = output_ids[0, context_length:]
     generated_length = generated_ids.size(0)
-    # Decode the generated token IDs
     generated_text = tokenizer.decode(generated_ids, skip_special_tokens=True)
-    
-    return prompt, generated_text, generated_length
+
+    return {
+        "dataset": dataset_name,
+        "input_prompt": prompt,
+        "generated_text": generated_text,
+        "generation_length": int(generated_length),
+        "task_type": task_type,
+    }
 
 def main(args):
     set_seed(42)
@@ -297,36 +316,89 @@ def main(args):
     print(f"Total samples collected: {len(all_samples)}")
     print(f"{'='*50}")
     
-    # Process all samples and generate training data
+    # ------------------------------------------------------------------
+    # 1) Generate model outputs ONCE for all original samples (no duplication)
+    # ------------------------------------------------------------------
+    print(f"\n{'='*50}")
+    print("Generating model outputs for all samples (no batch)...")
+    print(f"{'='*50}")
+    
+    generated_all_samples: List[Dict[str, Any]] = []
+    for sample in tqdm(all_samples, desc="Generating model outputs"):
+        result = generate_answer(model, tokenizer, sample, model_name)
+        generated_all_samples.append(result)
+    
+    print(f"\nTotal generated samples: {len(generated_all_samples)}")
+    
+    # ------------------------------------------------------------------
+    # 2) After generation, balance samples across task types
+    #    by upsampling tasks with fewer samples (duplicate generated data)
+    # ------------------------------------------------------------------
+    task_groups = defaultdict(list)
+    for sample in generated_all_samples:
+        task_type = sample.get("task_type", "unknown")
+        task_groups[task_type].append(sample)
+    
+    # Compute target count as the maximum number of samples among task types
+    if task_groups:
+        max_count = max(len(samples) for samples in task_groups.values())
+    else:
+        max_count = 0
+    
+    balanced_samples = []
+    for task_type, samples in task_groups.items():
+        count = len(samples)
+        balanced_samples.extend(samples)
+    
+        # Upsample by randomly duplicating existing samples for this task
+        if count < max_count and count > 0:
+            extra_needed = max_count - count
+            for _ in range(extra_needed):
+                balanced_samples.append(random.choice(samples))
+    
+    # Shuffle balanced samples to mix tasks
+    random.shuffle(balanced_samples)
+    
+    print(f"\n{'='*50}")
+    print("Task type balancing (before -> after):")
+    for task_type, samples in task_groups.items():
+        before = len(samples)
+        after = max_count if before > 0 else 0
+        print(f"  {task_type:20s}: {before:5d} -> {after:5d}")
+    print(f"{'='*50}")
+    print(f"Total samples after balancing: {len(balanced_samples)}")
+    print(f"{'='*50}")
+    
+    # ------------------------------------------------------------------
+    # 3) Save balanced, generated training data (no additional generation)
+    # ------------------------------------------------------------------
     os.makedirs(os.path.dirname(args.output_file), exist_ok=True)
     
     total_samples = 0
     processed_counts = {}
-
-    
     with open(args.output_file, 'w', encoding='utf-8') as f:
-        for sample in tqdm(all_samples, desc="Generating training data"):
+        for sample in tqdm(balanced_samples, desc="Saving training data"):
             dataset_name = sample.get("dataset", "unknown")
             prompt = sample["input_prompt"]
-            generated_text = sample["answer"]
+            generated_text = sample["generated_text"]
             generation_length = sample["generation_length"]
-            
+    
             try:
                 training_sample = {
                     "dataset": dataset_name,
                     "input_prompt": prompt,
                     "generated_text": generated_text,
-                    "generation_length": generation_length
+                    "generation_length": generation_length,
                 }
-                
-                f.write(json.dumps(training_sample, ensure_ascii=False, separators=(',', ':')) + "\n")
+    
+                f.write(json.dumps(training_sample, ensure_ascii=False, separators=(",", ":")) + "\n")
                 f.flush()
-                
+    
                 total_samples += 1
                 if dataset_name not in processed_counts:
                     processed_counts[dataset_name] = 0
                 processed_counts[dataset_name] += 1
-                
+    
             except Exception as e:
                 print(f"\nError processing sample: {e}")
                 continue
@@ -438,7 +510,6 @@ def check_training_data_stats(file_path):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate training data from ZeroSCROLLS and L-Eval datasets, or check statistics")
     parser.add_argument("--output_file", type=str, default="./datasets/training_data.jsonl", help="Output file for training data")
-    parser.add_argument("--gpus", type=int, nargs='+', default=[0], help="List of GPU IDs")
     parser.add_argument("--model", type=str, default="llama3", choices=["llama", "llama2", "llama3", "opt"], help="Model to use")
     parser.add_argument("--stats-only", action="store_true", help="Only check statistics of existing file without generating new data")
     
