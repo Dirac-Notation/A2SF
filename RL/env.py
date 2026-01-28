@@ -29,7 +29,7 @@ class AttentionEncoder(nn.Module):
     - All parameters are frozen (no training)
     """
     
-    def __init__(self, target_model, target_tokenizer, device: str = "cpu", output_dim: int = 8192, num_query_tokens: int = 1):
+    def __init__(self, target_model, target_tokenizer, device: str = "cpu", output_dim: int = 8192, num_query_tokens: int = 16):
         super().__init__()
         self.device = device if isinstance(device, torch.device) else torch.device(device)
         self.target_tokenizer = target_tokenizer
@@ -156,15 +156,16 @@ class AttentionEncoder(nn.Module):
         """
         return []
     
-    def encode_context(self, text: str, generation_length: int) -> torch.Tensor:
+    def encode_context(self, text: str, generation_length: int, token_budget: int) -> torch.Tensor:
         """
         Encode text using attention mechanism with target model's first layer, first head
         
         Args:
             text: Input text string
             generation_length: Generation length
+            token_budget: Token budget for compression
         Returns:
-            torch.Tensor: Encoded vector of shape (output_dim,)
+            torch.Tensor: Encoded vector of shape (output_dim + 2,)
         """  
         # Tokenize text
         tokenized = self.target_tokenizer(
@@ -277,8 +278,10 @@ class AttentionEncoder(nn.Module):
             # If longer, truncate from the left (keep rightmost output_dim tokens)
             attention_output = attention_output[-self.output_dim:]  # (output_dim,)
         
-        padding = torch.zeros(1, device=self.device) + (generation_length/512)
-        attention_output = torch.cat([attention_output, padding], dim=0)  # (output_dim,)
+        # Add generation_length and token_budget features
+        generation_feature = torch.zeros(1, device=self.device) + (generation_length/512)
+        token_budget_feature = torch.zeros(1, device=self.device) + (token_budget/2048)
+        attention_output = torch.cat([attention_output, generation_feature, token_budget_feature], dim=0)  # (output_dim + 2,)
         
         return attention_output
 
@@ -312,14 +315,16 @@ class A2SFEnv:
         self.current_dataset = None
         self.current_answer = None
         self.current_generation_length = None
+        self.current_token_budget = None
     
-    def encode_to_state(self, prompt: str, generation_length: int, answer: str, dataset: str = None) -> torch.Tensor:
+    def encode_to_state(self, prompt: str, generation_length: int, answer: str, token_budget: int, dataset: str = None) -> torch.Tensor:
         self.current_prompt = prompt
         self.current_dataset = dataset
         self.current_answer = answer
         self.current_generation_length = generation_length
+        self.current_token_budget = token_budget
         
-        return self.context_encoder.encode_context(prompt, generation_length).to(self.device, dtype=torch.float32)
+        return self.context_encoder.encode_context(prompt, generation_length, token_budget).to(self.device, dtype=torch.float32)
     
     def step(self, action: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, Any]]:
         """
@@ -335,6 +340,7 @@ class A2SFEnv:
                 prompt=self.current_prompt,
                 forgetting_factor=forgetting_val,
                 generation_length=self.current_generation_length,
+                token_budget=self.current_token_budget,
                 answer=self.current_answer,
                 dataset=self.current_dataset,
             )

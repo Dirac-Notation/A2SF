@@ -27,13 +27,10 @@ class A2SFRLConfig:
     
     # ----- NeuralUCB Hyperparameters -----
     lr: float = 1e-2
-    ucb_beta: float = 1.0  # Exploration parameter for UCB
+    ucb_beta: float = 0.5  # Exploration parameter for UCB
     l2_coef: float = 1e-6  # L2 regularization coefficient for weight decay
     
     # ----- Learning Rate Scheduler -----
-    scheduler_type: str = "cosine"  # "step", "cosine", "exponential", "none"
-    scheduler_step_size: int = 200  # For StepLR: decay every N iterations
-    scheduler_gamma: float = 0.5  # For StepLR/ExponentialLR: decay factor
     scheduler_T_max: int = 1000  # For CosineAnnealingLR: maximum iterations
     
     # ----- Training Configuration -----
@@ -117,14 +114,7 @@ def main():
     print(f"  Seed: {config.seed}")
     print(f"  Episodes per update: {config.episodes_per_update}")
     print(f"  Learning rate: {config.lr}")
-    print(f"  LR Scheduler: {config.scheduler_type}")
-    if config.scheduler_type != "none":
-        if config.scheduler_type == "step":
-            print(f"    Step size: {config.scheduler_step_size}, Gamma: {config.scheduler_gamma}")
-        elif config.scheduler_type == "cosine":
-            print(f"    T_max: {config.scheduler_T_max}")
-        elif config.scheduler_type == "exponential":
-            print(f"    Gamma: {config.scheduler_gamma}")
+    print(f"  LR Scheduler: cosine (T_max: {config.scheduler_T_max})")
     print(f"  UCB beta: {config.ucb_beta}")
     print(f"  Save directory: {config.save_dir}")
     print()

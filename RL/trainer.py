@@ -51,8 +51,8 @@ class A2SFTrainer:
         self.model_runner = A2SFModelRunner(config)
         self.env = A2SFEnv(self.model_runner, config)
         
-        # State dimension is fixed to 8192 (output_dim of AttentionEncoder) + 1 (generation_length feature)
-        state_dim = 8192 + 1
+        # State dimension is fixed to 8192 (output_dim of AttentionEncoder) + 2 (generation_length + token_budget features)
+        state_dim = 8192 + 2
         
         self.policy = NeuralUCBPolicy(
             state_dim=state_dim,
@@ -319,29 +319,13 @@ class A2SFTrainer:
             "total_loss": float(total_loss.item()),
         }
     
-    def _create_scheduler(self, config) -> Optional[torch.optim.lr_scheduler._LRScheduler]:
-        """Create learning rate scheduler based on config"""
-        if config.scheduler_type == "none":
-            return None
-        elif config.scheduler_type == "step":
-            return lr_scheduler.StepLR(
-                self.optimizer,
-                step_size=config.scheduler_step_size,
-                gamma=config.scheduler_gamma
-            )
-        elif config.scheduler_type == "cosine":
-            return lr_scheduler.CosineAnnealingLR(
-                self.optimizer,
-                T_max=config.scheduler_T_max,
-                eta_min=config.lr * 0.01  # Minimum learning rate (1% of initial)
-            )
-        elif config.scheduler_type == "exponential":
-            return lr_scheduler.ExponentialLR(
-                self.optimizer,
-                gamma=config.scheduler_gamma
-            )
-        else:
-            raise ValueError(f"Unknown scheduler type: {config.scheduler_type}")
+    def _create_scheduler(self, config) -> torch.optim.lr_scheduler._LRScheduler:
+        """Create cosine learning rate scheduler"""
+        return lr_scheduler.CosineAnnealingLR(
+            self.optimizer,
+            T_max=config.scheduler_T_max,
+            eta_min=config.lr * 0.01  # Minimum learning rate (1% of initial)
+        )
 
     def train(self, num_iterations: int = 1000):
         print(f"Starting training for {num_iterations} iterations")
@@ -368,11 +352,28 @@ class A2SFTrainer:
             
             # Process each episode in the batch
             for episode_data in batch:
+                # Select random token budget from candidates that are less than prompt length
+                prompt = episode_data["input_prompt"]
+                tokenized_prompt = self.model_runner.tokenizer(prompt, truncation=False, return_tensors="pt")
+                prompt_length = tokenized_prompt.input_ids.size(1)
+                
+                # Token budget candidates: [64, 128, 256, 512, 1024, 2048]
+                token_budget_candidates = [64, 128, 256, 512, 1024, 2048]
+                # Filter candidates that are less than prompt length
+                valid_budgets = [budget for budget in token_budget_candidates if budget < prompt_length]
+                
+                # If no valid budget (prompt is too short), use the smallest candidate
+                if len(valid_budgets) == 0:
+                    token_budget = min(token_budget_candidates)
+                else:
+                    token_budget = random.choice(valid_budgets)
+                
                 # Encode state (only once)
                 state = self.env.encode_to_state(
-                    prompt=episode_data["input_prompt"],
+                    prompt=prompt,
                     generation_length=episode_data["generation_length"],
                     answer=episode_data["generated_text"],
+                    token_budget=token_budget,
                     dataset=episode_data["dataset"],
                 )
                 state = state.to(self.device)
@@ -405,8 +406,7 @@ class A2SFTrainer:
             }
             
             # Update learning rate scheduler
-            if self.scheduler is not None:
-                self.scheduler.step()
+            self.scheduler.step()
 
             self._log_progress(iteration, avg_loss_stats, iteration_rewards, iteration_actions_f)
             
@@ -428,10 +428,27 @@ class A2SFTrainer:
             # DataLoader with batch_size=1 returns a list with one element
             episode_data = batch[0]
             
+            # Select random token budget from candidates that are less than prompt length
+            prompt = episode_data["input_prompt"]
+            tokenized_prompt = self.model_runner.tokenizer(prompt, truncation=False, return_tensors="pt")
+            prompt_length = tokenized_prompt.input_ids.size(1)
+            
+            # Token budget candidates: [64, 128, 256, 512, 1024, 2048]
+            token_budget_candidates = [64, 128, 256, 512, 1024, 2048]
+            # Filter candidates that are less than prompt length
+            valid_budgets = [budget for budget in token_budget_candidates if budget < prompt_length]
+            
+            # If no valid budget (prompt is too short), use the smallest candidate
+            if len(valid_budgets) == 0:
+                token_budget = min(token_budget_candidates)
+            else:
+                token_budget = random.choice(valid_budgets)
+            
             state = self.env.encode_to_state(
-                prompt=episode_data["input_prompt"],
+                prompt=prompt,
                 generation_length=episode_data["generation_length"],
                 answer=episode_data["generated_text"],
+                token_budget=token_budget,
                 dataset=episode_data["dataset"],
             )
             state = state.to(self.device)
@@ -503,8 +520,7 @@ class A2SFTrainer:
             "optimizer_state_dict": self.optimizer.state_dict(),
             "config": self.config,
         }
-        if self.scheduler is not None:
-            checkpoint_data["scheduler_state_dict"] = self.scheduler.state_dict()
+        checkpoint_data["scheduler_state_dict"] = self.scheduler.state_dict()
         torch.save(checkpoint_data, checkpoint_path)
         
         print(f"Saved checkpoint: {checkpoint_path}")
@@ -527,7 +543,7 @@ class A2SFTrainer:
         
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         
-        if self.scheduler is not None and "scheduler_state_dict" in checkpoint:
+        if "scheduler_state_dict" in checkpoint:
             self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         
         print(f"Loaded checkpoint from iteration {checkpoint['iteration']}")
