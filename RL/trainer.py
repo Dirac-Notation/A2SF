@@ -116,7 +116,7 @@ class A2SFTrainer:
     
     def _split_data(self, all_data: List[Dict[str, Any]], eval_samples: int, seed: int) -> tuple:
         """
-        Split data into training and evaluation sets completely.
+        Split data into training and evaluation sets with balanced task distribution.
         Uses fixed seed to ensure reproducibility.
         
         Args:
@@ -130,21 +130,116 @@ class A2SFTrainer:
         if len(all_data) <= eval_samples:
             raise ValueError(f"Not enough data: {len(all_data)} total samples, but {eval_samples} evaluation samples requested")
         
+        # Task type mapping from dataset names (same as make_training_dataset.py)
+        task_type_mapping = {
+            "gov_report": "summarization",
+            "summ_screen_fd": "summarization",
+            "qmsum": "summarization",
+            "space_digest": "summarization",
+            "book_sum_sort": "retrieval",
+            "quality": "qa",
+            "qasper": "qa",
+            "narrative_qa": "qa",
+            "musique": "qa",
+            "hotpot_qa": "qa",
+            "codeU": "qa",
+            "coursera": "qa",
+            "financial_qa": "qa",
+            "gov_report_summ": "summarization",
+            "gsm100": "qa",
+            "legal_contract_qa": "qa",
+            "meeting_summ": "summarization",
+            "multidoc_qa": "qa",
+            "natural_question": "qa",
+            "news_summ": "summarization",
+            "paper_assistant": "qa",
+            "patent_summ": "summarization",
+            "review_summ": "summarization",
+            "sci_fi": "qa",
+            "scientific_qa": "qa",
+            "topic_retrieval_longchat": "retrieval",
+            "tpo": "qa",
+            "tv_show_summ": "summarization"
+        }
+        
+        def get_task_type(sample: Dict[str, Any]) -> str:
+            """Extract task type from dataset name"""
+            dataset = sample.get("dataset", "unknown")
+            # Extract subset from dataset name (zeroscrolls_xxx or leval_xxx)
+            if dataset.startswith("zeroscrolls_"):
+                subset = dataset.replace("zeroscrolls_", "")
+            elif dataset.startswith("leval_"):
+                subset = dataset.replace("leval_", "")
+            else:
+                subset = dataset
+            return task_type_mapping.get(subset, "unknown")
+        
+        # Group data by task type
+        from collections import defaultdict
+        task_groups = defaultdict(list)
+        for sample in all_data:
+            task_type = get_task_type(sample)
+            task_groups[task_type].append(sample)
+        
         # Use fixed seed for reproducible split
         rng = random.Random(seed)
         
-        # Shuffle data with fixed seed
-        shuffled_data = all_data.copy()
-        rng.shuffle(shuffled_data)
+        # Shuffle each task group separately
+        for task_type in task_groups:
+            rng.shuffle(task_groups[task_type])
         
-        # Split: first eval_samples for evaluation, rest for training
-        eval_data = shuffled_data[:eval_samples]
-        training_data = shuffled_data[eval_samples:]
+        # Calculate samples per task for evaluation
+        num_tasks = len([g for g in task_groups.values() if len(g) > 0])
+        if num_tasks == 0:
+            raise ValueError("No valid task types found in data")
+        
+        eval_samples_per_task = eval_samples // num_tasks
+        remaining_eval_samples = eval_samples % num_tasks
+        
+        # Collect evaluation samples from each task
+        eval_data = []
+        task_eval_counts = {}
+        
+        for task_type, samples in task_groups.items():
+            if len(samples) == 0:
+                continue
+            
+            # Calculate how many samples to take from this task
+            samples_to_take = eval_samples_per_task
+            if remaining_eval_samples > 0:
+                samples_to_take += 1
+                remaining_eval_samples -= 1
+            
+            # Take samples from this task (up to available samples)
+            actual_take = min(samples_to_take, len(samples))
+            task_eval = samples[:actual_take]
+            eval_data.extend(task_eval)
+            task_eval_counts[task_type] = actual_take
+        
+        # Collect training samples (remaining samples from each task)
+        training_data = []
+        for task_type, samples in task_groups.items():
+            if len(samples) == 0:
+                continue
+            eval_count = task_eval_counts.get(task_type, 0)
+            training_data.extend(samples[eval_count:])
+        
+        # Shuffle both sets
+        rng.shuffle(eval_data)
+        rng.shuffle(training_data)
         
         # Verify no overlap
         eval_set = {id(d) for d in eval_data}
         train_set = {id(d) for d in training_data}
         assert len(eval_set & train_set) == 0, "Training and evaluation data must be completely separate!"
+        
+        # Print task distribution
+        print(f"\nTask distribution in evaluation set:")
+        for task_type, count in sorted(task_eval_counts.items()):
+            total_in_task = len(task_groups[task_type])
+            print(f"  {task_type:20s}: {count:3d} / {total_in_task:5d} ({count/total_in_task*100:.1f}%)")
+        print(f"Total evaluation samples: {len(eval_data)}")
+        print(f"Total training samples: {len(training_data)}")
         
         return training_data, eval_data
     

@@ -29,7 +29,7 @@ class AttentionEncoder(nn.Module):
     - All parameters are frozen (no training)
     """
     
-    def __init__(self, target_model, target_tokenizer, device: str = "cpu", output_dim: int = 8192, num_query_tokens: int = 16):
+    def __init__(self, target_model, target_tokenizer, device: str = "cpu", output_dim: int = 8192, num_query_tokens: int = 1):
         super().__init__()
         self.device = device if isinstance(device, torch.device) else torch.device(device)
         self.target_tokenizer = target_tokenizer

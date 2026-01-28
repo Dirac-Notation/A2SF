@@ -20,7 +20,7 @@ class A2SFRLConfig:
     # Discrete candidate values for A2SF forgetting factor (shared across layers)
     forgetting_values: torch.Tensor = field(
         default_factory=lambda: torch.tensor(
-            [0.0, 0.35, 0.70, 0.80, 0.85, 0.90, 0.93, 0.95, 0.97, 0.98, 0.99, 1.0],
+            [0.50, 0.80, 0.82, 0.84, 0.86, 0.88, 0.90, 0.92, 0.94, 0.96, 0.98, 1.0],
             dtype=torch.float32,
         )
     )
@@ -28,16 +28,16 @@ class A2SFRLConfig:
     # ----- NeuralUCB Hyperparameters -----
     lr: float = 1e-2
     ucb_beta: float = 1.0  # Exploration parameter for UCB
-    l2_coef: float = 1e-5  # L2 regularization coefficient for weight decay
+    l2_coef: float = 1e-6  # L2 regularization coefficient for weight decay
     
     # ----- Learning Rate Scheduler -----
     scheduler_type: str = "cosine"  # "step", "cosine", "exponential", "none"
     scheduler_step_size: int = 200  # For StepLR: decay every N iterations
     scheduler_gamma: float = 0.5  # For StepLR/ExponentialLR: decay factor
-    scheduler_T_max: int = 3000  # For CosineAnnealingLR: maximum iterations
+    scheduler_T_max: int = 1000  # For CosineAnnealingLR: maximum iterations
     
     # ----- Training Configuration -----
-    iterations: int = 3000  # Number of training iterations
+    iterations: int = 1000  # Number of training iterations
     episodes_per_update: int = 16  # Number of episodes per update
     
     # ----- Evaluation Configuration -----
