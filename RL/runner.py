@@ -13,6 +13,7 @@ from utils import load_model, set_seed, CompressionConfig
 from .main import A2SFRLConfig
 from transformers import AutoModel, AutoTokenizer
 import torch.nn.functional as F
+from rouge import Rouge
 
 @dataclass
 class ModelResult:
@@ -39,6 +40,8 @@ class A2SFModelRunner:
         self.bert_model.to(self.device)
         self.bert_model.eval()  # Set to evaluation mode
         self.bert_max_length = 512  # BERT's maximum input length
+
+        self.rouge_scorer = Rouge()
     
     def prepare_prompt(self, prompt: str, dataset: str) -> Tuple[torch.Tensor, List[str]]:
         tokenized_prompt = self.tokenizer(prompt, truncation=False, return_tensors="pt").input_ids[0]
@@ -109,10 +112,32 @@ class A2SFModelRunner:
         return generated_text
     
     def _compute_text_similarity(self, text1: str, text2: str) -> float:
-        """Compute cosine similarity between BERT CLS embeddings of two texts"""
+        """
+        Compute combined reward: 0.5 * ROUGE Score + 0.5 * BERT Score
+        
+        Args:
+            text1: Reference text (ground truth answer)
+            text2: Generated text (prediction)
+        
+        Returns:
+            Combined reward score in [0, 1]
+        """
         if not text1 or not text2:
             return 0.0
         
+        # Compute BERT Score (cosine similarity between BERT CLS embeddings)
+        bert_score = self._compute_bert_score(text1, text2)
+        
+        # Compute ROUGE Score
+        rouge_score = self._compute_rouge_score(text1, text2)
+        
+        # Combined reward: 0.5 * ROUGE Score + 0.5 * BERT Score
+        combined_score = 0.8 * rouge_score + 0.2 * bert_score
+        
+        return combined_score
+    
+    def _compute_bert_score(self, text1: str, text2: str) -> float:
+        """Compute cosine similarity between BERT CLS embeddings of two texts"""
         with torch.no_grad():
             # Tokenize and encode text1 (truncation=True automatically truncates from the end if exceeds max_length)
             encoded1 = self.bert_tokenizer(
@@ -154,6 +179,14 @@ class A2SFModelRunner:
             cosine_sim = torch.sum(cls_embedding1_norm * cls_embedding2_norm, dim=1)
             
             return float(cosine_sim.item())
+    
+    def _compute_rouge_score(self, text1: str, text2: str) -> float:
+        """Compute ROUGE-L F1 score between two texts"""
+        # Rouge expects [prediction], [reference] format
+        # text1 is reference (ground truth), text2 is prediction (generated)
+        scores = self.rouge_scorer.get_scores([text2], [text1], avg=True)
+        rouge_l_f1 = scores["rouge-l"]["f"]
+        return float(rouge_l_f1)
     
     def _create_compression_config(self, forgetting_factor: float) -> Dict[str, Any]:
         base_config = CompressionConfig()
