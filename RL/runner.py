@@ -55,13 +55,12 @@ class A2SFModelRunner:
         return prompt
     
     def run_with_compression(
-        self, 
-        prompt: str, 
-        a: float,
-        b: float,
+        self,
+        prompt: str,
+        forgetting_factor: float,
         generation_length: int,
         answer: str,
-        dataset: str = None
+        dataset: str = None,
     ) -> ModelResult:
         start_time = time.time()
         
@@ -71,7 +70,7 @@ class A2SFModelRunner:
         attention_mask = input_tensor.attention_mask.to(self.model.device)
         context_length = input_ids.size(1)
         
-        compression_config = self._create_compression_config(a, b)
+        compression_config = self._create_compression_config(forgetting_factor)
         
         self.model.init_cache(compression_config)
         
@@ -156,14 +155,15 @@ class A2SFModelRunner:
             
             return float(cosine_sim.item())
     
-    def _create_compression_config(self, a: float, b: float) -> Dict[str, Any]:
+    def _create_compression_config(self, forgetting_factor: float) -> Dict[str, Any]:
         base_config = CompressionConfig()
         
-        base_config.compression_method = "sigmoid"
+        num_layers = self.model.config.num_hidden_layers
+        base_config.compression_method = "a2sf"
         base_config.total_budget = 128
-        base_config.layerwise_ratios = [1.0 for i in range(32)]
+        base_config.layerwise_ratios = [1.0 for _ in range(num_layers)]
         base_config.local_ratios = 0.125
-        base_config.a = a
-        base_config.b = b
+        # Single global forgetting_factor shared by all layers
+        base_config.forgetting_factor = float(forgetting_factor)
         
         return base_config

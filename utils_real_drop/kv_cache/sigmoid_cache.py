@@ -54,10 +54,7 @@ class SigmoidCache(LayerCache):
         seq_len = attn_scores.size(2)
         
         forgetting = self.window[:,:,q_start:q_end].view(1, 1, seq_len, 1)
-        try:
-            return (forgetting * attn_scores).sum(dim=self.seq_dim)
-        except:
-            import pdb; pdb.set_trace()
+        return (forgetting * attn_scores).sum(dim=self.seq_dim)
 
     def prompt_flash_attention(self, query, key, value, attn_mask, head_dim, block_size=1024):
         """

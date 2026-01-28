@@ -16,9 +16,14 @@ class A2SFRLConfig:
     model: str = "llama3"  # llama, llama2, llama3, opt
     gpus: List[int] = field(default_factory=lambda: [0])
     
-    # ----- Policy Action Spaces -----
-    a_values: torch.Tensor = field(default_factory=lambda: torch.tensor([10.0]))
-    b_values: torch.Tensor = field(default_factory=lambda: torch.tensor([1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]))
+    # ----- Policy Action Space -----
+    # Discrete candidate values for A2SF forgetting factor (shared across layers)
+    forgetting_values: torch.Tensor = field(
+        default_factory=lambda: torch.tensor(
+            [0.0, 0.35, 0.70, 0.80, 0.85, 0.90, 0.93, 0.95, 0.97, 0.98, 0.99, 1.0],
+            dtype=torch.float32,
+        )
+    )
     
     # ----- NeuralUCB Hyperparameters -----
     lr: float = 1e-2
@@ -85,8 +90,7 @@ class A2SFRLConfig:
             save_dir=args.save_dir,
             seed=seed,
             # All other fields use defaults
-            a_values=default_config.a_values,
-            b_values=default_config.b_values,
+            forgetting_values=default_config.forgetting_values,
             lr=default_config.lr,
             ucb_beta=default_config.ucb_beta,
             l2_coef=default_config.l2_coef,
