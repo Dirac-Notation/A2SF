@@ -40,7 +40,8 @@ class A2SFModelRunner:
         self.bert_model.to(self.device)
         self.bert_model.eval()  # Set to evaluation mode
         self.bert_max_length = 512  # BERT's maximum input length
-
+        
+        # Initialize Rouge scorer for ROUGE score calculation
         self.rouge_scorer = Rouge()
     
     def prepare_prompt(self, prompt: str, dataset: str) -> Tuple[torch.Tensor, List[str]]:
@@ -62,6 +63,7 @@ class A2SFModelRunner:
         prompt: str,
         forgetting_factor: float,
         generation_length: int,
+        token_budget: int,
         answer: str,
         dataset: str = None,
     ) -> ModelResult:
@@ -73,7 +75,7 @@ class A2SFModelRunner:
         attention_mask = input_tensor.attention_mask.to(self.model.device)
         context_length = input_ids.size(1)
         
-        compression_config = self._create_compression_config(forgetting_factor)
+        compression_config = self._create_compression_config(forgetting_factor, token_budget)
         
         self.model.init_cache(compression_config)
         
@@ -132,7 +134,7 @@ class A2SFModelRunner:
         rouge_score = self._compute_rouge_score(text1, text2)
         
         # Combined reward: 0.5 * ROUGE Score + 0.5 * BERT Score
-        combined_score = 0.8 * rouge_score + 0.2 * bert_score
+        combined_score = 0.5 * rouge_score + 0.5 * bert_score
         
         return combined_score
     
@@ -188,12 +190,12 @@ class A2SFModelRunner:
         rouge_l_f1 = scores["rouge-l"]["f"]
         return float(rouge_l_f1)
     
-    def _create_compression_config(self, forgetting_factor: float) -> Dict[str, Any]:
+    def _create_compression_config(self, forgetting_factor: float, token_budget: int) -> Dict[str, Any]:
         base_config = CompressionConfig()
         
         num_layers = self.model.config.num_hidden_layers
         base_config.compression_method = "a2sf"
-        base_config.total_budget = 128
+        base_config.total_budget = token_budget
         base_config.layerwise_ratios = [1.0 for _ in range(num_layers)]
         base_config.local_ratios = 0.125
         # Single global forgetting_factor shared by all layers

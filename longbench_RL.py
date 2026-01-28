@@ -67,8 +67,8 @@ def load_rl_policy(checkpoint_path, device, target_model, target_tokenizer):
         num_query_tokens=16
     ).to(device)
     
-    # State dimension is fixed to 8192 (output_dim of AttentionEncoder) + 1 (generation_length feature)
-    state_dim = 8193
+    # State dimension is fixed to 8192 (output_dim of AttentionEncoder) + 2 (generation_length + token_budget features)
+    state_dim = 8194
     
     # Initialize policy with config values (discrete forgetting_factor candidates)
     policy = NeuralUCBPolicy(
@@ -88,10 +88,10 @@ def load_rl_policy(checkpoint_path, device, target_model, target_tokenizer):
     
     return policy, context_encoder, config
 
-def get_rl_action(policy, context_encoder, prompt, generation_length, dataset, model_name, device, ucb_beta=1.0):
+def get_rl_action(policy, context_encoder, prompt, generation_length, token_budget, dataset, model_name, device, ucb_beta=1.0):
     """Get RL action (forgetting_factor) for A2SF cache from given prompt"""
-    # Encode context with generation_length
-    context_embedding = context_encoder.encode_context(prompt, generation_length)
+    # Encode context with generation_length and token_budget
+    context_embedding = context_encoder.encode_context(prompt, generation_length, token_budget)
     
     # Build state (ensure it's on the correct device and dtype)
     state = context_embedding.to(device, dtype=torch.float32)
@@ -112,9 +112,9 @@ def get_pred_rl(data, max_length, max_gen, dataset, model, tokenizer, out_path, 
         prompt = json_obj["input_prompt"]
 
         # Get RL action (forgetting_factor) for A2SF cache from this prompt
-        # Pass max_gen as generation_length to consider generation length in state encoding
+        # Pass max_gen as generation_length and budget as token_budget to consider both in state encoding
         forgetting_factor = get_rl_action(
-            rl_policy, context_encoder, prompt, max_gen, dataset, model_name, device,
+            rl_policy, context_encoder, prompt, max_gen, budget, dataset, model_name, device,
             ucb_beta=rl_config.ucb_beta,
         )
 
