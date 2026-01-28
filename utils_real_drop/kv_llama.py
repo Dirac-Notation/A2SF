@@ -291,11 +291,7 @@ class LlamaModel(LlamaPreTrainedModel):
             
         exponents = None
         
-        if self.compression_method == "a2sf" or self.compression_method == "linear":
-            if input_ids.size(1) > 1:
-                orig_shape = input_ids.shape
-                exponents = torch.arange(orig_shape[1]-1, -1, -1, device=input_ids.device).view(orig_shape[0], 1, orig_shape[1])
-        elif self.compression_method == "sigmoid":
+        if self.compression_method == "a2sf" or self.compression_method == "linear" or self.compression_method == "sigmoid":
             if input_ids.size(1) > 1:
                 orig_shape = input_ids.shape
                 exponents = torch.arange(0, orig_shape[1], device=input_ids.device).view(orig_shape[0], 1, orig_shape[1])

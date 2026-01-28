@@ -10,21 +10,22 @@ EPS = 1e-6
 
 class NeuralUCBPolicy(nn.Module):
     """
-    NeuralUCB policy network for A2SF RL agent (single-step / bandit) with sigmoid cache
-    - Predicts expected reward for each (a, b) action combination
+    NeuralUCB policy network for A2SF RL agent (single-step / bandit) with A2SF cache
+    - Predicts expected reward for each discrete forgetting_factor action
     - Uses UCB (Upper Confidence Bound) for action selection
     - Uncertainty is computed using covariance matrix (Neural-Linear approach)
     """
 
-    def __init__(self, state_dim: int, a_values: torch.Tensor = None, b_values: torch.Tensor = None, lambda_reg: float = 0.1):
+    def __init__(
+        self,
+        state_dim: int,
+        forgetting_values: torch.Tensor,
+        lambda_reg: float = 0.1,
+    ):
         super().__init__()
-        self.register_buffer('a_values', a_values)
-        self.register_buffer('b_values', b_values)
-        self.num_a_values = len(a_values)
-        self.num_b_values = len(b_values)
-
-        # Total number of actions (all combinations of a and b)
-        self.num_actions = self.num_a_values * self.num_b_values
+        # Discrete action space: different forgetting_factor candidates
+        self.register_buffer("forgetting_values", forgetting_values)
+        self.num_actions = len(forgetting_values)
         
         # Regularization parameter for covariance matrix
         self.lambda_reg = lambda_reg
@@ -38,8 +39,8 @@ class NeuralUCBPolicy(nn.Module):
         # Feature dimension (output of backbone)
         self.feature_dim = 512
 
-        # Reward prediction head: predicts reward for each (a, b) combination
-        # Output shape: (batch_size, num_a_values, num_b_values)
+        # Reward prediction head: predicts reward for each forgetting_factor
+        # Output shape: (batch_size, num_actions)
         self.reward_head = nn.Linear(512, self.num_actions)
         
         # Initialize inverse covariance matrices for each action
@@ -49,8 +50,11 @@ class NeuralUCBPolicy(nn.Module):
         # This gives initial uncertainty = z^T * (1/lambda_reg) * I * z = (1/lambda_reg) * ||z||^2
         # Larger lambda_reg -> smaller initial uncertainty (more confident initially)
         self.register_buffer(
-            'inverse_lambdas',
-            torch.eye(self.feature_dim, device=a_values.device).unsqueeze(0).repeat(self.num_actions, 1, 1) / lambda_reg
+            "inverse_lambdas",
+            torch.eye(self.feature_dim, device=forgetting_values.device)
+            .unsqueeze(0)
+            .repeat(self.num_actions, 1, 1)
+            / lambda_reg,
         )
 
         # Action counts for tracking
@@ -70,7 +74,7 @@ class NeuralUCBPolicy(nn.Module):
             state: (B, state_dim) or (state_dim,)
         Returns:
             dict with reward_pred, feature_vector
-            reward_pred: (B, num_a_values, num_b_values) - predicted rewards using theta_a
+            reward_pred: (B, num_actions) - predicted rewards using theta_a
             feature_vector: (B, feature_dim) - feature representation for covariance computation
         """
         # Ensure state is 2D
@@ -79,15 +83,14 @@ class NeuralUCBPolicy(nn.Module):
         
         h = self.backbone(state)  # (B, feature_dim)
         
-        # Predict rewards for all action combinations using reward head
+        # Predict rewards for all actions using reward head
         # Apply sigmoid to ensure rewards are in [0, 1] range for NeuralUCB stability
-        reward_flat = torch.sigmoid(self.reward_head(h))  # (B, num_actions) in [0, 1]
-        reward_pred = reward_flat.view(-1, self.num_a_values, self.num_b_values)  # (B, num_a_values, num_b_values)
+        reward_pred = torch.sigmoid(self.reward_head(h))  # (B, num_actions) in [0, 1]
         
         return {"reward_pred": reward_pred, "feature_vector": h}
 
     @torch.no_grad()
-    def act(self, state: torch.Tensor, beta: float = 1.0) -> Tuple[Tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
+    def act(self, state: torch.Tensor, beta: float = 1.0) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Select action using UCB (Upper Confidence Bound) with covariance-based uncertainty
         
@@ -96,14 +99,14 @@ class NeuralUCBPolicy(nn.Module):
             beta: exploration parameter (higher = more exploration)
         
         Returns:
-            action: tuple of (a, b) where a and b are from discrete sets
+            action: forgetting_factor tensor from discrete set
             ucb_value: UCB value of selected action
         """
         out = self.forward(state)
-        reward_pred = out["reward_pred"]  # (B, num_a_values, num_b_values)
+        reward_pred = out["reward_pred"]  # (B, num_actions)
         feature_vector = out["feature_vector"]  # (B, feature_dim)
 
-        if reward_pred.ndim == 2:
+        if reward_pred.ndim == 1:
             reward_pred = reward_pred.unsqueeze(0)
             feature_vector = feature_vector.unsqueeze(0)
 
@@ -111,83 +114,66 @@ class NeuralUCBPolicy(nn.Module):
         # Compute z^T * Lambda^{-1} * z for all batches and all actions at once
         # z: (B, feature_dim), inverse_lambdas: (num_actions, feature_dim, feature_dim)
         # Result: (B, num_actions) where result[b, a] = z[b]^T * Lambda_a^{-1} * z[b]
-        uncertainty_all = torch.einsum('bi,aij,bj->ba', feature_vector, self.inverse_lambdas, feature_vector)
-        uncertainty = uncertainty_all.view(-1, self.num_a_values, self.num_b_values)  # (B, num_a_values, num_b_values)
-        
+        uncertainty = torch.einsum("bi,aij,bj->ba", feature_vector, self.inverse_lambdas, feature_vector)  # (B, num_actions)
+
         # Compute UCB: mean + beta * sqrt(uncertainty)
-        ucb = reward_pred + beta * torch.sqrt(uncertainty + EPS)  # (B, num_a_values, num_b_values)
-        
+        ucb = reward_pred + beta * torch.sqrt(uncertainty + EPS)  # (B, num_actions)
+
         # Select action with highest UCB
-        ucb_flat = ucb.view(-1, self.num_actions)  # (B, num_actions)
-        action_idx = torch.argmax(ucb_flat, dim=-1)  # (B,)
-        
-        # Convert flat index to (a_idx, b_idx)
-        a_idx = action_idx // self.num_b_values  # (B,)
-        b_idx = action_idx % self.num_b_values   # (B,)
-        
-        a = self.a_values[a_idx]  # (B,)
-        b = self.b_values[b_idx]  # (B,)
-        
+        action_idx = torch.argmax(ucb, dim=-1)  # (B,)
+
+        forgetting = self.forgetting_values[action_idx]  # (B,)
+
         # Get UCB value of selected action
         batch_indices = torch.arange(ucb.size(0), device=ucb.device)
-        ucb_value = ucb[batch_indices, a_idx, b_idx]  # (B,)
-        
-        return (a, b), ucb_value
+        ucb_value = ucb[batch_indices, action_idx]  # (B,)
 
-    def predict_reward(self, state: torch.Tensor, action: Tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
+        return forgetting, ucb_value
+
+    def predict_reward(self, state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
         """
         Predict reward for given state and action
         
         Args:
             state: (B, state_dim) or (state_dim,)
-            action: tuple of (a, b) where a and b are from discrete sets
+            action: forgetting_factor tensor from discrete set
         
         Returns:
             predicted_reward: (B,) - predicted reward
         """
         out = self.forward(state)
-        reward_pred = out["reward_pred"]  # (B, num_a_values, num_b_values)
-        
-        a, b = action
-        
-        # Find closest a and b indices
-        a_values_expanded = self.a_values.unsqueeze(0)  # (1, num_a_values)
-        a_idx = torch.argmin(torch.abs(a.unsqueeze(-1) - a_values_expanded), dim=-1)  # (B,)
-        
-        b_values_expanded = self.b_values.unsqueeze(0)  # (1, num_b_values)
-        b_idx = torch.argmin(torch.abs(b.unsqueeze(-1) - b_values_expanded), dim=-1)  # (B,)
-        
+        reward_pred = out["reward_pred"]  # (B, num_actions)
+
+        # Find closest action indices
+        forgetting_idx, _ = self._get_action_indices(action)
+
         # Get predicted reward for selected action
         batch_indices = torch.arange(reward_pred.size(0), device=reward_pred.device)
-        predicted_reward = reward_pred[batch_indices, a_idx, b_idx]  # (B,)
+        predicted_reward = reward_pred[batch_indices, forgetting_idx]  # (B,)
         
         return predicted_reward
 
-    def _get_action_indices(self, actions: Tuple[torch.Tensor, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Convert action values to indices"""
-        a, b = actions
-        a_values_expanded = self.a_values.unsqueeze(0)  # (1, num_a_values)
-        a_idx = torch.argmin(torch.abs(a.unsqueeze(-1) - a_values_expanded), dim=-1)  # (N,)
-        b_values_expanded = self.b_values.unsqueeze(0)  # (1, num_b_values)
-        b_idx = torch.argmin(torch.abs(b.unsqueeze(-1) - b_values_expanded), dim=-1)  # (N,)
-        return a_idx, b_idx
+    def _get_action_indices(self, actions: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Convert action values to indices in forgetting_values"""
+        if actions.ndim == 0:
+            actions = actions.unsqueeze(0)
+        actions = actions.view(-1)
+
+        values_expanded = self.forgetting_values.unsqueeze(0)  # (1, num_actions)
+        idx = torch.argmin(torch.abs(actions.unsqueeze(-1) - values_expanded), dim=-1)  # (N,)
+        return idx, actions
     
-    def _update_inverse_covariances(self, feature_vectors: torch.Tensor, a_idx: torch.Tensor, b_idx: torch.Tensor):
+    def _update_inverse_covariances(self, feature_vectors: torch.Tensor, action_idx: torch.Tensor):
         """
         Update inverse covariance matrices using Sherman-Morrison formula
         Lambda^{-1}_{t+1} = Lambda^{-1}_t - (Lambda^{-1}_t * z * z^T * Lambda^{-1}_t) / (1 + z^T * Lambda^{-1}_t * z)
         
         Args:
             feature_vectors: (N, feature_dim) - feature vectors for each sample
-            a_idx: (N,) - action a indices
-            b_idx: (N,) - action b indices
+            action_idx: (N,) - action indices
         """
         # Ensure indices are 1D
-        a_idx = a_idx.flatten()
-        b_idx = b_idx.flatten()
-        
-        # Convert (a_idx, b_idx) to flat action indices
-        action_indices = a_idx * self.num_b_values + b_idx  # (N,)
+        action_indices = action_idx.flatten()
         
         # Update each unique action's covariance matrix
         unique_actions = torch.unique(action_indices)

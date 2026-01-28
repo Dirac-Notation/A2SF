@@ -321,22 +321,19 @@ class A2SFEnv:
         
         return self.context_encoder.encode_context(prompt, generation_length).to(self.device, dtype=torch.float32)
     
-    def step(self, action: Tuple[torch.Tensor, torch.Tensor]) -> Tuple[torch.Tensor, Dict[str, Any]]:
+    def step(self, action: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, Any]]:
         """
         Args:
-            action: tuple of (a, b) where a is the a parameter value, b is in [0, 1]
+            action: forgetting_factor tensor (scalar) in (0, 1]
         Returns:
             reward, info
         """
-        a, b = action
-        a_val = float(a.item() if isinstance(a, torch.Tensor) else a)
-        b_val = float(b.item() if isinstance(b, torch.Tensor) else b)
+        forgetting_val = float(action.item() if isinstance(action, torch.Tensor) else action)
 
         with torch.no_grad():
             result = self.runner.run_with_compression(
                 prompt=self.current_prompt,
-                a=a_val,
-                b=b_val,
+                forgetting_factor=forgetting_val,
                 generation_length=self.current_generation_length,
                 answer=self.current_answer,
                 dataset=self.current_dataset,
@@ -345,10 +342,9 @@ class A2SFEnv:
         reward = torch.tensor(float(result.reward), device=self.device)
         
         info = {
-            "a": a_val,
-            "b": b_val,
+            "forgetting_factor": forgetting_val,
             "reward": result.reward,
-            "generated_text": result.generated_text
+            "generated_text": result.generated_text,
         }
         
         return reward, info

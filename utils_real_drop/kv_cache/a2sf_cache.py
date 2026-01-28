@@ -20,7 +20,7 @@ class A2SFCache(LayerCache):
         self.total_budget = max(round(compression_config.total_budget * compression_config.layerwise_ratios[layer_idx]), 2)
         self.recent_budget = round(self.total_budget * compression_config.local_ratios)
         self.select_budget = self.total_budget - self.recent_budget
-        self.forgetting_factor = compression_config.forgetting_factors[layer_idx]
+        self.forgetting_factor = compression_config.forgetting_factor
         self.input_ids = None
         self.prompt = False
         self.selected_indices = None
@@ -57,7 +57,7 @@ class A2SFCache(LayerCache):
     def flash_prepare_scores(self, attn_scores, q_start, q_end):
         seq_len = attn_scores.size(2)
         
-        forgetting = (self.forgetting_factor ** self.exponents[:,:,q_start:q_end].to(attn_scores.device)).view(1, 1, seq_len, 1)
+        forgetting = self.window[:,:,q_start:q_end].view(1, 1, seq_len, 1)
         return (forgetting * attn_scores).sum(dim=self.seq_dim)
 
     def prompt_flash_attention(self, query, key, value, attn_mask, head_dim, block_size=1024):
@@ -117,6 +117,7 @@ class A2SFCache(LayerCache):
     def flash_attention(self, query, key, value, attn_mask, head_dim, block_size=1024):
         if not self.prompt:
             self.prompt = True
+            self.window = self.forgetting_factor ** self.exponents
             return self.prompt_flash_attention(query, key, value, attn_mask, head_dim, block_size)
         else:
             return super().flash_attention(query, key, value, attn_mask, head_dim, block_size)

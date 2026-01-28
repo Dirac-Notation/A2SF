@@ -73,14 +73,13 @@ def load_rl_policy(checkpoint_path, device, target_model, target_tokenizer):
         num_query_tokens=16
     ).to(device)
     
-    # State dimension is fixed to 8192 (output_dim of AttentionEncoder)
+    # State dimension is fixed to 8192 (output_dim of AttentionEncoder) + 1 (generation_length feature)
     state_dim = 8193
     
-    # Initialize policy with config values
+    # Initialize policy with config values (discrete forgetting_factor candidates)
     policy = NeuralUCBPolicy(
         state_dim=state_dim,
-        a_values=config.a_values,
-        b_values=config.b_values
+        forgetting_values=config.forgetting_values,
     ).to(device)
     
     # Load policy weights
@@ -96,7 +95,7 @@ def load_rl_policy(checkpoint_path, device, target_model, target_tokenizer):
     return policy, context_encoder, config
 
 def get_rl_action(policy, context_encoder, prompt, generation_length, dataset, model_name, device, ucb_beta=1.0):
-    """Get RL action (a, b) for sigmoid cache from given prompt"""
+    """Get RL action (forgetting_factor) for A2SF cache from given prompt"""
     # Encode context with generation_length
     context_embedding = context_encoder.encode_context(prompt, generation_length)
     
@@ -105,26 +104,24 @@ def get_rl_action(policy, context_encoder, prompt, generation_length, dataset, m
     
     # Get action from policy using UCB
     with torch.no_grad():
-        action, ucb_value = policy.act(state, beta=ucb_beta)
+        forgetting_tensor, ucb_value = policy.act(state, beta=ucb_beta)
     
-    # action is a tuple of (a, b) tensors
-    # Extract scalar values
-    a = action[0].item() if isinstance(action[0], torch.Tensor) else action[0]
-    b = action[1].item() if isinstance(action[1], torch.Tensor) else action[1]
+    # Extract scalar forgetting_factor
+    forgetting_factor = forgetting_tensor.item() if isinstance(forgetting_tensor, torch.Tensor) else forgetting_tensor
     
-    return a, b
+    return forgetting_factor
 
 def get_pred_rl(data, max_length, max_gen, dataset, model, tokenizer, out_path, model_name, 
                 rl_policy, context_encoder, rl_config, device, budget):
-    """Generate predictions using RL-determined compression parameters"""
+    """Generate predictions using RL-determined A2SF forgetting_factor"""
     for json_obj in tqdm(data):
         prompt = json_obj["input_prompt"]
 
-        # Get RL action (a, b) for sigmoid cache from this prompt
+        # Get RL action (forgetting_factor) for A2SF cache from this prompt
         # Pass max_gen as generation_length to consider generation length in state encoding
-        a, b = get_rl_action(
-            rl_policy, context_encoder, prompt, max_gen, dataset, model_name, device, 
-            ucb_beta=rl_config.ucb_beta
+        forgetting_factor = get_rl_action(
+            rl_policy, context_encoder, prompt, max_gen, dataset, model_name, device,
+            ucb_beta=rl_config.ucb_beta,
         )
 
         tokenized_prompt = tokenizer(prompt, truncation=False, return_tensors="pt").input_ids[0]
@@ -148,15 +145,15 @@ def get_pred_rl(data, max_length, max_gen, dataset, model, tokenizer, out_path, 
         # Get number of layers from model config
         num_layers = model.config.num_hidden_layers
         
-        # Create compression config with RL-determined sigmoid parameters (a, b)
+        # Create compression config with RL-determined A2SF forgetting_factor
         from utils import CompressionConfig
         config = CompressionConfig()
-        config.compression_method = "sigmoid"
+        config.compression_method = "a2sf"
         config.total_budget = budget
-        config.layerwise_ratios = [1.0 for i in range(num_layers)]
+        config.layerwise_ratios = [1.0 for _ in range(num_layers)]
         config.local_ratios = 0.125
-        config.a = a
-        config.b = b
+        # Single global forgetting_factor shared by all layers
+        config.forgetting_factor = forgetting_factor
         
         model.init_cache(config)
         
@@ -197,8 +194,7 @@ def get_pred_rl(data, max_length, max_gen, dataset, model, tokenizer, out_path, 
                 "answers": json_obj["answers"], 
                 "all_classes": json_obj["all_classes"], 
                 "length": json_obj["length"],
-                "a": a,  # Add RL sigmoid parameter a to output
-                "b": b   # Add RL sigmoid parameter b to output
+                "forgetting_factor": forgetting_factor  # Add RL A2SF forgetting factor to output
             }, f, ensure_ascii=False)
             f.write('\n')
 
