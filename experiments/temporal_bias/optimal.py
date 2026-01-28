@@ -80,6 +80,9 @@ def analyze_optimal_contribution(prefill_attention_maps, answer_indices, max_win
         device=prefill_attention_maps.device
     )
     
+    local_budget = int(token_budget * 0.125)
+    selective_budget = token_budget - local_budget
+
     # Calculate number of blocks
     num_blocks = (min(max_window, seq_len) + block_size - 1) // block_size
     
@@ -118,8 +121,8 @@ def analyze_optimal_contribution(prefill_attention_maps, answer_indices, max_win
                 temp_score += coeff * prefill_attention_maps[:, :, -end_offset:-start_offset, :].sum(dim=2)
                 
                 # Calculate hit rate
-                temp_score[:,:,-16:] = temp_score.max()
-                temp_indices = temp_score.topk(token_budget-16, dim=2).indices
+                temp_score[:,:,-local_budget:] = temp_score.max()
+                temp_indices = temp_score.topk(selective_budget, dim=2).indices
                 similarities = layer_wise_analysis(answer_indices, temp_indices)
                 
                 # Update best if this is better, or if equal and coefficient is larger
@@ -142,22 +145,62 @@ def analyze_optimal_contribution(prefill_attention_maps, answer_indices, max_win
     return optimal_coefficients, hit_rates
 
 
-def plot_item_result(group_name, item_idx, block_hit_rates, optimal_coefficients, hit_rates, 
-                     seq_len, gen_len, workpath, dataset_name=None):
+def plot_averaged_result(group_name, all_block_hit_rates, all_optimal_coefficients, all_hit_rates, 
+                         workpath, avg_seq_len, avg_gen_len):
     """
-    Plot temporal bias analysis results for a single item (prompt)
+    Plot averaged temporal bias analysis results for all items in a task group
     Args:
-        group_name: Name of the group
-        item_idx: Index of the item
-        block_hit_rates: Hit rates for each block
-        optimal_coefficients: Optimal coefficients for each block
-        hit_rates: Hit rates for optimal coefficients
-        seq_len: Sequence length
-        gen_len: Generation length
+        group_name: Name of the group (task)
+        all_block_hit_rates: List of block_hit_rates arrays for all items
+        all_optimal_coefficients: List of optimal_coefficients lists for all items
+        all_hit_rates: List of hit_rates lists for all items
         workpath: Path to save the plot
-        dataset_name: Name of the dataset (optional)
+        avg_seq_len: Average prefill sequence length
+        avg_gen_len: Average generation length
     """
-    print(f">>> Plotting item {item_idx+1} from group: {group_name} (Prefill: {seq_len}, Gen: {gen_len})")
+    print(f">>> Plotting averaged results for group: {group_name} (Avg Prefill: {avg_seq_len:.0f}, Avg Gen: {avg_gen_len:.0f})")
+    
+    # Find maximum number of blocks across all items
+    max_blocks = max(len(bhr) for bhr in all_block_hit_rates)
+    
+    # Pad all arrays/lists to the same length (max_blocks)
+    padded_block_hit_rates = []
+    padded_optimal_coefficients = []
+    padded_hit_rates = []
+    
+    for i in range(len(all_block_hit_rates)):
+        # Pad block_hit_rates (numpy array)
+        bhr = all_block_hit_rates[i]
+        if len(bhr) < max_blocks:
+            padded = np.pad(bhr, (0, max_blocks - len(bhr)), mode='constant', constant_values=np.nan)
+        else:
+            padded = bhr
+        padded_block_hit_rates.append(padded)
+        
+        # Pad optimal_coefficients (list)
+        oc = all_optimal_coefficients[i]
+        if len(oc) < max_blocks:
+            padded_oc = oc + [np.nan] * (max_blocks - len(oc))
+        else:
+            padded_oc = oc[:max_blocks]
+        padded_optimal_coefficients.append(padded_oc)
+        
+        # Pad hit_rates (list)
+        hr = all_hit_rates[i]
+        if len(hr) < max_blocks:
+            padded_hr = hr + [np.nan] * (max_blocks - len(hr))
+        else:
+            padded_hr = hr[:max_blocks]
+        padded_hit_rates.append(padded_hr)
+    
+    # Convert to numpy arrays and calculate averages (ignoring NaN values)
+    padded_block_hit_rates = np.array(padded_block_hit_rates)
+    padded_optimal_coefficients = np.array(padded_optimal_coefficients)
+    padded_hit_rates = np.array(padded_hit_rates)
+    
+    avg_block_hit_rates = np.nanmean(padded_block_hit_rates, axis=0)
+    avg_optimal_coefficients = np.nanmean(padded_optimal_coefficients, axis=0)
+    avg_hit_rates = np.nanmean(padded_hit_rates, axis=0)
     
     # Apply style settings explicitly
     plt.rcParams.update({
@@ -174,39 +217,39 @@ def plot_item_result(group_name, item_idx, block_hit_rates, optimal_coefficients
     plt.rcParams.update({"legend.fontsize": 18})
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 6))
     
-    color = plt.cm.tab20(0)  # Use first color for single item
+    color = plt.cm.tab20(0)  # Use first color for averaged result
     
     # Left subplot: Block-wise hit rate
-    block_indices = list(range(1, len(block_hit_rates) + 1))  # Block 1, 2, 3, ... (each block = 8 positions)
-    ax1.plot(block_indices, block_hit_rates, 
+    block_indices = list(range(1, max_blocks + 1))  # Block 1, 2, 3, ...
+    ax1.plot(block_indices, avg_block_hit_rates, 
             alpha=0.9, linewidth=2.5, linestyle='--',
             color=color, marker='o', markersize=4)
     ax1.set_title(f"Hit rate of each block", fontsize=22)
-    ax1.set_xlabel("Block index (each block = 8 positions)", fontsize=22)
+    ax1.set_xlabel("Block index", fontsize=22)
     ax1.set_ylabel("Hit rate", fontsize=22)
     ax1.tick_params(labelsize=22)
     ax1.grid(True, linestyle='--', alpha=0.5, linewidth=0.8)
-    ax1.text(0.98, 0.50, f"Prefill: {seq_len}\nGen: {gen_len}", 
+    ax1.text(0.98, 0.50, f"Prefill: {avg_seq_len:.0f}\nGen: {avg_gen_len:.0f}", 
              transform=ax1.transAxes, fontsize=16, verticalalignment='top', horizontalalignment='right',
              bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
     
     # Right subplot: Optimal contribution coefficients with hit rates (dual y-axis)
     ax2_twin = ax2.twinx()  # Create secondary y-axis
     
-    block_indices = list(range(1, len(optimal_coefficients) + 1))  # Block 1, 2, 3, ... (each block = 8 positions)
+    block_indices = list(range(1, max_blocks + 1))  # Block 1, 2, 3, ...
     
     # Plot optimal coefficients on primary y-axis
-    ax2.plot(block_indices, optimal_coefficients, 
+    ax2.plot(block_indices, avg_optimal_coefficients, 
             alpha=0.9, linewidth=2.5, linestyle='-',
             color=color, marker='o', markersize=4, label='Coefficient')
     
     # Plot hit rates on secondary y-axis
-    ax2_twin.plot(block_indices, hit_rates, 
+    ax2_twin.plot(block_indices, avg_hit_rates, 
                  alpha=0.7, linewidth=2.0, linestyle='--',
                  color=color, marker='s', markersize=3, label='Hit rate')
     
     ax2.set_title(f"Optimal contribution coefficients & Hit rates", fontsize=22)
-    ax2.set_xlabel("Block index (each block = 8 positions)", fontsize=22)
+    ax2.set_xlabel("Block index", fontsize=22)
     ax2.set_ylabel("Optimal coefficient", fontsize=22, color='black')
     ax2.tick_params(labelsize=22, axis='y', labelcolor='black')
     ax2.set_ylim(-0.05, 1.05)
@@ -216,7 +259,7 @@ def plot_item_result(group_name, item_idx, block_hit_rates, optimal_coefficients
     ax2_twin.set_ylim(0, 0.8)
     ax2_twin.tick_params(labelsize=22, axis='y', labelcolor='black')
     
-    ax2.text(0.98, 0.50, f"Prefill: {seq_len}\nGen: {gen_len}", 
+    ax2.text(0.98, 0.50, f"Prefill: {avg_seq_len:.0f}\nGen: {avg_gen_len:.0f}", 
              transform=ax2.transAxes, fontsize=16, verticalalignment='top', horizontalalignment='right',
              bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
     
@@ -227,17 +270,13 @@ def plot_item_result(group_name, item_idx, block_hit_rates, optimal_coefficients
     plt.tight_layout(rect=[0, 0, 1, 0.92])
     
     # Overall figure title (after tight_layout to position correctly)
-    title = f"{group_name} - Item {item_idx+1}"
-    if dataset_name:
-        title += f" ({dataset_name})"
+    title = f"{group_name}"
     fig.suptitle(title, fontsize=24, fontweight='bold', y=0.95)
     
-    filename = f"item_{item_idx+1}"
-    if dataset_name:
-        filename += f"_{dataset_name.replace(' ', '_')}"
+    filename = f"averaged_result"
     save_path = os.path.join(group_folder, f"{filename}.png")
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    print(f"Saved plot to {save_path}")
+    print(f"Saved averaged plot to {save_path}")
     plt.close()
 
 # ---------------------------------------------------------
@@ -290,8 +329,8 @@ for task_name, dataset_name in task_group.items():
     for dataset_name in dataset_name:
         if dataset_name in dataset_prompts:
             all_prompts.extend(dataset_prompts[dataset_name])
-    if len(all_prompts) > 20:
-        selected_data[task_name] = random.sample(all_prompts, 20)
+    if len(all_prompts) > 5:
+        selected_data[task_name] = random.sample(all_prompts, 5)
 
 # Load tokenizer and attention model
 model_name = "llama3"
@@ -329,6 +368,13 @@ for group_name, selected_items in selected_data.items():
     
     # Store sentence information for this group: {item_idx: {dataset, input_prompt, seq_len, gen_len}}
     sentences_info = {}
+    
+    # Store results for averaging
+    all_block_hit_rates = []
+    all_optimal_coefficients = []
+    all_hit_rates = []
+    all_seq_lens = []
+    all_gen_lens = []
     
     for idx, (dataset_name, prompt) in enumerate(selected_items):
         print(f">>> Processing item {idx+1}/{len(selected_items)} from {dataset_name}")
@@ -393,21 +439,32 @@ for group_name, selected_items in selected_data.items():
             prefill_attention_maps, answer_indices, max_window, token_budget, block_size
         )
         
+        # Store results for averaging
+        all_block_hit_rates.append(block_hit_rates_data)
+        all_optimal_coefficients.append(optimal_coefficients)
+        all_hit_rates.append(hit_rates)
+        all_seq_lens.append(seq_len)
+        all_gen_lens.append(generated_token_length)
+        
         # Store sentence information for this item
         sentences_info[idx] = {
             "index": idx,
             "group_name": group_name,
             "dataset": dataset_name,
-            "input_prompt": item.get("input_prompt", ""),
+            "input_prompt": prompt,
             "seq_len": int(seq_len),
             "gen_len": int(generated_token_length)
         }
-        
-        # Plot immediately after processing each item
-        plot_item_result(
-            group_name, idx, block_hit_rates_data, optimal_coefficients, hit_rates,
-            seq_len, generated_token_length, workpath, dataset_name
-        )
+    
+    # Calculate average sequence and generation lengths
+    avg_seq_len = np.mean(all_seq_lens)
+    avg_gen_len = np.mean(all_gen_lens)
+    
+    # Plot averaged results for this group
+    plot_averaged_result(
+        group_name, all_block_hit_rates, all_optimal_coefficients, all_hit_rates,
+        workpath, avg_seq_len, avg_gen_len
+    )
     
     # Save sentences information to jsonl file
     os.makedirs(os.path.join(workpath, "sentences"), exist_ok=True)

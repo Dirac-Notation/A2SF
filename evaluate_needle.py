@@ -232,10 +232,10 @@ def main(args):
 
             # Nested loops: window → budget → method
             for cur_window in window_list:
-                for cur_budget in budget_list:
-                    for cur_method in methods:
-                        cur_idx += 1
-                        
+            for cur_budget in budget_list:
+                for cur_method in methods:
+                    cur_idx += 1
+                    
                         # Create compression config
                         config = CompressionConfig()
                         config["compression_method"] = cur_method
@@ -244,60 +244,60 @@ def main(args):
                         config["a"] = 10
                         config["b"] = cur_window
 
-                        # Evaluate with current configuration
-                        results = evaluate_model(
-                            model=model,
-                            tokenizer=tokenizer,
-                            dataset=dataset_data,
-                            device=device,
-                            method=cur_method,
-                            config=config,
+                    # Evaluate with current configuration
+                    results = evaluate_model(
+                        model=model,
+                        tokenizer=tokenizer,
+                        dataset=dataset_data,
+                        device=device,
+                        method=cur_method,
+                        config=config,
                             model_name=model_name,
                             window=cur_window,
                             budget=cur_budget
-                        )
+                    )
 
-                        # Calculate metrics
-                        metrics = calculate_metrics(results)
-                        
-                        # Create heatmap
+                    # Calculate metrics
+                    metrics = calculate_metrics(results)
+                    
+                    # Create heatmap
                         if cur_method == "full":
-                            output_file = f"plots/needle/needle_heatmap_{model_name}_full.png"
-                        else:
+                        output_file = f"plots/needle/needle_heatmap_{model_name}_full.png"
+                    else:
                             output_file = f"plots/needle/needle_heatmap_{model_name}_{cur_method}_window{cur_window}_budget{cur_budget}.png"
-                        
-                        create_heatmap(metrics, output_file)
-                        
-                        # Store results in the dictionary
+                    
+                    create_heatmap(metrics, output_file)
+                    
+                    # Store results in the dictionary
                         result_key = f"{model_name}_{dataset_name}_{cur_method}_window{cur_window}_budget{cur_budget}"
-                        
-                        all_results["results"][result_key] = {
-                            "model": model_name,
-                            "dataset": dataset_name,
+                    
+                    all_results["results"][result_key] = {
+                        "model": model_name,
+                        "dataset": dataset_name,
                             "method": cur_method,
                             "window": cur_window,
                             "budget": cur_budget,
-                            "metrics": {
-                                f"{length}_{position}": {
-                                    "accuracy": metrics[(length, position)]["accuracy"],
-                                    "correct_count": metrics[(length, position)]["correct_count"],
-                                    "total_count": metrics[(length, position)]["total_count"]
-                                }
-                                for length, position in metrics.keys()
+                        "metrics": {
+                            f"{length}_{position}": {
+                                "accuracy": metrics[(length, position)]["accuracy"],
+                                "correct_count": metrics[(length, position)]["correct_count"],
+                                "total_count": metrics[(length, position)]["total_count"]
                             }
+                            for length, position in metrics.keys()
                         }
-                        
-                        # Print summary
+                    }
+                    
+                    # Print summary
                         print(f"\nConfig {cur_idx}/{max_len} | model={model_name}, dataset={dataset_name}, method={cur_method}, window={cur_window}, budget={cur_budget}")
-                        print("Position | Accuracy | Correct/Total")
-                        print("-" * 40)
-                        for position in sorted(set(k[1] for k in metrics.keys())):
-                            # Calculate average accuracy across all context lengths for this position
-                            position_samples = [(k[0], v) for k, v in metrics.items() if k[1] == position]
-                            total_correct = sum(sample[1]["correct_count"] for sample in position_samples)
-                            total_samples = sum(sample[1]["total_count"] for sample in position_samples)
-                            avg_accuracy = total_correct / total_samples if total_samples > 0 else 0
-                            print(f"{position:3.2f} | {avg_accuracy:.2%} | {total_correct}/{total_samples}")
+                    print("Position | Accuracy | Correct/Total")
+                    print("-" * 40)
+                    for position in sorted(set(k[1] for k in metrics.keys())):
+                        # Calculate average accuracy across all context lengths for this position
+                        position_samples = [(k[0], v) for k, v in metrics.items() if k[1] == position]
+                        total_correct = sum(sample[1]["correct_count"] for sample in position_samples)
+                        total_samples = sum(sample[1]["total_count"] for sample in position_samples)
+                        avg_accuracy = total_correct / total_samples if total_samples > 0 else 0
+                        print(f"{position:3.2f} | {avg_accuracy:.2%} | {total_correct}/{total_samples}")
         
         # Clear GPU memory after processing each model
         del model
@@ -305,7 +305,7 @@ def main(args):
     
     # Save all results to a JSON file
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    result_file = f"result_json/needle/needle_results_{timestamp}.json"
+        result_file = f"result_json/needle/needle_results_{timestamp}.json"
     with open(result_file, 'w', encoding='utf-8') as f:
         json.dump(all_results, f, indent=2, ensure_ascii=False)
     print(f"\nAll results saved to {result_file}")
