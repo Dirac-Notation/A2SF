@@ -2,7 +2,7 @@
 
 # Example training script for A2SF RL agent
 
-gpu="0"
+gpu="6,7"
 model="llama3"
 save_dir="runs/a2sf_rl"
 
@@ -11,8 +11,8 @@ echo "================================="
 
 # Basic training example
 echo "Running basic training..."
-python -m RL.main \
-    --gpu $gpu \
+
+CUDA_VISIBLE_DEVICES=$gpu python -m RL.main \
     --model $model \
     --save_dir $save_dir
 

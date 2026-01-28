@@ -14,7 +14,6 @@ from typing import List, Optional
 class A2SFRLConfig:
     # ----- Model Configuration -----
     model: str = "llama3"  # llama, llama2, llama3, opt
-    gpus: List[int] = field(default_factory=lambda: [0])
     
     # ----- Policy Action Space -----
     # Discrete candidate values for A2SF forgetting factor (shared across layers)
@@ -53,21 +52,20 @@ class A2SFRLConfig:
     
     @property
     def device(self) -> str:
-        """Device is automatically determined from gpus"""
-        if torch.cuda.is_available() and len(self.gpus) > 0:
-            return f"cuda:{self.gpus[0]}"
+        """Device is determined only by CUDA availability (CUDA_VISIBLE_DEVICES로 마스킹)."""
+        if torch.cuda.is_available():
+            return "cuda"
         return "cpu"
     
     @classmethod
     def from_args(cls):
-        """Create configuration from command line arguments (minimal args: gpu, model, save_dir)"""
+        """Create configuration from command line arguments (no GPU args; GPU는 CUDA_VISIBLE_DEVICES로 제어)"""
         # Create default config instance to get default values
         default_config = cls()
         
         parser = argparse.ArgumentParser(description="Train A2SF RL Agent")
 
-        # Minimal command line arguments
-        parser.add_argument('--gpu', type=int, nargs='+', default=default_config.gpus, help="GPU ID(s) to use (default: [0])")
+        # Minimal command line arguments (GPU는 CLI CUDA_VISIBLE_DEVICES로만 제어)
         parser.add_argument('--model', type=str, default=default_config.model, choices=["llama", "llama2", "llama3", "opt"], help="Model name")
         parser.add_argument('--save_dir', type=str, default=default_config.save_dir, help="Directory to save checkpoints and logs")
         parser.add_argument('--resume', type=str, default=default_config.resume, help="Path to checkpoint to resume from (e.g., runs/a2sf_rl/policy_300.pt)")
@@ -77,13 +75,8 @@ class A2SFRLConfig:
         # Get seed from environment variable if set, otherwise use default
         seed = int(default_config.seed)
         
-        # Create config from args
-        # Handle gpu: nargs='+' returns list, but ensure it's always a list
-        gpus = args.gpu if isinstance(args.gpu, list) else [args.gpu]
-
         return cls(
             model=args.model,
-            gpus=gpus,
             save_dir=args.save_dir,
             seed=seed,
             # All other fields use defaults
@@ -109,7 +102,6 @@ def main():
     # Print configuration
     print("A2SF RL Training Configuration:")
     print(f"  Model: {config.model}")
-    print(f"  GPUs: {config.gpus}")
     print(f"  Device: {config.device}")
     print(f"  Seed: {config.seed}")
     print(f"  Episodes per update: {config.episodes_per_update}")

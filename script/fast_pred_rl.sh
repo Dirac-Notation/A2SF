@@ -4,14 +4,14 @@
 trap "kill 0" EXIT
 
 budget=128
-model=llama3
-rl_checkpoint=policy_500.pt
+model=llama2
+rl_checkpoint=policy_650.pt
 
-python longbench_RL.py --gpus 0 1 --model $model --budget $budget --task 0 1 --rl_checkpoint $rl_checkpoint --skip_eval &
+CUDA_VISIBLE_DEVICES=0,1 python longbench_RL.py --model $model --budget $budget --task 0 1 --rl_checkpoint $rl_checkpoint --skip_eval &
 
-python longbench_RL.py --gpus 2 3 --model $model --budget $budget --task 2 3 4 --rl_checkpoint $rl_checkpoint --skip_eval &
+CUDA_VISIBLE_DEVICES=2,3 python longbench_RL.py --model $model --budget $budget --task 2 3 4 --rl_checkpoint $rl_checkpoint --skip_eval &
 
-python longbench_RL.py --gpus 4 5 --model $model --budget $budget --task 5 --rl_checkpoint $rl_checkpoint &
+CUDA_VISIBLE_DEVICES=4,5 python longbench_RL.py --model $model --budget $budget --task 5 --rl_checkpoint $rl_checkpoint --skip_eval &
 
 # 모든 백그라운드 작업이 끝날 때까지 기다립니다.
 wait

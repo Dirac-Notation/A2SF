@@ -43,7 +43,7 @@ def rl_collate_fn(batch):
 class A2SFTrainer:
     def __init__(self, config: A2SFRLConfig):
         self.config = config
-        self.device = torch.device(config.device if torch.cuda.is_available() else "cpu")
+        self.device = torch.device(config.device)
         
         torch.manual_seed(config.seed)
         random.seed(config.seed)        

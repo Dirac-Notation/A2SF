@@ -22,7 +22,6 @@ from longbench_eval import data_group, evaluate_results
 
 def parse_args(args=None):
     parser = argparse.ArgumentParser(description="LongBench end-to-end evaluation with RL-trained A2SF model")
-    parser.add_argument('--gpus', type=int, nargs='+', default=[0], help="List of GPU IDs (e.g., --gpus 0 1 2 3)")
     parser.add_argument('--model', type=str, required=True, choices=["llama", "llama2", "llama3", "opt"])
     parser.add_argument('--budget', type=int, default=100)
     parser.add_argument('--task', type=int, nargs='*', default=None, help="List of task numbers (0-5). If not specified, all tasks will be executed.")
@@ -196,19 +195,12 @@ if __name__ == '__main__':
     set_seed(42)
     args = parse_args()
     
-    gpus = args.gpus
-    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpus))
-    
     model_name = args.model
     model_name = model_name.split("_")[0].lower()
     max_length = json.load(open("config/model2maxlen.json", "r"))[model_name]
     
-    # Load base model
-    model, tokenizer = load_model(model_name, args.gpus)
+    model, tokenizer = load_model(model_name)
     
-    # Load RL policy (requires target model and tokenizer for AttentionEncoder)
-    # Get the actual device of the first layer (for multi-GPU setups)
-    # AttentionEncoder uses the first layer, so we need to match its device
     first_layer_device = next(model.model.layers[0].parameters()).device
     device = first_layer_device
     rl_policy, context_encoder, rl_config = load_rl_policy(args.rl_checkpoint, device, model, tokenizer)

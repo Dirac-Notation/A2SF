@@ -21,14 +21,12 @@ def set_seed(seed):
     torch.backends.cudnn.deterministic = True
     torch.cuda.manual_seed_all(seed)
 
-def load_model(model_name, gpu_list=None):
+def load_model(model_name):
     """
-    Load model and tokenizer based on model name and GPU configuration.
+    Load model and tokenizer based on model name.
     
     Args:
         model_name (str): Name of the model (e.g., 'llama2', 'llama3', 'opt', 'qwen2')
-        gpu_list (list): List of GPU IDs for multi-GPU setup. If None, uses single GPU.
-        model_path (str): Path to the model. If None, loads from config/model2path.json
     
     Returns:
         tuple: (model, tokenizer)
@@ -36,15 +34,14 @@ def load_model(model_name, gpu_list=None):
     model2path = json.load(open("config/model2path.json", "r"))
     model_path = model2path[model_name]
     
-    if gpu_list is not None:
-        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpu_list))
-    
-    # Load tokenizer first
     tokenizer = AutoTokenizer.from_pretrained(model_path)
 
-    # Load appropriate model based on model name
     if "llama" in model_name.lower():
-        model = KVLlamaForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16, device_map="auto")
+        model = KVLlamaForCausalLM.from_pretrained(
+            model_path,
+            torch_dtype=torch.bfloat16,
+            device_map="auto",
+        )
     else:
         raise ValueError(f"Unsupported model: {model_name}. Only Llama and OPT models are supported.")
     
