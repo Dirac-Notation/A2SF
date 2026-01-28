@@ -2,6 +2,7 @@ import torch
 import json
 import os
 import sys
+import random
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -12,6 +13,14 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 workpath = os.path.dirname(os.path.abspath(__file__))
 root_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
+torch.cuda.manual_seed(SEED)
+torch.cuda.manual_seed_all(SEED)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
 
 def layer_wise_analysis(answer_indices, window_indices):
     num_layers = answer_indices.size(0)
@@ -27,7 +36,7 @@ def layer_wise_analysis(answer_indices, window_indices):
             union = answer_set | window_set
             jaccard_similarity += len(intersection) / len(union) if len(union) > 0 else 0
         similarities.append(jaccard_similarity / num_heads)
-    return similarities
+    return sum(similarities) / num_layers
 
 
 def analyze_block_hit_rate(prefill_attention_maps, answer_indices, max_window, token_budget, block_size=8):
@@ -43,28 +52,12 @@ def analyze_block_hit_rate(prefill_attention_maps, answer_indices, max_window, t
     for block_idx in range(num_blocks):
         start_offset = block_idx * block_size + 1
         end_offset = min((block_idx + 1) * block_size + 1, max_window + 1, seq_len + 1)
-        block_positions = list(range(start_offset, end_offset))
         
-        if len(block_positions) == 0:
-            break
-        
-        # Sum attention scores for all positions in this block
-        block_score = torch.zeros(
-            prefill_attention_maps.size(0),
-            prefill_attention_maps.size(1),
-            seq_len,
-            dtype=torch.float32,
-            device=prefill_attention_maps.device
-        )
-        
-        for pos_offset in block_positions:
-            pos_idx = -pos_offset
-            block_score += prefill_attention_maps[:, :, pos_idx, :]
+        block_score = prefill_attention_maps[:, :, -end_offset:-start_offset, :].sum(dim=2)
         
         block_indices = block_score.topk(token_budget, dim=2).indices
         block_sim.append(layer_wise_analysis(answer_indices, block_indices))
     
-    # Convert to numpy: (Blocks, Layers)
     return np.array(block_sim)
 
 
@@ -84,7 +77,6 @@ def analyze_optimal_contribution(prefill_attention_maps, answer_indices, max_win
     hit_rates = []
     accumulated_score = torch.zeros(
         num_layers, num_heads, seq_len,
-        dtype=torch.float32,
         device=prefill_attention_maps.device
     )
     
@@ -95,14 +87,6 @@ def analyze_optimal_contribution(prefill_attention_maps, answer_indices, max_win
     for block_idx in range(num_blocks):
         start_offset = block_idx * block_size + 1
         end_offset = min((block_idx + 1) * block_size + 1, max_window + 1, seq_len + 1)
-        block_positions = list(range(start_offset, end_offset))
-        
-        if len(block_positions) == 0:
-            break
-        
-        # Get the range of positions for this block (from end)
-        # For example, block 0: -1~-16, block 1: -17~-32, etc.
-        # block_positions = [1, 2, ..., 16] means positions -1, -2, ..., -16 from the end
         
         # First block: fix coefficient to 1.0
         if block_idx == 0:
@@ -110,14 +94,12 @@ def analyze_optimal_contribution(prefill_attention_maps, answer_indices, max_win
             print(f"  >>> Block {block_idx+1}/{num_blocks} (positions {start_offset}~{end_offset-1} from end) - fixed to 1.0", end="", flush=True)
             
             # Update accumulated score with coefficient 1.0 for all positions in first block
-            for pos_offset in block_positions:
-                pos_idx = -pos_offset
-                accumulated_score += best_coeff * prefill_attention_maps[:, :, pos_idx, :]
+            accumulated_score += prefill_attention_maps[:, :, -end_offset:-start_offset, :].sum(dim=2)
             
             # Calculate hit rate for first block
             temp_indices = accumulated_score.topk(token_budget, dim=2).indices
             similarities = layer_wise_analysis(answer_indices, temp_indices)
-            best_hit_rate = np.mean(similarities)
+            best_hit_rate = similarities
             
             optimal_coefficients.append(best_coeff)
             hit_rates.append(best_hit_rate)
@@ -127,25 +109,22 @@ def analyze_optimal_contribution(prefill_attention_maps, answer_indices, max_win
             print(f"  >>> Finding optimal coefficient for block {block_idx+1}/{num_blocks} (positions {start_offset}~{end_offset-1} from end)", end="", flush=True)
             
             best_coeff = 0.0
-            best_hit_rate = -1.0
             
             # Try each coefficient
             for coeff_idx, coeff in enumerate(test_coefficients):
                 # Create temporary score with current coefficient applied to all positions in this block
                 temp_score = accumulated_score.clone()
                 # Apply coefficient to all positions in this block
-                for pos_offset in block_positions:
-                    pos_idx = -pos_offset
-                    temp_score += coeff * prefill_attention_maps[:, :, pos_idx, :]
+                temp_score += coeff * prefill_attention_maps[:, :, -end_offset:-start_offset, :].sum(dim=2)
                 
                 # Calculate hit rate
-                temp_indices = temp_score.topk(token_budget, dim=2).indices
+                temp_score[:,:,-16:] = temp_score.max()
+                temp_indices = temp_score.topk(token_budget-16, dim=2).indices
                 similarities = layer_wise_analysis(answer_indices, temp_indices)
-                avg_hit_rate = np.mean(similarities)
                 
                 # Update best if this is better, or if equal and coefficient is larger
-                if avg_hit_rate > best_hit_rate or (avg_hit_rate == best_hit_rate and coeff > best_coeff):
-                    best_hit_rate = avg_hit_rate
+                if similarities >= best_hit_rate:
+                    best_hit_rate = similarities
                     best_coeff = coeff
                 
                 # Show progress for coefficient testing
@@ -153,9 +132,7 @@ def analyze_optimal_contribution(prefill_attention_maps, answer_indices, max_win
                     print(".", end="", flush=True)
             
             # Update accumulated score with best coefficient for all positions in this block
-            for pos_offset in block_positions:
-                pos_idx = -pos_offset
-                accumulated_score += best_coeff * prefill_attention_maps[:, :, pos_idx, :]
+            accumulated_score += best_coeff * prefill_attention_maps[:, :, -end_offset:-start_offset, :].sum(dim=2)
             
             optimal_coefficients.append(best_coeff)
             hit_rates.append(best_hit_rate)
@@ -235,9 +212,9 @@ def plot_item_result(group_name, item_idx, block_hit_rates, optimal_coefficients
     ax2.set_ylim(-0.05, 1.05)
     ax2.grid(True, linestyle='--', alpha=0.5, linewidth=0.8)
     
-    ax2_twin.set_ylabel("Hit rate", fontsize=22, color='gray')
+    ax2_twin.set_ylabel("Hit rate", fontsize=22, color='black')
     ax2_twin.set_ylim(0, 0.8)
-    ax2_twin.tick_params(labelsize=22, axis='y', labelcolor='gray')
+    ax2_twin.tick_params(labelsize=22, axis='y', labelcolor='black')
     
     ax2.text(0.98, 0.50, f"Prefill: {seq_len}\nGen: {gen_len}", 
              transform=ax2.transAxes, fontsize=16, verticalalignment='top', horizontalalignment='right',
@@ -266,6 +243,7 @@ def plot_item_result(group_name, item_idx, block_hit_rates, optimal_coefficients
 # ---------------------------------------------------------
 # 2. 데이터 준비 및 프롬프트 구성
 # ---------------------------------------------------------
+
 # Load max generation lengths
 dataset2maxlen_path = os.path.join(root_path, "config", "dataset2maxlen.json")
 with open(dataset2maxlen_path, "r") as f:
@@ -275,14 +253,47 @@ with open(dataset2maxlen_path, "r") as f:
 data_jsonl_path = os.path.join(workpath, "data.jsonl")
 selected_data = {}  # {group_name: [selected_items]}
 
-with open(data_jsonl_path, "r", encoding="utf-8") as f:
-    for line in f:
+longbench_folder_path = os.path.join(root_path, "datasets", "longbench")
+dataset_list = os.listdir(longbench_folder_path)
+dataset_prompts = {}
+for dataset in dataset_list:
+    dataset_path = os.path.join(longbench_folder_path, dataset)
+    
+    with open(dataset_path, "r") as f:
+        data_lines = f.readlines()
+    
+    for line in data_lines:
         item = json.loads(line)
-        group_name = item.get("group_name")
-        if group_name not in selected_data:
-            selected_data[group_name] = []
-        selected_data[group_name].append((item.get("dataset"), item))
+        input_prompt = item.get("input_prompt")
+        dataset_name = item.get("dataset")
+        length = item.get("length")
 
+        if length < 2000 or length > 6000:
+            continue
+
+        if dataset_name not in dataset_prompts:
+            dataset_prompts[dataset_name] = []
+        dataset_prompts[dataset_name].append((dataset_name, input_prompt))
+
+task_group = {
+    "Code Complete": ["repobench-p", "lcc"],
+    "Few Shot": ["trec", "triviaqa", "samsum", "lsht"],
+    "Single-doc QA": ["narrativeqa", "qasper", "multifieldqa_en", "multifieldqa_zh"],
+    "Multi-doc QA": ["hotpotqa", "2wikimqa", "musique", "dureader"],
+    "Summarization": ["gov_report", "qmsum", "multi_news", "vcsum"],
+    "Passage Retrieval": ["passage_retrieval_en", "passage_retrieval_zh", "passage_count"],
+}
+
+selected_data = {}
+for task_name, dataset_name in task_group.items():
+    all_prompts = []
+    for dataset_name in dataset_name:
+        if dataset_name in dataset_prompts:
+            all_prompts.extend(dataset_prompts[dataset_name])
+    if len(all_prompts) > 20:
+        selected_data[task_name] = random.sample(all_prompts, 20)
+
+# Load tokenizer and attention model
 model_name = "llama3"
 model2path_path = os.path.join(root_path, "config", "model2path.json")
 with open(model2path_path, "r") as f:
@@ -290,6 +301,7 @@ with open(model2path_path, "r") as f:
 model_path = model2path[model_name]
 
 tokenizer = AutoTokenizer.from_pretrained(model_path)
+
 attention_model = AutoModelForCausalLM.from_pretrained(
     model_path, 
     torch_dtype=torch.bfloat16, 
@@ -303,7 +315,7 @@ prefill_attention_list = []
 def get_attn_hook(module, input, output):
     attention_map = output[1]
     if attention_map is not None and attention_map.size(2) != 1:
-        prefill_attention_list.append(attention_map.detach().to("cpu", dtype=torch.float32))
+        prefill_attention_list.append(attention_map.detach().to("cpu"))
         return (output[0], None, output[2])
     return output
 
@@ -318,9 +330,8 @@ for group_name, selected_items in selected_data.items():
     # Store sentence information for this group: {item_idx: {dataset, input_prompt, seq_len, gen_len}}
     sentences_info = {}
     
-    for idx, (dataset_name, item) in enumerate(selected_items):
+    for idx, (dataset_name, prompt) in enumerate(selected_items):
         print(f">>> Processing item {idx+1}/{len(selected_items)} from {dataset_name}")
-        prompt = item["input_prompt"]
         prompt_with_format = f"[INST]{prompt}[/INST]"
 
         input_enc = tokenizer(prompt_with_format, return_tensors="pt")
@@ -334,7 +345,7 @@ for group_name, selected_items in selected_data.items():
 
         seq_len = input_ids.size(1)
         max_new_tokens = dataset2maxlen.get(dataset_name, 512)
-        token_budget = int(0.1*seq_len) 
+        token_budget = 128
 
         prefill_attention_list.clear()
 
@@ -349,36 +360,33 @@ for group_name, selected_items in selected_data.items():
                 output_attentions=True
             )
         
-        # Extract attention weights and convert to float32
-        prefill_attention_maps = torch.stack(prefill_attention_list, dim=0).squeeze(1).float()
-        decoding_attention_maps = [torch.stack(output.attentions[i], dim=0).squeeze(1).to("cpu", dtype=torch.float32) for i in range(1, len(output.attentions))]
+        # Extract attention weights
+        prefill_attention_maps = torch.stack(prefill_attention_list, dim=0).squeeze(1)
+        decoding_attention_maps = [torch.stack(output.attentions[i], dim=0).squeeze(1).to("cpu") for i in range(1, len(output.attentions))]
         
         # Use all generated tokens (no chunking)
         generated_token_length = len(decoding_attention_maps)
         
         first_decoding_attention_map = decoding_attention_maps[0]
         answer_score = torch.zeros(
-            (*first_decoding_attention_map.shape[:3], seq_len),
-            dtype=torch.float32,
+            (*first_decoding_attention_map.shape[:2], seq_len),
             device=first_decoding_attention_map.device
         )
 
         # Sum all decoding attention maps
         for atmaps in decoding_attention_maps:
-            answer_score += atmaps[:,:,:,:seq_len]
+            answer_score += atmaps[:,:,0,:seq_len]
             
-        answer_score.squeeze_(dim=2)
         answer_indices = answer_score.topk(token_budget, dim=2).indices
         
         # Limit window size for reasonable computation
-        max_window = min(seq_len, 128)
-        block_size = 8
+        max_window = 128
+        block_size = 4
         
         # Calculate block-wise hit rate
         block_hit_rates_data = analyze_block_hit_rate(
             prefill_attention_maps, answer_indices, max_window, token_budget, block_size
         )
-        block_hit_rates_mean = block_hit_rates_data.mean(axis=1)  # (Blocks,)
         
         # Calculate optimal contribution coefficients and hit rates
         optimal_coefficients, hit_rates = analyze_optimal_contribution(
@@ -397,7 +405,7 @@ for group_name, selected_items in selected_data.items():
         
         # Plot immediately after processing each item
         plot_item_result(
-            group_name, idx, block_hit_rates_mean, optimal_coefficients, hit_rates,
+            group_name, idx, block_hit_rates_data, optimal_coefficients, hit_rates,
             seq_len, generated_token_length, workpath, dataset_name
         )
     
