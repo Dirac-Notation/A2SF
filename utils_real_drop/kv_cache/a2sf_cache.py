@@ -117,7 +117,7 @@ class A2SFCache(LayerCache):
     def flash_attention(self, query, key, value, attn_mask, head_dim, block_size=1024):
         if not self.prompt:
             self.prompt = True
-            self.window = self.forgetting_factor ** self.exponents
+            self.window = self.forgetting_factor ** (self.exponents.max() - self.exponents)
             return self.prompt_flash_attention(query, key, value, attn_mask, head_dim, block_size)
         else:
             return super().flash_attention(query, key, value, attn_mask, head_dim, block_size)
