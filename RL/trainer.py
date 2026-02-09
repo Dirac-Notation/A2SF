@@ -56,7 +56,8 @@ class A2SFTrainer:
         
         self.policy = NeuralUCBPolicy(
             state_dim=state_dim,
-            forgetting_values=config.forgetting_values,
+            a_values=config.a_values,
+            b_values=config.b_values,
         ).to(self.device)
         
         # Optimizer only includes policy parameters
@@ -246,7 +247,7 @@ class A2SFTrainer:
     def _neural_ucb_update(
         self,
         state: torch.Tensor,
-        action: torch.Tensor,
+        action: Tuple[torch.Tensor, torch.Tensor],
         reward: torch.Tensor,
         config,
         optimizer: torch.optim.Optimizer,
@@ -258,7 +259,7 @@ class A2SFTrainer:
         
         Args:
             state: Encoded state tensor (already on device)
-            action: Tuple of (a, b) action values
+            action: Tuple of (a, b) action values for sigmoid cache
             reward: Observed reward (scalar tensor)
             config: Configuration object
             optimizer: Optimizer for training
@@ -276,11 +277,11 @@ class A2SFTrainer:
         
         # Forward pass to get predictions and feature vectors (with gradient)
         out = self.policy.forward(state)
-        reward_pred = out["reward_pred"]  # (1, num_a_values, num_b_values)
+        reward_pred = out["reward_pred"]  # (1, num_actions)
         feature_vector = out["feature_vector"]  # (1, feature_dim)
         
-        # Get action index
-        action_idx, _ = self.policy._get_action_indices(action)
+        # Get flat action index from (a, b) tuple
+        action_idx = self.policy._get_action_indices(action)
         if action_idx.ndim > 0:
             action_idx = action_idx[0]
         
@@ -336,7 +337,8 @@ class A2SFTrainer:
         for iteration in range(num_iterations):
             # Initialize stats for this iteration
             iteration_rewards = []
-            iteration_actions_f = []
+            iteration_actions_a = []
+            iteration_actions_b = []
             iteration_losses = []
             
             # Get a batch from the data loader
@@ -379,6 +381,7 @@ class A2SFTrainer:
                 state = state.to(self.device)
 
                 # Get action (forward pass happens inside act, but we'll reuse state for update)
+                # action is now a tuple of (a, b)
                 action, ucb_value = self.policy.act(state, beta=self.config.ucb_beta)
                 
                 # Get reward
@@ -396,7 +399,9 @@ class A2SFTrainer:
                 iteration_losses.append(loss_stats)
                 
                 iteration_rewards.append(reward.item() if isinstance(reward, torch.Tensor) else reward)
-                iteration_actions_f.append(round(action.item(), 5) if isinstance(action, torch.Tensor) else action)
+                a_val, b_val = action
+                iteration_actions_a.append(round(a_val.item(), 2) if isinstance(a_val, torch.Tensor) else a_val)
+                iteration_actions_b.append(int(b_val.item()) if isinstance(b_val, torch.Tensor) else int(b_val))
             
             # Average loss stats across episodes in this iteration
             avg_loss_stats = {
@@ -408,7 +413,7 @@ class A2SFTrainer:
             # Update learning rate scheduler
             self.scheduler.step()
 
-            self._log_progress(iteration, avg_loss_stats, iteration_rewards, iteration_actions_f)
+            self._log_progress(iteration, avg_loss_stats, iteration_rewards, iteration_actions_a, iteration_actions_b)
             
             if iteration % self.config.eval_frequency == 0 and iteration > 0:
                 self._save_checkpoint(iteration)
@@ -422,7 +427,8 @@ class A2SFTrainer:
         self.env.context_encoder.eval()
         
         eval_rewards = []
-        eval_actions_f = []
+        eval_actions_a = []
+        eval_actions_b = []
         
         for batch in tqdm(self.eval_loader, desc="Evaluating"):
             # DataLoader with batch_size=1 returns a list with one element
@@ -459,7 +465,9 @@ class A2SFTrainer:
             reward, info = self.env.step(action)
 
             eval_rewards.append(reward.item())
-            eval_actions_f.append(round(action.item(), 5) if isinstance(action, torch.Tensor) else action)
+            a_val, b_val = action
+            eval_actions_a.append(round(a_val.item(), 2) if isinstance(a_val, torch.Tensor) else a_val)
+            eval_actions_b.append(int(b_val.item()) if isinstance(b_val, torch.Tensor) else int(b_val))
         
         avg_eval_reward = sum(eval_rewards) / len(eval_rewards) if eval_rewards else 0.0
         avg_eval_reward = round(avg_eval_reward, 4)
@@ -475,13 +483,14 @@ class A2SFTrainer:
             "iteration": iteration,
             "eval_avg_reward": avg_eval_reward,
             "eval_rewards": eval_rewards_rounded,
-            "eval_actions_forgetting": eval_actions_f,
+            "eval_actions_a": eval_actions_a,
+            "eval_actions_b": eval_actions_b,
         }
         
         with open(os.path.join(self.config.save_dir, "evaluation_progress.jsonl"), "a") as f:
             f.write(json.dumps(eval_data) + "\n")
 
-    def _log_progress(self, iteration: int, loss_stats: Dict[str, float], iteration_rewards: List, iteration_actions_f: List):
+    def _log_progress(self, iteration: int, loss_stats: Dict[str, float], iteration_rewards: List, iteration_actions_a: List, iteration_actions_b: List):
         avg_reward = sum(iteration_rewards) / len(iteration_rewards) if iteration_rewards else 0.0
         
         prediction_loss = round(loss_stats.get("prediction_loss", 0.0), 4)
@@ -505,7 +514,8 @@ class A2SFTrainer:
             "l2_loss": l2_loss,
             "total_loss": total_loss,
             "learning_rate": round(current_lr, 6),
-            "actions_forgetting": iteration_actions_f,
+            "actions_a": iteration_actions_a,
+            "actions_b": iteration_actions_b,
         }
         
         with open(os.path.join(self.config.save_dir, "training_progress.jsonl"), "a") as f:
@@ -532,8 +542,10 @@ class A2SFTrainer:
         if "config" in checkpoint:
             checkpoint_config = checkpoint["config"]
             # Update important config values that affect model initialization
-            if hasattr(checkpoint_config, "forgetting_values"):
-                self.config.forgetting_values = checkpoint_config.forgetting_values
+            if hasattr(checkpoint_config, "a_values"):
+                self.config.a_values = checkpoint_config.a_values
+            if hasattr(checkpoint_config, "b_values"):
+                self.config.b_values = checkpoint_config.b_values
         
         self.policy.load_state_dict(checkpoint["policy_state_dict"])
         

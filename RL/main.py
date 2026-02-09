@@ -16,10 +16,18 @@ class A2SFRLConfig:
     model: str = "llama3"  # llama, llama2, llama3, opt
     
     # ----- Policy Action Space -----
-    # Discrete candidate values for A2SF forgetting factor (shared across layers)
-    forgetting_values: torch.Tensor = field(
+    # Discrete candidate values for Sigmoid cache parameters (a, b)
+    # a: sigmoid steepness parameter
+    a_values: torch.Tensor = field(
         default_factory=lambda: torch.tensor(
-            [0.50, 0.80, 0.82, 0.84, 0.86, 0.88, 0.90, 0.92, 0.94, 0.96, 0.98, 1.0],
+            [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+            dtype=torch.float32,
+        )
+    )
+    # b: sigmoid shift parameter
+    b_values: torch.Tensor = field(
+        default_factory=lambda: torch.tensor(
+            [1, 8, 16, 32, 64, 128],
             dtype=torch.float32,
         )
     )
@@ -80,7 +88,8 @@ class A2SFRLConfig:
             save_dir=args.save_dir,
             seed=seed,
             # All other fields use defaults
-            forgetting_values=default_config.forgetting_values,
+            a_values=default_config.a_values,
+            b_values=default_config.b_values,
             lr=default_config.lr,
             ucb_beta=default_config.ucb_beta,
             l2_coef=default_config.l2_coef,
@@ -100,10 +109,12 @@ def main():
     config = A2SFRLConfig.from_args()
     
     # Print configuration
-    print("A2SF RL Training Configuration:")
+    print("Sigmoid Cache RL Training Configuration:")
     print(f"  Model: {config.model}")
     print(f"  Device: {config.device}")
     print(f"  Seed: {config.seed}")
+    print(f"  a_values: {config.a_values.tolist()}")
+    print(f"  b_values: {config.b_values.tolist()}")
     print(f"  Episodes per update: {config.episodes_per_update}")
     print(f"  Learning rate: {config.lr}")
     print(f"  LR Scheduler: cosine (T_max: {config.scheduler_T_max})")

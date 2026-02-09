@@ -69,10 +69,11 @@ def load_rl_policy(checkpoint_path, device, target_model, target_tokenizer):
     # State dimension is fixed to 8192 (output_dim of AttentionEncoder) + 2 (generation_length + token_budget features)
     state_dim = 8194
     
-    # Initialize policy with config values (discrete forgetting_factor candidates)
+    # Initialize policy with config values (discrete sigmoid cache a, b candidates)
     policy = NeuralUCBPolicy(
         state_dim=state_dim,
-        forgetting_values=config.forgetting_values,
+        a_values=config.a_values,
+        b_values=config.b_values,
     ).to(device)
     
     # Load policy weights
@@ -88,7 +89,7 @@ def load_rl_policy(checkpoint_path, device, target_model, target_tokenizer):
     return policy, context_encoder, config
 
 def get_rl_action(policy, context_encoder, prompt, generation_length, token_budget, dataset, model_name, device, ucb_beta=1.0):
-    """Get RL action (forgetting_factor) for A2SF cache from given prompt"""
+    """Get RL action (a, b) for sigmoid cache from given prompt"""
     # Encode context with generation_length and token_budget
     context_embedding = context_encoder.encode_context(prompt, generation_length, token_budget)
     
@@ -97,22 +98,23 @@ def get_rl_action(policy, context_encoder, prompt, generation_length, token_budg
     
     # Get action from policy using UCB
     with torch.no_grad():
-        forgetting_tensor, ucb_value = policy.act(state, beta=ucb_beta)
+        (a_tensor, b_tensor), ucb_value = policy.act(state, beta=ucb_beta)
     
-    # Extract scalar forgetting_factor
-    forgetting_factor = forgetting_tensor.item() if isinstance(forgetting_tensor, torch.Tensor) else forgetting_tensor
+    # Extract scalar a, b values
+    a_val = a_tensor.item() if isinstance(a_tensor, torch.Tensor) else a_tensor
+    b_val = b_tensor.item() if isinstance(b_tensor, torch.Tensor) else b_tensor
     
-    return forgetting_factor
+    return a_val, b_val
 
 def get_pred_rl(data, max_length, max_gen, dataset, model, tokenizer, out_path, model_name, 
                 rl_policy, context_encoder, rl_config, device, budget):
-    """Generate predictions using RL-determined A2SF forgetting_factor"""
+    """Generate predictions using RL-determined sigmoid cache parameters (a, b)"""
     for json_obj in tqdm(data):
         prompt = json_obj["input_prompt"]
 
-        # Get RL action (forgetting_factor) for A2SF cache from this prompt
+        # Get RL action (a, b) for sigmoid cache from this prompt
         # Pass max_gen as generation_length and budget as token_budget to consider both in state encoding
-        forgetting_factor = get_rl_action(
+        a_val, b_val = get_rl_action(
             rl_policy, context_encoder, prompt, max_gen, budget, dataset, model_name, device,
             ucb_beta=rl_config.ucb_beta,
         )
@@ -138,15 +140,16 @@ def get_pred_rl(data, max_length, max_gen, dataset, model, tokenizer, out_path, 
         # Get number of layers from model config
         num_layers = model.config.num_hidden_layers
         
-        # Create compression config with RL-determined A2SF forgetting_factor
+        # Create compression config with RL-determined sigmoid cache parameters (a, b)
         from utils import CompressionConfig
         config = CompressionConfig()
-        config.compression_method = "a2sf"
+        config.compression_method = "sigmoid"
         config.total_budget = budget
         config.layerwise_ratios = [1.0 for _ in range(num_layers)]
         config.local_ratios = 0.125
-        # Single global forgetting_factor shared by all layers
-        config.forgetting_factor = forgetting_factor
+        # Sigmoid cache parameters
+        config.a = float(a_val)
+        config.b = float(b_val)
         
         model.init_cache(config)
         
@@ -187,7 +190,8 @@ def get_pred_rl(data, max_length, max_gen, dataset, model, tokenizer, out_path, 
                 "answers": json_obj["answers"], 
                 "all_classes": json_obj["all_classes"], 
                 "length": json_obj["length"],
-                "forgetting_factor": forgetting_factor  # Add RL A2SF forgetting factor to output
+                "a": a_val,  # Sigmoid cache steepness parameter
+                "b": b_val,  # Sigmoid cache shift parameter
             }, f, ensure_ascii=False)
             f.write('\n')
 

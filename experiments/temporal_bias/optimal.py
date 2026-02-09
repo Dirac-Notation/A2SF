@@ -127,7 +127,7 @@ def analyze_optimal_contribution(prefill_attention_maps, answer_indices, max_win
                 similarities = layer_wise_analysis(answer_indices, temp_indices)
                 
                 # Update best if this is better, or if equal and coefficient is larger
-                if similarities >= best_hit_rate:
+                if similarities > best_hit_rate:
                     best_hit_rate = similarities
                     best_coeff = coeff
                 
@@ -146,50 +146,15 @@ def analyze_optimal_contribution(prefill_attention_maps, answer_indices, max_win
     return optimal_coefficients, hit_rates
 
 
-def plot_averaged_result(group_name, dataset_name, all_block_hit_rates, all_optimal_coefficients, all_hit_rates, 
-                         workpath, avg_seq_len, avg_gen_len):
+def plot_single_result(group_name, dataset_name, prompt_idx, block_hit_rates, optimal_coefficients, hit_rates,
+                       workpath, seq_len, gen_len):
     """
-    Plot averaged temporal bias analysis results for all items in a task group
+    Plot temporal bias analysis result for a single prompt.
+    Saves to task_name/block_hit/ and task_name/coeff_hit/ with filename dataset_name_{idx}.png
     """
-    print(f">>> Plotting averaged results for group: {group_name}, dataset: {dataset_name} "
-          f"(Avg Prefill: {avg_seq_len:.0f}, Avg Gen: {avg_gen_len:.0f})")
-    
-    max_blocks = max(len(bhr) for bhr in all_block_hit_rates)
-    
-    padded_block_hit_rates = []
-    padded_optimal_coefficients = []
-    padded_hit_rates = []
-    
-    for i in range(len(all_block_hit_rates)):
-        bhr = all_block_hit_rates[i]
-        if len(bhr) < max_blocks:
-            padded = np.pad(bhr, (0, max_blocks - len(bhr)), mode='constant', constant_values=np.nan)
-        else:
-            padded = bhr
-        padded_block_hit_rates.append(padded)
-        
-        oc = all_optimal_coefficients[i]
-        if len(oc) < max_blocks:
-            padded_oc = oc + [np.nan] * (max_blocks - len(oc))
-        else:
-            padded_oc = oc[:max_blocks]
-        padded_optimal_coefficients.append(padded_oc)
-        
-        hr = all_hit_rates[i]
-        if len(hr) < max_blocks:
-            padded_hr = hr + [np.nan] * (max_blocks - len(hr))
-        else:
-            padded_hr = hr[:max_blocks]
-        padded_hit_rates.append(padded_hr)
-    
-    padded_block_hit_rates = np.array(padded_block_hit_rates)
-    padded_optimal_coefficients = np.array(padded_optimal_coefficients)
-    padded_hit_rates = np.array(padded_hit_rates)
-    
-    avg_block_hit_rates = np.nanmean(padded_block_hit_rates, axis=0)
-    avg_optimal_coefficients = np.nanmean(padded_optimal_coefficients, axis=0)
-    avg_hit_rates = np.nanmean(padded_hit_rates, axis=0)
-    
+    max_blocks = len(block_hit_rates)
+    block_indices = list(range(max_blocks))
+
     plt.rcParams.update({
         "font.family": "serif",
         "font.size": 22,
@@ -200,103 +165,154 @@ def plot_averaged_result(group_name, dataset_name, all_block_hit_rates, all_opti
         "legend.fontsize": 22,
         "axes.linewidth": 1.2,
     })
-    
     plt.rcParams.update({"legend.fontsize": 18})
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
-    
     color = plt.cm.tab20(0)
-    
-    block_indices = list(range(max_blocks))
-    ax1.plot(block_indices, avg_block_hit_rates, 
-            alpha=0.9, linewidth=2.5, linestyle='--',
-            color=color, marker='o', markersize=4)
-    ax1.set_title(f"Hit rate of each block", fontsize=22)
-    ax1.set_xlabel("Block index", fontsize=22)
+
+    base_folder = os.path.join(workpath, "plots", group_name.replace(' ', '_'))
+    block_hit_folder = os.path.join(base_folder, "block_hit")
+    coeff_hit_folder = os.path.join(base_folder, "coeff_hit")
+    os.makedirs(block_hit_folder, exist_ok=True)
+    os.makedirs(coeff_hit_folder, exist_ok=True)
+
+    file_suffix = f"{dataset_name.replace(' ', '_')}_{prompt_idx}"
+
+    # 첫 번째 그래프: 블록별 Hit rate → task_name/block_hit/
+    fig1, ax1 = plt.subplots(1, 1, figsize=(7.5, 5))
+    ax1.plot(
+        block_indices,
+        block_hit_rates,
+        alpha=0.9,
+        linewidth=2.5,
+        linestyle='--',
+        color=color,
+        marker='o',
+        markersize=4,
+    )
+    ax1.set_xlabel("Query Block index", fontsize=22)
     ax1.set_ylabel("Hit rate", fontsize=22)
     ax1.tick_params(labelsize=22)
     ax1.grid(True, linestyle='--', alpha=0.5, linewidth=0.8)
-    ax1.text(0.98, 0.50, f"Prefill: {avg_seq_len:.0f}\nGen: {avg_gen_len:.0f}", 
-             transform=ax1.transAxes, fontsize=16, verticalalignment='top', horizontalalignment='right',
-             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-    
-    ax2_twin = ax2.twinx()
-    
-    x_vals = np.array(block_indices, dtype=np.float64)
-    y_vals = np.array(avg_optimal_coefficients, dtype=np.float64)
-    
-    ax2.plot(x_vals, y_vals, 
-            alpha=0.9, linewidth=2.5, linestyle='-',
-            color=color, marker='o', markersize=4, label='Coefficient')
-    
-    # Define the fitting function: f^x
-    def exp_func(x, f):
-        return f ** x
+    ax1.text(
+        0.98,
+        0.50,
+        f"Prefill: {seq_len:.0f}tokens\nGen: {gen_len:.0f}tokens",
+        transform=ax1.transAxes,
+        fontsize=16,
+        verticalalignment='top',
+        horizontalalignment='right',
+        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5),
+    )
+    fig1.suptitle(f"{dataset_name} (prompt {prompt_idx})", fontsize=24, fontweight='bold', y=0.95)
+    plt.tight_layout()
+    save_path_block = os.path.join(block_hit_folder, f"{file_suffix}.png")
+    plt.savefig(save_path_block, dpi=300, bbox_inches='tight')
+    print(f"Saved block hit rate plot to {save_path_block}")
+    plt.close(fig1)
 
-    valid_mask = (~np.isnan(y_vals))
-    if valid_mask.sum() >= 2:
-        try:
-            # Use scipy.optimize.curve_fit for robust fitting
-            popt, pcov = curve_fit(exp_func, x_vals[valid_mask], y_vals[valid_mask], p0=[0.9], bounds=(0, 1))
-            exp_fit_f = popt[0]
-            exp_fit_curve = exp_func(x_vals, exp_fit_f)
-            
-            ax2.plot(
-                block_indices,
-                exp_fit_curve,
-                alpha=0.8,
-                linewidth=2.0,
-                linestyle=':',
-                color='red',
-                marker=None,
-                label='Exp fit'
-            )
-            
-            f_quarter = exp_fit_f ** 0.25
-            ax2.text(
-                0.98,
-                0.65,
-                f"f = {f_quarter:.2f}",
-                transform=ax2.transAxes,
-                fontsize=16,
-                verticalalignment='top',
-                horizontalalignment='right',
-                bbox=dict(boxstyle='round', facecolor='white', alpha=0.7)
-            )
-        except Exception as e:
-            print(f"Fitting failed: {e}")
+    # 두 번째 그래프: Optimal coefficient & Hit rate → task_name/coeff_hit/
+    fig2, ax2 = plt.subplots(1, 1, figsize=(7.5, 5))
+    ax2_twin = ax2.twinx()
+    x_vals = np.array(block_indices, dtype=np.float64)
+    y_vals = np.array(optimal_coefficients, dtype=np.float64)
+
+    ax2.plot(
+        x_vals,
+        y_vals,
+        alpha=0.9,
+        linewidth=2.5,
+        linestyle='-',
+        color=color,
+        marker='o',
+        markersize=4,
+        label='Coefficient',
+    )
+
+    def sigmoid_func(x, a, b):
+        return 1/(1+np.exp(a*(x-b)))
     
-    ax2_twin.plot(block_indices, avg_hit_rates, 
-                  alpha=0.7, linewidth=2.0, linestyle='--',
-                  color=color, marker='s', markersize=3, label='Hit rate')
+    def gaussian_func(x, c, d):
+        return np.exp(-(x-c)**2/(2*d**2))
     
-    ax2.set_title(f"Optimal contribution coefficients & Hit rates", fontsize=22)
-    ax2.set_xlabel("Block index", fontsize=22)
+    popt1, _ = curve_fit(
+        sigmoid_func,
+        x_vals,
+        y_vals,
+        p0=[1.0, 16.0],
+        bounds=((0, 0), (np.inf, np.inf)),
+    )
+    
+    sigmoid_fit_curve = sigmoid_func(x_vals, *popt1)
+    
+    y_residual = y_vals - sigmoid_fit_curve
+    
+    popt2, _ = curve_fit(
+        gaussian_func,
+        x_vals,
+        y_residual,
+        p0=[16.0, 1.0],
+        bounds=((0, 0), (np.inf, np.inf)),
+    )
+    
+    gaussian_fit_curve = gaussian_func(x_vals, *popt2)
+    
+    optimal_fit_curve = sigmoid_fit_curve + gaussian_fit_curve
+    
+    ax2.plot(
+        block_indices,
+        optimal_fit_curve,
+        alpha=0.8,
+        linewidth=2.0,
+        linestyle=':',
+        color='red',
+        marker=None,
+        label='Optimal fit',
+    )
+    # f_quarter = exp_fit_f# ** 0.25
+    ax2.text(
+        0.98,
+        0.65,
+        f"a = {popt1[0]:.2f}, b = {popt1[1]:.2f},\nc = {popt2[0]:.2f}, d = {popt2[1]:.2f}",
+        transform=ax2.transAxes,
+        fontsize=16,
+        verticalalignment='top',
+        horizontalalignment='right',
+        bbox=dict(boxstyle='round', facecolor='white', alpha=0.7),
+    )
+
+    ax2_twin.plot(
+        block_indices,
+        hit_rates,
+        alpha=0.7,
+        linewidth=2.0,
+        linestyle='--',
+        color=color,
+        # marker='s',
+        # markersize=3,
+        label='Hit rate',
+    )
+    ax2.set_xlabel("QueryBlock index", fontsize=22)
     ax2.set_ylabel("Optimal coefficient", fontsize=22, color='black')
     ax2.tick_params(labelsize=22, axis='y', labelcolor='black')
     ax2.set_ylim(-0.05, 1.05)
     ax2.grid(True, linestyle='--', alpha=0.5, linewidth=0.8)
-    
     ax2_twin.set_ylabel("Hit rate", fontsize=22, color='black')
     ax2_twin.tick_params(labelsize=22, axis='y', labelcolor='black')
-    
-    ax2.text(0.98, 0.50, f"Prefill: {avg_seq_len:.0f}\nGen: {avg_gen_len:.0f}", 
-             transform=ax2.transAxes, fontsize=16, verticalalignment='top', horizontalalignment='right',
-             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-    
-    group_folder = os.path.join(workpath, "plots", group_name.replace(' ', '_'))
-    os.makedirs(group_folder, exist_ok=True)
-    
-    plt.tight_layout(rect=[0, 0, 1, 0.92])
-    title = f"{group_name} - {dataset_name}"
-    fig.suptitle(title, fontsize=24, fontweight='bold', y=0.95)
-    
-    save_path = os.path.join(
-        group_folder,
-        f"{dataset_name.replace(' ', '_')}_averaged_result.png"
+    ax2.text(
+        0.98,
+        0.50,
+        f"Prefill: {seq_len:.0f}tokens\nGen: {gen_len:.0f}tokens",
+        transform=ax2.transAxes,
+        fontsize=16,
+        verticalalignment='top',
+        horizontalalignment='right',
+        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5),
     )
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    print(f"Saved averaged plot to {save_path}")
-    plt.close()
+    fig2.suptitle(f"{dataset_name} (prompt {prompt_idx})", fontsize=24, fontweight='bold', y=0.95)
+    plt.tight_layout()
+    save_path_coeff = os.path.join(coeff_hit_folder, f"{file_suffix}.png")
+    plt.savefig(save_path_coeff, dpi=300, bbox_inches='tight')
+    print(f"Saved coefficient & hit rate plot to {save_path_coeff}")
+    plt.close(fig2)
 
 
 # ---------------------------------------------------------
@@ -329,12 +345,10 @@ for dataset in dataset_list:
         dataset_prompts[dataset_name].append((dataset_name, input_prompt))
 
 task_group = {
-    "Code Complete": ["repobench-p", "lcc"],
-    "Few Shot": ["trec", "triviaqa", "samsum", "lsht"],
-    "Single-doc QA": ["narrativeqa", "qasper", "multifieldqa_en", "multifieldqa_zh"],
-    "Multi-doc QA": ["hotpotqa", "2wikimqa", "musique", "dureader"],
-    "Summarization": ["gov_report", "qmsum", "multi_news", "vcsum"],
-    "Passage Retrieval": ["passage_retrieval_en", "passage_retrieval_zh", "passage_count"],
+    "Few Shot": ["samsum"],
+    "Single-doc QA": ["qasper"],
+    "Multi-doc QA": ["hotpotqa"],
+    "Summarization": ["gov_report"],
 }
 
 # 각 데이터셋별로 num_items개씩 문장을 뽑되,
@@ -384,16 +398,14 @@ for dataset_name, selected_items in dataset_selected_data.items():
     task_name = dataset2task.get(dataset_name, "UnknownTask")
     print(f"\n>>> Processing dataset: {dataset_name} (task: {task_name}, {len(selected_items)} items)")
     sentences_info = {}
-    all_block_hit_rates, all_optimal_coefficients, all_hit_rates = [], [], []
-    all_seq_lens, all_gen_lens = [], []
-    
+
     for idx, (ds_name, prompt) in enumerate(selected_items):
         print(f">>> Processing item {idx+1}/{len(selected_items)} from {ds_name}")
         prompt_with_format = f"[INST]{prompt}[/INST]"
         input_enc = tokenizer(prompt_with_format, return_tensors="pt")
         input_ids = input_enc.input_ids.to(attention_model.device)
         attention_mask = input_enc.attention_mask.to(attention_model.device)
-        
+
         if input_ids.size(1) > 7500:
             input_ids = torch.cat([input_ids[:, :3750], input_ids[:, -3750:]], dim=1)
             attention_mask = torch.cat([attention_mask[:, :3750], attention_mask[:, -3750:]], dim=1)
@@ -413,36 +425,33 @@ for dataset_name, selected_items in dataset_selected_data.items():
                 return_dict_in_generate=True,
                 output_attentions=True
             )
-        
+
         prefill_attention_maps = torch.stack(prefill_attention_list, dim=0).squeeze(1)
         decoding_attention_maps = [torch.stack(output.attentions[i], dim=0).squeeze(1).to("cpu") for i in range(1, len(output.attentions))]
         generated_token_length = len(decoding_attention_maps)
-        
+
         first_decoding_attention_map = decoding_attention_maps[0]
         answer_score = torch.zeros((*first_decoding_attention_map.shape[:2], seq_len), device=first_decoding_attention_map.device)
 
         for atmaps in decoding_attention_maps:
             answer_score += atmaps[:,:,0,:seq_len]
-            
+
         answer_indices = answer_score.topk(token_budget, dim=2).indices
         max_window, block_size = 128, 4
-        
+
         block_hit_rates_data = analyze_block_hit_rate(prefill_attention_maps, answer_indices, max_window, token_budget, block_size)
         optimal_coefficients, hit_rates = analyze_optimal_contribution(prefill_attention_maps, answer_indices, max_window, token_budget, block_size)
-        
-        all_block_hit_rates.append(block_hit_rates_data)
-        all_optimal_coefficients.append(optimal_coefficients)
-        all_hit_rates.append(hit_rates)
-        all_seq_lens.append(seq_len)
-        all_gen_lens.append(generated_token_length)
-        
+
+        plot_single_result(
+            task_name, dataset_name, idx,
+            block_hit_rates_data, optimal_coefficients, hit_rates,
+            workpath, seq_len, generated_token_length
+        )
+
         sentences_info[idx] = {
             "index": idx, "dataset": dataset_name,
             "input_prompt": prompt, "seq_len": int(seq_len), "gen_len": int(generated_token_length)
         }
-    
-    avg_seq_len, avg_gen_len = np.mean(all_seq_lens), np.mean(all_gen_lens)
-    plot_averaged_result(task_name, dataset_name, all_block_hit_rates, all_optimal_coefficients, all_hit_rates, workpath, avg_seq_len, avg_gen_len)
     
     # 문장 정보도 Task 폴더 안에 저장
     sentences_group_folder = os.path.join(workpath, "sentences", task_name.replace(' ', '_'))
