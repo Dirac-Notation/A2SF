@@ -326,19 +326,22 @@ class A2SFEnv:
         
         return self.context_encoder.encode_context(prompt, generation_length, token_budget).to(self.device, dtype=torch.float32)
     
-    def step(self, action: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, Any]]:
+    def step(self, action: Tuple[torch.Tensor, torch.Tensor]) -> Tuple[torch.Tensor, Dict[str, Any]]:
         """
         Args:
-            action: forgetting_factor tensor (scalar) in (0, 1]
+            action: tuple of (a, b) tensors for sigmoid cache parameters
         Returns:
             reward, info
         """
-        forgetting_val = float(action.item() if isinstance(action, torch.Tensor) else action)
+        a_val, b_val = action
+        a_val = float(a_val.item() if isinstance(a_val, torch.Tensor) else a_val)
+        b_val = float(b_val.item() if isinstance(b_val, torch.Tensor) else b_val)
 
         with torch.no_grad():
             result = self.runner.run_with_compression(
                 prompt=self.current_prompt,
-                forgetting_factor=forgetting_val,
+                a=a_val,
+                b=b_val,
                 generation_length=self.current_generation_length,
                 token_budget=self.current_token_budget,
                 answer=self.current_answer,
@@ -348,7 +351,8 @@ class A2SFEnv:
         reward = torch.tensor(float(result.reward), device=self.device)
         
         info = {
-            "forgetting_factor": forgetting_val,
+            "a": a_val,
+            "b": b_val,
             "reward": result.reward,
             "generated_text": result.generated_text,
         }
