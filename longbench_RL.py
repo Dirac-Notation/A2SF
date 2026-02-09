@@ -25,6 +25,7 @@ def parse_args(args=None):
     parser.add_argument('--model', type=str, required=True, choices=["llama", "llama2", "llama3", "opt"])
     parser.add_argument('--budget', type=int, default=100)
     parser.add_argument('--task', type=int, nargs='*', default=None, help="List of task numbers (0-5). If not specified, all tasks will be executed.")
+    parser.add_argument('--datasets', type=str, nargs='*', default=None, help="List of specific dataset names to process. If specified, only these datasets will be processed (ignoring --task).")
     parser.add_argument('--rl_checkpoint', type=str, required=True, help="Path to RL model checkpoint (.pt file)")
     parser.add_argument('--skip_eval', action='store_true', help="Skip evaluation after prediction")
     return parser.parse_args(args)
@@ -161,12 +162,9 @@ def get_pred_rl(data, max_length, max_gen, dataset, model, tokenizer, out_path, 
                     max_new_tokens=max_gen,
                     num_beams=1,
                     do_sample=False,
-                    temperature=1.0,
                     min_length=context_length+1,
                     eos_token_id=[tokenizer.eos_token_id, tokenizer.encode("\n", add_special_tokens=False)[-1]],
                     pad_token_id=tokenizer.eos_token_id,
-                    stop_strings="[/INST]",
-                    tokenizer=tokenizer
                 )[0]
             else:
                 output = model.generate(
@@ -175,10 +173,7 @@ def get_pred_rl(data, max_length, max_gen, dataset, model, tokenizer, out_path, 
                     max_new_tokens=max_gen,
                     num_beams=1,
                     do_sample=False,
-                    temperature=1.0,
                     pad_token_id=tokenizer.eos_token_id,
-                    stop_strings="[/INST]",
-                    tokenizer=tokenizer
                 )[0]
         
         pred = tokenizer.decode(output[context_length:], skip_special_tokens=True)
@@ -212,27 +207,6 @@ if __name__ == '__main__':
     print(f"RL Policy loaded successfully")
     print(f"Config: {rl_config}")
 
-    # Task 이름 리스트
-    task_list = [
-        "Code Complete",
-        "Few Shot",
-        "Single-doc QA",
-        "Multi-doc QA",
-        "Passage Retrieval",
-        "Summarization",
-    ]
-    
-    # Task 번호를 task 이름으로 변환
-    if args.task is None:
-        selected_tasks = task_list
-    else:
-        selected_tasks = []
-        for task_num in args.task:
-            if 0 <= task_num < len(task_list):
-                selected_tasks.append(task_list[task_num])
-            else:
-                print(f"Warning: Task number {task_num} is out of range (0-{len(task_list)-1}), skipping")
-    
     dataset2maxlen = json.load(open("config/dataset2maxlen.json", "r"))
     
     if not os.path.exists("result_txt/pred"):
@@ -240,34 +214,63 @@ if __name__ == '__main__':
     
     output_dir = None
     
-    for task in selected_tasks:
-        datasets = data_group[task]
+    # If --datasets is specified, process only those datasets
+    if args.datasets is not None:
+        selected_datasets = args.datasets
+        print(f"Processing specified datasets: {selected_datasets}")
+    else:
+        # Otherwise, use task-based selection
+        task_list = [
+            "Code Complete",
+            "Few Shot",
+            "Single-doc QA",
+            "Multi-doc QA",
+            "Passage Retrieval",
+            "Summarization",
+        ]
         
-        for dataset in datasets:
-            print(f"\nProcessing dataset: {dataset}")
-            
-            jsonl_path = f"datasets/longbench/{dataset}.jsonl"
-            if not os.path.exists(jsonl_path):
-                print(f"Warning: {jsonl_path} not found, skipping {dataset}")
-                continue
-            data = load_jsonl_file(jsonl_path)
-            
-            # Create output directory with RL indicator
-            output_dir = f"result_txt/pred/{args.model}_sigmoid_{args.budget}_RL"
-            if not os.path.exists(output_dir):
-                os.makedirs(output_dir)
-            out_path = f"{output_dir}/{dataset}.jsonl"
-            
-            # Clear existing file
-            if os.path.exists(out_path):
-                os.remove(out_path)
-            
-            max_gen = dataset2maxlen[dataset]
-            
-            get_pred_rl(data, max_length, max_gen, dataset, model, tokenizer, out_path, 
-                       model_name, rl_policy, context_encoder, rl_config, device, args.budget)
-            
-            print(f"Completed {dataset} with RL policy")
+        # Task 번호를 task 이름으로 변환
+        if args.task is None:
+            selected_tasks = task_list
+        else:
+            selected_tasks = []
+            for task_num in args.task:
+                if 0 <= task_num < len(task_list):
+                    selected_tasks.append(task_list[task_num])
+                else:
+                    print(f"Warning: Task number {task_num} is out of range (0-{len(task_list)-1}), skipping")
+        
+        # Collect all datasets from selected tasks
+        selected_datasets = []
+        for task in selected_tasks:
+            selected_datasets.extend(data_group[task])
+    
+    # Process each dataset
+    for dataset in selected_datasets:
+        print(f"\nProcessing dataset: {dataset}")
+        
+        jsonl_path = f"datasets/longbench/{dataset}.jsonl"
+        if not os.path.exists(jsonl_path):
+            print(f"Warning: {jsonl_path} not found, skipping {dataset}")
+            continue
+        data = load_jsonl_file(jsonl_path)
+        
+        # Create output directory with RL indicator
+        output_dir = f"result_txt/pred/{args.model}_sigmoid_{args.budget}_RL"
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        out_path = f"{output_dir}/{dataset}.jsonl"
+        
+        # Clear existing file
+        if os.path.exists(out_path):
+            os.remove(out_path)
+        
+        max_gen = dataset2maxlen[dataset]
+        
+        get_pred_rl(data, max_length, max_gen, dataset, model, tokenizer, out_path, 
+                   model_name, rl_policy, context_encoder, rl_config, device, args.budget)
+        
+        print(f"Completed {dataset} with RL policy")
     
     # Evaluate results if not skipped
     if not args.skip_eval and output_dir and os.path.exists(output_dir):
