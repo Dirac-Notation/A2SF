@@ -33,7 +33,7 @@ def set_seed(seed):
     torch.backends.cudnn.deterministic = True
     torch.cuda.manual_seed_all(seed)
 
-def load_model_for_generation(model_name, gpu_list=None):
+def load_model_for_generation(model_name):
     with open('./config/model2path.json', 'r') as f:
         model2path = json.load(f)
     
@@ -289,7 +289,7 @@ def main(args):
     set_seed(42)
     
     model_name = args.model
-    model, tokenizer = load_model_for_generation(model_name, args.gpus)
+    model, tokenizer = load_model_for_generation(model_name)
     
     print(f"\n{'='*50}")
     print(f"Loading datasets with 8K token filtering ({MIN_TOKENS}-{MAX_TOKENS} tokens)")
