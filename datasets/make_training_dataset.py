@@ -255,8 +255,6 @@ def generate_answer(model, tokenizer, sample: Dict[str, Any], model_name: str) -
             do_sample=False,
             temperature=1.0,
             pad_token_id=tokenizer.eos_token_id,
-            stop_strings="[/INST]",
-            tokenizer=tokenizer,
         )
 
     # Handle output tensor or dict
