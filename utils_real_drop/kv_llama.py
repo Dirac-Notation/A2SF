@@ -508,7 +508,7 @@ class KVLlamaForCausalLM(LlamaForCausalLM):
         
         # Create compressed cache using our KVCache
         from .kv_cache import KVCache
-        layer_caches = []
+        self.layer_caches = []
         
         for idx, layer in enumerate(self.model.layers):
             device = next(layer.parameters()).device
@@ -531,9 +531,9 @@ class KVLlamaForCausalLM(LlamaForCausalLM):
                 raise ValueError(f"Unsupported compression method: {self.compression_config.compression_method}")
             
             layer_cache.init_cache(self.compression_config, layer_idx=idx)
-            layer_caches.append(layer_cache)
+            self.layer_caches.append(layer_cache)
         
-        model_kwargs[cache_name] = KVCache(layer_caches=layer_caches)
+        model_kwargs[cache_name] = KVCache(layer_caches=self.layer_caches)
 
     def prepare_inputs_for_generation(
         self, input_ids, past_key_values=None, attention_mask=None, inputs_embeds=None, **kwargs

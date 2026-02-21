@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, Any, Tuple
 from dataclasses import dataclass
+from typing import List
 
 from .main import A2SFRLConfig
 
@@ -313,14 +314,14 @@ class A2SFEnv:
         # Current episode cache
         self.current_prompt = None
         self.current_dataset = None
-        self.current_answer = None
+        self.current_answer_indices = None
         self.current_generation_length = None
         self.current_token_budget = None
     
-    def encode_to_state(self, prompt: str, generation_length: int, answer: str, token_budget: int, dataset: str = None) -> torch.Tensor:
+    def encode_to_state(self, prompt: str, generation_length: int, answer_indices: List, token_budget: int, dataset: str = None) -> torch.Tensor:
         self.current_prompt = prompt
         self.current_dataset = dataset
-        self.current_answer = answer
+        self.current_answer_indices = answer_indices
         self.current_generation_length = generation_length
         self.current_token_budget = token_budget
         
@@ -342,9 +343,8 @@ class A2SFEnv:
                 prompt=self.current_prompt,
                 a=a_val,
                 b=b_val,
-                generation_length=self.current_generation_length,
                 token_budget=self.current_token_budget,
-                answer=self.current_answer,
+                answer_indices=self.current_answer_indices,
                 dataset=self.current_dataset,
             )
         
@@ -354,7 +354,6 @@ class A2SFEnv:
             "a": a_val,
             "b": b_val,
             "reward": result.reward,
-            "generated_text": result.generated_text,
         }
         
         return reward, info
