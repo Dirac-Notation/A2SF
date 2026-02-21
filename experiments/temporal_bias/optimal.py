@@ -202,7 +202,7 @@ def plot_single_result(group_name, dataset_name, prompt_idx, block_hit_rates, op
         horizontalalignment='right',
         bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5),
     )
-    fig1.suptitle(f"{dataset_name} (prompt {prompt_idx})", fontsize=24, fontweight='bold', y=0.95)
+    ax1.set_title(f"{dataset_name} (prompt {prompt_idx})", fontsize=24, fontweight='bold')
     plt.tight_layout()
     save_path_block = os.path.join(block_hit_folder, f"{file_suffix}.png")
     plt.savefig(save_path_block, dpi=300, bbox_inches='tight')
@@ -230,9 +230,6 @@ def plot_single_result(group_name, dataset_name, prompt_idx, block_hit_rates, op
     def sigmoid_func(x, a, b):
         return 1/(1+np.exp(a*(x-b)))
     
-    def gaussian_func(x, c, d):
-        return np.exp(-(x-c)**2/(2*d**2))
-    
     popt1, _ = curve_fit(
         sigmoid_func,
         x_vals,
@@ -243,35 +240,20 @@ def plot_single_result(group_name, dataset_name, prompt_idx, block_hit_rates, op
     
     sigmoid_fit_curve = sigmoid_func(x_vals, *popt1)
     
-    y_residual = y_vals - sigmoid_fit_curve
-    
-    popt2, _ = curve_fit(
-        gaussian_func,
-        x_vals,
-        y_residual,
-        p0=[16.0, 1.0],
-        bounds=((0, 0), (np.inf, np.inf)),
-    )
-    
-    gaussian_fit_curve = gaussian_func(x_vals, *popt2)
-    
-    optimal_fit_curve = sigmoid_fit_curve + gaussian_fit_curve
-    
     ax2.plot(
         block_indices,
-        optimal_fit_curve,
+        sigmoid_fit_curve,
         alpha=0.8,
         linewidth=2.0,
         linestyle=':',
         color='red',
         marker=None,
-        label='Optimal fit',
+        label='Sigmoid fit',
     )
-    # f_quarter = exp_fit_f# ** 0.25
     ax2.text(
         0.98,
         0.65,
-        f"a = {popt1[0]:.2f}, b = {popt1[1]:.2f},\nc = {popt2[0]:.2f}, d = {popt2[1]:.2f}",
+        f"a = {popt1[0]:.2f}, b = {popt1[1]:.2f}",
         transform=ax2.transAxes,
         fontsize=16,
         verticalalignment='top',
@@ -307,7 +289,7 @@ def plot_single_result(group_name, dataset_name, prompt_idx, block_hit_rates, op
         horizontalalignment='right',
         bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5),
     )
-    fig2.suptitle(f"{dataset_name} (prompt {prompt_idx})", fontsize=24, fontweight='bold', y=0.95)
+    ax2.set_title(f"{dataset_name} (prompt {prompt_idx})", fontsize=24, fontweight='bold')
     plt.tight_layout()
     save_path_coeff = os.path.join(coeff_hit_folder, f"{file_suffix}.png")
     plt.savefig(save_path_coeff, dpi=300, bbox_inches='tight')
