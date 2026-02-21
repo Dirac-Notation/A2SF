@@ -5,7 +5,7 @@ trap "kill 0" EXIT
 
 budget=128
 model=llama3
-rl_checkpoint=policy_850.pt
+rl_checkpoint=policy_950.pt
 
 # 16개 데이터셋을 4개 그룹으로 나눔 (code와 summarization 데이터셋이 한 그룹에 몰리지 않도록 분산)
 # 그룹 1: repobench-p (code), narrativeqa, hotpotqa, trec
