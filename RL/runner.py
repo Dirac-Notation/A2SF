@@ -11,13 +11,11 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils import load_model, set_seed, CompressionConfig
 from .main import A2SFRLConfig
-from rouge import Rouge
 
 @dataclass
 class ModelResult:
     reward: float
     inference_time: float
-    generated_text: str
 
 class A2SFModelRunner:
     def __init__(self, config: A2SFRLConfig):
@@ -26,121 +24,99 @@ class A2SFModelRunner:
         
         self.model, self.tokenizer = load_model(config.model_name)
         
-        with open("config/model2maxlen.json", "r") as f:
-            self.model2maxlen = json.load(f)
-        
-        self.max_length = self.model2maxlen[config.model_name]
-        
-        # Initialize Rouge scorer for ROUGE score calculation
-        self.rouge_scorer = Rouge()
-    
-    def prepare_prompt(self, prompt: str, dataset: str) -> Tuple[torch.Tensor, List[str]]:
-        tokenized_prompt = self.tokenizer(prompt, truncation=False, return_tensors="pt").input_ids[0]
-        
-        if len(tokenized_prompt) > self.max_length:
-            half = int(self.max_length / 2)
-            prompt = self.tokenizer.decode(tokenized_prompt[:half], skip_special_tokens=True) + \
-                    self.tokenizer.decode(tokenized_prompt[-half:], skip_special_tokens=True)
-        
-        if dataset not in ["trec", "triviaqa", "samsum", "lsht", "lcc", "repobench-p"]:
-            if "llama" in self.config.model_name:
-                prompt = f"[INST]{prompt}[/INST]"
-        
-        return prompt
+        self.num_layers = self.model.config.num_hidden_layers
+        self.num_attention_heads = self.model.config.num_attention_heads
+        self.num_kv_heads = self.model.config.num_key_value_heads
+        self.gqa_group_size = self.num_attention_heads // self.num_kv_heads
     
     def run_with_compression(
         self,
         prompt: str,
         a: float,
         b: float,
-        generation_length: int,
         token_budget: int,
-        answer: str,
+        answer_indices: List[List[List[int]]],
         dataset: str = None,
     ) -> ModelResult:
         start_time = time.time()
         
         input_tensor = self.tokenizer(prompt, truncation=False, return_tensors="pt")
-        
         input_ids = input_tensor.input_ids.to(self.model.device)
         attention_mask = input_tensor.attention_mask.to(self.model.device)
-        context_length = input_ids.size(1)
         
         compression_config = self._create_compression_config(a, b, token_budget)
-        
         self.model.init_cache(compression_config)
         
-        # Generate text with compression
-        generated_text_compressed = self._generate_text(input_ids, attention_mask, max_new_tokens=generation_length)
-        
-        inference_time = time.time() - start_time
-        
-        # Compute similarity between full cache and compressed cache generated texts
-        reward = self._compute_text_similarity(answer, generated_text_compressed)
-        
-        return ModelResult(
-            reward=reward,
-            inference_time=inference_time,
-            generated_text=generated_text_compressed
-        )
-    
-    def _generate_text(self, input_ids: torch.Tensor, attention_mask: torch.Tensor, max_new_tokens: int) -> str:
-        """Generate text using the model with current cache configuration"""
-        context_length = input_ids.size(1)
-        
         with torch.no_grad():
-            # Generate using model.generate() (includes forward pass)
-            output = self.model.generate(
+            self.model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                max_new_tokens=max_new_tokens,
+                max_new_tokens=1,
                 do_sample=False,
                 temperature=1.0,
                 pad_token_id=self.tokenizer.eos_token_id,
-            )[0]
+            )
         
-        # Decode only the generated part (excluding the input prompt)
-        generated_text = self.tokenizer.decode(output[context_length:], skip_special_tokens=True)
+        # Extract selected_indices from each layer cache after prefill
+        model_selected = []
+        for layer_idx in range(self.num_layers):
+            layer_cache = self.model.layer_caches[layer_idx]
+            model_selected.append(layer_cache.selected_indices)
         
-        return generated_text
+        inference_time = time.time() - start_time
+        print(f"Inference time: {inference_time}")
+        
+        reward = self._compute_jaccard_reward(answer_indices, model_selected)
+        
+        return ModelResult(reward=reward, inference_time=inference_time)
     
-    def _compute_text_similarity(self, text1: str, text2: str) -> float:
+    def _compute_jaccard_reward(
+        self,
+        answer_indices: List[List[List[int]]],
+        model_selected: List[Optional[torch.Tensor]],
+    ) -> float:
         """
-        Compute reward based on ROUGE score
+        Compute average Jaccard similarity between ground-truth answer_indices
+        and model's selected_indices across all (layer, kv_head) pairs.
         
-        Args:
-            text1: Reference text (ground truth answer)
-            text2: Generated text (prediction)
-        
-        Returns:
-            ROUGE-based reward score in [0, 1]
+        answer_indices: [num_layers][num_attention_heads][128]
+        model_selected: list of tensors (1, num_kv_heads, select_budget) or None per layer
         """
-        if not text1 or not text2:
+        jaccard_scores = []
+        
+        for layer_idx in range(self.num_layers):
+            sel = model_selected[layer_idx]
+            if sel is None:
+                continue
+            
+            # sel: (1, num_kv_heads, select_budget) -> (num_kv_heads, select_budget)
+            sel = sel[0]
+            
+            for kv_head_idx in range(self.num_kv_heads):
+                # Union of ground-truth indices across attention heads in this GQA group
+                gt_set = set()
+                for h in range(kv_head_idx * self.gqa_group_size,
+                               (kv_head_idx + 1) * self.gqa_group_size):
+                    gt_set.update(answer_indices[layer_idx][h])
+                
+                pred_set = set(sel[kv_head_idx].cpu().tolist())
+                
+                intersection = len(gt_set & pred_set)
+                union = len(gt_set | pred_set)
+                jaccard = intersection / union if union > 0 else 1.0
+                jaccard_scores.append(jaccard)
+        
+        if not jaccard_scores:
             return 0.0
-        
-        # Compute ROUGE Score
-        rouge_score = self._compute_rouge_score(text1, text2)
-        
-        # Reward is simply the ROUGE score
-        return rouge_score
-    
-    def _compute_rouge_score(self, text1: str, text2: str) -> float:
-        """Compute ROUGE-L F1 score between two texts"""
-        # Rouge expects [prediction], [reference] format
-        # text1 is reference (ground truth), text2 is prediction (generated)
-        scores = self.rouge_scorer.get_scores([text2], [text1], avg=True)
-        rouge_l_f1 = scores["rouge-l"]["f"]
-        return float(rouge_l_f1)
+        return sum(jaccard_scores) / len(jaccard_scores)
     
     def _create_compression_config(self, a: float, b: float, token_budget: int) -> Dict[str, Any]:
         base_config = CompressionConfig()
         
-        num_layers = self.model.config.num_hidden_layers
         base_config.compression_method = "sigmoid"
         base_config.total_budget = token_budget
-        base_config.layerwise_ratios = [1.0 for _ in range(num_layers)]
+        base_config.layerwise_ratios = [1.0 for _ in range(self.num_layers)]
         base_config.local_ratios = 0.125
-        # Sigmoid cache parameters
         base_config.a = float(a)
         base_config.b = float(b)
         

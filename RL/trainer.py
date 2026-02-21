@@ -360,7 +360,7 @@ class A2SFTrainer:
                 prompt_length = tokenized_prompt.input_ids.size(1)
                 
                 # Token budget candidates: [64, 128, 256, 512, 1024, 2048]
-                token_budget_candidates = [64, 128, 256, 512, 1024, 2048]
+                token_budget_candidates = [128]
                 # Filter candidates that are less than prompt length
                 valid_budgets = [budget for budget in token_budget_candidates if budget < prompt_length]
                 
@@ -374,7 +374,7 @@ class A2SFTrainer:
                 state = self.env.encode_to_state(
                     prompt=prompt,
                     generation_length=episode_data["generation_length"],
-                    answer=episode_data["generated_text"],
+                    answer_indices=episode_data["answer_indices"],
                     token_budget=token_budget,
                     dataset=episode_data["dataset"],
                 )
@@ -440,7 +440,7 @@ class A2SFTrainer:
             prompt_length = tokenized_prompt.input_ids.size(1)
             
             # Token budget candidates: [64, 128, 256, 512, 1024, 2048]
-            token_budget_candidates = [64, 128, 256, 512, 1024, 2048]
+            token_budget_candidates = [128]
             # Filter candidates that are less than prompt length
             valid_budgets = [budget for budget in token_budget_candidates if budget < prompt_length]
             
@@ -453,7 +453,7 @@ class A2SFTrainer:
             state = self.env.encode_to_state(
                 prompt=prompt,
                 generation_length=episode_data["generation_length"],
-                answer=episode_data["generated_text"],
+                answer_indices=episode_data["answer_indices"],
                 token_budget=token_budget,
                 dataset=episode_data["dataset"],
             )
