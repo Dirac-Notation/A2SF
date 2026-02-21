@@ -7,22 +7,21 @@ from typing import Dict, List, Any, Optional
 from collections import defaultdict
 import torch
 import argparse
-from tqdm import tqdm
-from transformers import AutoTokenizer
-from datasets import load_dataset
-
-# Add project root to Python path
-project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
-
-from utils_real_drop import KVLlamaForCausalLM
-from utils import CompressionConfig
 import numpy as np
 
+from tqdm import tqdm
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from datasets import load_dataset
+
 PROMPT_LENGTH = 7500
-MIN_TOKENS = 1000   # 필터링을 위한 최소 토큰 수
+MIN_TOKENS = 4000   # 필터링을 위한 최소 토큰 수
 MAX_TOKENS = 7500  # 필터링을 위한 최대 토큰 수
+
+MAX_LEN = {
+    "summarization": 512,
+    "qa": 64,
+    "retrieval": 32
+}
 
 def set_seed(seed):
     torch.manual_seed(seed)
@@ -33,7 +32,7 @@ def set_seed(seed):
     torch.backends.cudnn.deterministic = True
     torch.cuda.manual_seed_all(seed)
 
-def load_model_for_generation(model_name, gpu_list=None):
+def load_model_for_generation(model_name):
     with open('./config/model2path.json', 'r') as f:
         model2path = json.load(f)
     
@@ -42,7 +41,7 @@ def load_model_for_generation(model_name, gpu_list=None):
     print(f"Loading KVLlamaForCausalLM: {model_name} from {model_path}")
     
     tokenizer = AutoTokenizer.from_pretrained(model_path)
-    model = KVLlamaForCausalLM.from_pretrained(
+    model = AutoModelForCausalLM.from_pretrained(
         model_path, 
         torch_dtype=torch.bfloat16, 
         device_map="auto",
@@ -82,7 +81,7 @@ def load_zeroscrolls_datasets(tokenizer) -> List[Dict[str, Any]]:
     # All ZeroSCROLLS subsets
     subsets = [
         "gov_report", "summ_screen_fd", "qmsum", "quality", "qasper",
-        "narrative_qa", "musique", "hotpot_qa", "space_digest", "book_sum_sort"
+        "narrative_qa", "musique", "space_digest", "book_sum_sort"
     ]
     
     task_type_mapping = {
@@ -113,19 +112,15 @@ def load_zeroscrolls_datasets(tokenizer) -> List[Dict[str, Any]]:
             # Format prompt
             prompt = format_prompt_for_task(task_type, context="", question=all_input)
             
-            # Filter by token length (8K 근처)
+            # Filter by token length
             token_count = count_tokens(tokenizer, prompt)
             if token_count < MIN_TOKENS or token_count > MAX_TOKENS:
                 continue
             
-            answer = example.get("output", "")
-            output_count = count_tokens(tokenizer, answer)
-            if output_count == 0:
-                continue
+            output_count = MAX_LEN[task_type]
 
             sample = {
                 "input_prompt": prompt,
-                "answer": answer,
                 "generation_length": output_count,
                 "dataset": f"zeroscrolls_{subset}",
                 "source": "ZeroSCROLLS",
@@ -198,14 +193,10 @@ def load_leval_datasets(tokenizer) -> List[Dict[str, Any]]:
             if token_count < MIN_TOKENS or token_count > MAX_TOKENS:
                 continue
             
-            answer = example.get("outputs", "")[0]
-            output_count = count_tokens(tokenizer, answer)
-            if output_count == 0:
-                continue
+            output_count = MAX_LEN[task_type]
 
             sample = {
                 "input_prompt": prompt,
-                "answer": answer,
                 "generation_length": output_count,
                 "dataset": f"leval_{subset}",
                 "source": "L-Eval",
@@ -228,14 +219,6 @@ def generate_answer(model, tokenizer, sample: Dict[str, Any], model_name: str) -
     dataset_name = sample.get("dataset", "unknown")
     task_type = sample.get("task_type", "unknown")
 
-    # Initialize full cache (no compression) before each generation
-    compression_config = CompressionConfig()
-    compression_config.compression_method = "full"
-    compression_config.total_budget = None
-    compression_config.layerwise_ratios = None
-    compression_config.local_ratios = None
-    model.init_cache(compression_config)
-
     # Add system prompt for llama models
     if "llama" in model_name:
         prompt_for_gen = f"[INST]{prompt}[/INST]"
@@ -246,44 +229,99 @@ def generate_answer(model, tokenizer, sample: Dict[str, Any], model_name: str) -
     input_ids = encoded.input_ids.to(model.device)
     attention_mask = encoded.attention_mask.to(model.device)
 
-    # Generate text using full cache (no compression) with model.generate()
+    # Prefill 단계에서는 attention을 저장하지 않고 cache만 쌓고,
+    # 이후 디코딩 단계에서만 attention을 모으기 위한 수동 decoding 루프
     with torch.no_grad():
-        output = model.generate(
+        # 1) Prefill: 전체 프롬프트에 대해 한 번만 forward (attention X, cache O)
+        prefill_outputs = model(
             input_ids=input_ids,
             attention_mask=attention_mask,
-            max_new_tokens=generation_length,
-            do_sample=False,
-            temperature=1.0,
-            pad_token_id=tokenizer.eos_token_id,
-            stop_strings="[/INST]",
-            tokenizer=tokenizer,
+            use_cache=True,
+            output_attentions=False,
         )
+        past_key_values = prefill_outputs.past_key_values
 
-    # Handle output tensor or dict
-    if not isinstance(output, torch.Tensor):
-        if hasattr(output, "sequences"):
-            output_ids = output.sequences
+        # 첫 번째 생성 토큰은 prefill의 마지막 토큰 logits에서 greedy로 선택
+        logits = prefill_outputs.logits[:, -1, :]
+        next_token = torch.argmax(logits, dim=-1, keepdim=True)
+
+        generated_tokens = []
+        all_decode_attentions = []
+
+        # attention mask는 생성될 때마다 길이를 1씩 늘려서 유지
+        attention_mask_full = attention_mask
+
+        # 디코딩 루프: 디코딩 단계에서만 output_attentions=True
+        for step in range(generation_length):
+            if step == 0:
+                cur_input_ids = next_token
+            else:
+                # 직전 step의 logits에서 greedy decoding
+                logits = outputs.logits[:, -1, :]
+                cur_input_ids = torch.argmax(logits, dim=-1, keepdim=True)
+
+            generated_tokens.append(cur_input_ids)
+
+            # 전체 sequence 길이에 맞게 attention_mask 확장
+            attention_mask_full = torch.cat(
+                [
+                    attention_mask_full,
+                    attention_mask_full.new_ones((attention_mask_full.size(0), 1)),
+                ],
+                dim=-1,
+            )
+
+            outputs = model(
+                input_ids=cur_input_ids,
+                attention_mask=attention_mask_full,
+                past_key_values=past_key_values,
+                use_cache=True,
+                output_attentions=True,
+            )
+            past_key_values = outputs.past_key_values
+
+            # 디코딩 단계의 attention만 저장
+            all_decode_attentions.append(outputs.attentions)
+
+            # 종료 조건 1: EOS 토큰
+            if tokenizer.eos_token_id is not None and (cur_input_ids == tokenizer.eos_token_id).all():
+                break
+
+            # 종료 조건 2: 생성된 텍스트 안에 '[/INST]'가 나타나는 경우
+            generated_ids_tensor = torch.cat(generated_tokens, dim=-1)
+            decoded_text_step = tokenizer.decode(
+                generated_ids_tensor[0],
+                skip_special_tokens=False
+            )
+            if "[/INST]" in decoded_text_step:
+                break
+
+        if generated_tokens:
+            generated_ids = torch.cat(generated_tokens, dim=-1)
         else:
-            output_ids = output[0]
-    else:
-        output_ids = output
+            generated_ids = input_ids.new_zeros((1, 0))
 
-    if output_ids.dim() == 1:
-        output_ids = output_ids.unsqueeze(0)
+        # 전체 시퀀스 (프롬프트 + 생성 토큰)
+        output_ids = torch.cat([input_ids, generated_ids], dim=-1)
 
-    # Original context length
-    context_length = int(attention_mask[0].sum().item())
+        # 디코딩에서만 모은 attention을 확인할 수 있도록 변수에 남겨둠
+        output = {
+            "sequences": output_ids,
+            "decode_attentions": [torch.cat(all_decode_attention, dim=0) for all_decode_attention in all_decode_attentions],
+        }
 
-    # Generated token IDs after context
-    generated_ids = output_ids[0, context_length:]
-    generated_length = generated_ids.size(0)
-    generated_text = tokenizer.decode(generated_ids, skip_special_tokens=True)
+    first_decode_attention = output["decode_attentions"][0]
+    scores = torch.zeros(*first_decode_attention.shape[:3], input_ids.size(1), device=first_decode_attention.device, dtype=first_decode_attention.dtype)
+    for decode_attention in output["decode_attentions"]:
+        scores += decode_attention[:,:,:,:input_ids.size(1)]
 
+    answer_indices = scores.topk(128, dim=3).indices.squeeze(2).tolist()
+    
     return {
         "dataset": dataset_name,
         "input_prompt": prompt,
-        "generated_text": generated_text,
-        "generation_length": int(generated_length),
+        "generation_length": len(output["decode_attentions"]),
+        "answer_indices": answer_indices,
         "task_type": task_type,
     }
 
@@ -291,7 +329,7 @@ def main(args):
     set_seed(42)
     
     model_name = args.model
-    model, tokenizer = load_model_for_generation(model_name, args.gpus)
+    model, tokenizer = load_model_for_generation(model_name)
     
     print(f"\n{'='*50}")
     print(f"Loading datasets with 8K token filtering ({MIN_TOKENS}-{MAX_TOKENS} tokens)")
@@ -331,64 +369,25 @@ def main(args):
     print(f"\nTotal generated samples: {len(generated_all_samples)}")
     
     # ------------------------------------------------------------------
-    # 2) After generation, balance samples across task types
-    #    by upsampling tasks with fewer samples (duplicate generated data)
-    # ------------------------------------------------------------------
-    task_groups = defaultdict(list)
-    for sample in generated_all_samples:
-        task_type = sample.get("task_type", "unknown")
-        task_groups[task_type].append(sample)
-    
-    # Compute target count as the maximum number of samples among task types
-    if task_groups:
-        max_count = max(len(samples) for samples in task_groups.values())
-    else:
-        max_count = 0
-    
-    balanced_samples = []
-    for task_type, samples in task_groups.items():
-        count = len(samples)
-        balanced_samples.extend(samples)
-    
-        # Upsample by randomly duplicating existing samples for this task
-        if count < max_count and count > 0:
-            extra_needed = max_count - count
-            for _ in range(extra_needed):
-                balanced_samples.append(random.choice(samples))
-    
-    # Shuffle balanced samples to mix tasks
-    random.shuffle(balanced_samples)
-    
-    print(f"\n{'='*50}")
-    print("Task type balancing (before -> after):")
-    for task_type, samples in task_groups.items():
-        before = len(samples)
-        after = max_count if before > 0 else 0
-        print(f"  {task_type:20s}: {before:5d} -> {after:5d}")
-    print(f"{'='*50}")
-    print(f"Total samples after balancing: {len(balanced_samples)}")
-    print(f"{'='*50}")
-    
-    # ------------------------------------------------------------------
-    # 3) Save balanced, generated training data (no additional generation)
+    # 2) Save balanced, generated training data (no additional generation)
     # ------------------------------------------------------------------
     os.makedirs(os.path.dirname(args.output_file), exist_ok=True)
     
     total_samples = 0
     processed_counts = {}
     with open(args.output_file, 'w', encoding='utf-8') as f:
-        for sample in tqdm(balanced_samples, desc="Saving training data"):
+        for sample in tqdm(generated_all_samples, desc="Saving training data"):
             dataset_name = sample.get("dataset", "unknown")
             prompt = sample["input_prompt"]
-            generated_text = sample["generated_text"]
             generation_length = sample["generation_length"]
+            answer_indices = sample["answer_indices"]
     
             try:
                 training_sample = {
                     "dataset": dataset_name,
                     "input_prompt": prompt,
-                    "generated_text": generated_text,
                     "generation_length": generation_length,
+                    "answer_indices": answer_indices
                 }
     
                 f.write(json.dumps(training_sample, ensure_ascii=False, separators=(",", ":")) + "\n")
