@@ -2,7 +2,7 @@ import os
 import sys
 import json
 import random
-
+import time
 import torch
 import torch.optim as optim
 import torch.optim.lr_scheduler as lr_scheduler
@@ -352,6 +352,8 @@ class A2SFTrainer:
                 train_iter = iter(self.train_loader)
                 batch = next(train_iter)
             
+            start_time = time.time()
+            
             # Process each episode in the batch
             for episode_data in batch:
                 # Select random token budget from candidates that are less than prompt length
@@ -402,6 +404,9 @@ class A2SFTrainer:
                 a_val, b_val = action
                 iteration_actions_a.append(round(a_val.item(), 2) if isinstance(a_val, torch.Tensor) else a_val)
                 iteration_actions_b.append(int(b_val.item()) if isinstance(b_val, torch.Tensor) else int(b_val))
+            
+            end_time = time.time()
+            print(f"Time taken for one iteration: {end_time - start_time} seconds")
             
             # Average loss stats across episodes in this iteration
             avg_loss_stats = {
