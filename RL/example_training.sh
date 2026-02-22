@@ -4,7 +4,7 @@
 
 gpu="0"
 model="llama3"
-save_dir="runs/a2sf_rl_all"
+save_dir="runs/a2sf_rl"
 
 echo "Starting A2SF RL Training Example"
 echo "================================="

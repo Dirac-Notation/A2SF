@@ -24,7 +24,7 @@ rcParams.update({
 # ---------------------------------------------------------
 # 2. Data Loading
 # ---------------------------------------------------------
-folder_name = "runs/a2sf_rl_all"
+folder_name = "runs/a2sf_rl"
 data_file = f"{folder_name}/training_progress.jsonl"
 
 iterations = []

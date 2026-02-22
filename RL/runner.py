@@ -64,7 +64,7 @@ class A2SFModelRunner:
             model_selected.append(layer_cache.selected_indices)
         
         inference_time = time.time() - start_time
-        print(f"Inference time: {inference_time}")
+        # print(f"Inference time: {inference_time}")
         
         reward = self._compute_jaccard_reward(answer_indices, model_selected)
         
