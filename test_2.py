@@ -1,24 +1,23 @@
 """
-세 가지 캐시 방식의 결과 비교 테스트:
-1. A2SF Cache (forgetting_factor=1.0)
-2. Snap Cache (observation_window=prompt_length)
-3. Sigmoid Cache (a=10.0, b=prompt_length)
+AutoModelForCausalLM vs KVLlamaForCausalLM (Full Cache) 결과 비교 테스트
 
-동일한 프롬프트에 대해 각 캐시의 생성 결과를 비교합니다.
+KVLlama의 Full 캐시는 압축 없이 모든 KV를 저장하므로,
+일반 AutoModel과 동일한 결과를 생성해야 합니다.
 """
 
 import torch
 import json
-import os
 
-from utils import load_model, set_seed, CompressionConfig
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from utils_real_drop import KVLlamaForCausalLM
+from utils import CompressionConfig, set_seed
 
 PROMPTS = [
     (
         "Answer the following question based on the given context.\n\n"
         "Context: The Eiffel Tower is a wrought-iron lattice tower on the Champ de Mars in Paris, France. "
         "It is named after the engineer Gustave Eiffel, whose company designed and built the tower. "
-        "Locally nicknamed 'La dame de fer', it was constructed from 1887 to 1889 as the centerpiece "
+        "Locally nicknamed La dame de fer, it was constructed from 1887 to 1889 as the centerpiece "
         "of the 1889 World's Fair. The tower is 330 metres tall, about the same height as an 81-storey building. "
         "The tower has three levels for visitors, with restaurants on the first and second levels. "
         "The top level's upper platform is 276 m above the ground. Tickets can be purchased to ascend by stairs "
@@ -137,16 +136,34 @@ PROMPTS = [
 ]
 
 MODEL_NAME = "llama3"
-TOTAL_BUDGET = 128
 MAX_NEW_TOKENS = 64
 SEED = 42
 
 
-def run_generation(model, tokenizer, input_ids, attention_mask, config, max_new_tokens, seed):
-    """주어진 config로 모델 생성을 수행하고 결과를 반환"""
-    model.init_cache(config)
+def load_auto_model(model_path):
+    """일반 AutoModelForCausalLM으로 모델 로드"""
+    model = AutoModelForCausalLM.from_pretrained(
+        model_path,
+        torch_dtype=torch.bfloat16,
+        device_map="auto",
+    )
+    return model.eval()
+
+
+def load_kv_model(model_path):
+    """KVLlamaForCausalLM으로 모델 로드"""
+    model = KVLlamaForCausalLM.from_pretrained(
+        model_path,
+        torch_dtype=torch.bfloat16,
+        device_map="auto",
+    )
+    return model.eval()
+
+
+def run_generation(model, tokenizer, input_ids, attention_mask, max_new_tokens, seed):
+    """주어진 모델로 생성을 수행하고 결과를 반환"""
     set_seed(seed)
-    
+
     with torch.inference_mode():
         output = model.generate(
             input_ids=input_ids.clone(),
@@ -156,166 +173,154 @@ def run_generation(model, tokenizer, input_ids, attention_mask, config, max_new_
             do_sample=False,
             pad_token_id=tokenizer.eos_token_id,
         )[0]
-    
+
     return output
 
 
 def main():
     set_seed(SEED)
-    
+
+    model2path = json.load(open("config/model2path.json", "r"))
+    model_path = model2path[MODEL_NAME]
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    print(f"Model: {MODEL_NAME} ({model_path})")
+    print(f"Max new tokens: {MAX_NEW_TOKENS}, Seed: {SEED}")
+    print(f"Number of prompts: {len(PROMPTS)}")
+
     # =========================================================================
-    # 1. 모델 및 토크나이저 로드
+    # 1. AutoModelForCausalLM으로 전체 프롬프트 생성
     # =========================================================================
-    print(f"Loading model: {MODEL_NAME}")
-    model, tokenizer = load_model(MODEL_NAME)
-    num_layers = model.config.num_hidden_layers
-    print(f"  - Number of layers: {num_layers}")
-    print(f"  - Total budget: {TOTAL_BUDGET}")
-    print(f"  - Max new tokens: {MAX_NEW_TOKENS}")
-    print(f"  - Number of prompts: {len(PROMPTS)}")
-    
-    all_results = []
-    
+    print("\n" + "=" * 70)
+    print("[1/2] AutoModelForCausalLM (HuggingFace 기본)")
+    print("=" * 70)
+    print(f"Loading AutoModelForCausalLM: {model_path}")
+
+    auto_model = load_auto_model(model_path)
+    auto_results = []
+
     for p_idx, prompt in enumerate(PROMPTS):
-        print("\n" + "#" * 70)
-        print(f"  PROMPT {p_idx + 1}/{len(PROMPTS)}")
-        print("#" * 70)
-        
-        # =====================================================================
-        # 2. 프롬프트 준비
-        # =====================================================================
         formatted_prompt = f"[INST]{prompt}[/INST]"
-        
         input_enc = tokenizer(formatted_prompt, truncation=False, return_tensors="pt")
-        input_ids = input_enc.input_ids.to(model.device)
-        attention_mask = input_enc.attention_mask.to(torch.bfloat16).to(model.device)
-        
+        input_ids = input_enc.input_ids.to(auto_model.device)
+        attention_mask = input_enc.attention_mask.to(torch.bfloat16).to(auto_model.device)
         prompt_length = input_ids.shape[1]
-        print(f"  Prompt length (tokens): {prompt_length}")
-        
-        # =====================================================================
-        # 3. 각 캐시 방식으로 생성 수행
-        # =====================================================================
-        results = {}
-        output_ids = {}
-        
-        # ----- (1) A2SF Cache -----
-        print(f"\n  [1/3] A2SF Cache (forgetting_factor=0.75)")
-        
-        config_a2sf = CompressionConfig()
-        config_a2sf["compression_method"] = "a2sf"
-        config_a2sf["total_budget"] = TOTAL_BUDGET
-        config_a2sf["forgetting_factor"] = 0.75
-        config_a2sf["layerwise_ratios"] = [1.0] * num_layers
-        config_a2sf["local_ratios"] = 0.125
-        
-        output = run_generation(model, tokenizer, input_ids, attention_mask, config_a2sf, MAX_NEW_TOKENS, SEED)
-        pred_a2sf = tokenizer.decode(output[prompt_length:], skip_special_tokens=True)
-        results["a2sf"] = pred_a2sf
-        output_ids["a2sf"] = output[prompt_length:].tolist()
-        print(f"    Generated: {pred_a2sf[:200]}{'...' if len(pred_a2sf) > 200 else ''}")
-        
-        # ----- (2) Snap Cache -----
-        print(f"  [2/3] Snap Cache (observation_window=16)")
-        
-        config_snap = CompressionConfig()
-        config_snap["compression_method"] = "snap"
-        config_snap["total_budget"] = TOTAL_BUDGET
-        config_snap["observation_window"] = 16
-        
-        output = run_generation(model, tokenizer, input_ids, attention_mask, config_snap, MAX_NEW_TOKENS, SEED)
-        pred_snap = tokenizer.decode(output[prompt_length:], skip_special_tokens=True)
-        results["snap"] = pred_snap
-        output_ids["snap"] = output[prompt_length:].tolist()
-        print(f"    Generated: {pred_snap[:200]}{'...' if len(pred_snap) > 200 else ''}")
-        
-        # ----- (3) Sigmoid Cache -----
-        print(f"  [3/3] Sigmoid Cache (a=10.0, b=16)")
-        
-        config_sigmoid = CompressionConfig()
-        config_sigmoid["compression_method"] = "sigmoid"
-        config_sigmoid["total_budget"] = TOTAL_BUDGET
-        config_sigmoid["a"] = 10.0
-        config_sigmoid["b"] = 16
-        
-        output = run_generation(model, tokenizer, input_ids, attention_mask, config_sigmoid, MAX_NEW_TOKENS, SEED)
-        pred_sigmoid = tokenizer.decode(output[prompt_length:], skip_special_tokens=True)
-        results["sigmoid"] = pred_sigmoid
-        output_ids["sigmoid"] = output[prompt_length:].tolist()
-        print(f"    Generated: {pred_sigmoid[:200]}{'...' if len(pred_sigmoid) > 200 else ''}")
-        
-        # =====================================================================
-        # 4. 결과 비교
-        # =====================================================================
-        print(f"\n  --- COMPARISON (Prompt {p_idx + 1}) ---")
-        
-        method_names = list(results.keys())
-        
-        for name in method_names:
-            print(f"\n    [{name}] {results[name][:120]}{'...' if len(results[name]) > 120 else ''}")
-        
-        print(f"\n  TOKEN-LEVEL:")
-        for i in range(len(method_names)):
-            for j in range(i + 1, len(method_names)):
-                name_i = method_names[i]
-                name_j = method_names[j]
-                ids_i = output_ids[name_i]
-                ids_j = output_ids[name_j]
-                
-                min_len = min(len(ids_i), len(ids_j))
-                if min_len > 0:
-                    matches = sum(1 for a, b in zip(ids_i[:min_len], ids_j[:min_len]) if a == b)
-                    match_rate = matches / min_len * 100
-                else:
-                    match_rate = 0.0
-                    matches = 0
-                
-                first_diff = -1
-                for k in range(min_len):
-                    if ids_i[k] != ids_j[k]:
-                        first_diff = k
-                        break
-                
-                print(f"    [{name_i}] vs [{name_j}]: {match_rate:.1f}% ({matches}/{min_len})", end="")
-                if first_diff >= 0:
-                    token_i = tokenizer.decode([ids_i[first_diff]])
-                    token_j = tokenizer.decode([ids_j[first_diff]])
-                    print(f", first diff at {first_diff}: '{token_i}' vs '{token_j}'")
-                else:
-                    print(", identical")
-        
-        all_same = (output_ids[method_names[0]] == output_ids[method_names[1]] == output_ids[method_names[2]])
-        print(f"  => {'IDENTICAL' if all_same else 'DIFFERENT'}")
-        
-        all_results.append({
+
+        output = run_generation(auto_model, tokenizer, input_ids, attention_mask, MAX_NEW_TOKENS, SEED)
+        pred = tokenizer.decode(output[prompt_length:], skip_special_tokens=True)
+        ids = output[prompt_length:].tolist()
+        auto_results.append({"pred": pred, "ids": ids, "prompt_length": prompt_length})
+        print(f"  Prompt {p_idx + 1}/{len(PROMPTS)} (len={prompt_length}): {pred[:100]}{'...' if len(pred) > 100 else ''}")
+
+    del auto_model
+    torch.cuda.empty_cache()
+
+    # =========================================================================
+    # 2. KVLlamaForCausalLM (Full Cache)으로 전체 프롬프트 생성
+    # =========================================================================
+    print("\n" + "=" * 70)
+    print("[2/2] KVLlamaForCausalLM (Full Cache)")
+    print("=" * 70)
+    print(f"Loading KVLlamaForCausalLM: {model_path}")
+
+    kv_model = load_kv_model(model_path)
+    kv_results = []
+
+    config_full = CompressionConfig()
+    config_full["compression_method"] = "full"
+
+    for p_idx, prompt in enumerate(PROMPTS):
+        formatted_prompt = f"[INST]{prompt}[/INST]"
+        input_enc = tokenizer(formatted_prompt, truncation=False, return_tensors="pt")
+        input_ids = input_enc.input_ids.to(kv_model.device)
+        attention_mask = input_enc.attention_mask.to(torch.bfloat16).to(kv_model.device)
+        prompt_length = input_ids.shape[1]
+
+        kv_model.init_cache(config_full)
+        output = run_generation(kv_model, tokenizer, input_ids, attention_mask, MAX_NEW_TOKENS, SEED)
+        pred = tokenizer.decode(output[prompt_length:], skip_special_tokens=True)
+        ids = output[prompt_length:].tolist()
+        kv_results.append({"pred": pred, "ids": ids, "prompt_length": prompt_length})
+        print(f"  Prompt {p_idx + 1}/{len(PROMPTS)} (len={prompt_length}): {pred[:100]}{'...' if len(pred) > 100 else ''}")
+
+    del kv_model
+    torch.cuda.empty_cache()
+
+    # =========================================================================
+    # 3. 결과 비교
+    # =========================================================================
+    print("\n" + "=" * 70)
+    print("COMPARISON: AutoModel vs KVLlama (Full)")
+    print("=" * 70)
+
+    all_prompt_results = []
+
+    for p_idx in range(len(PROMPTS)):
+        ids_auto = auto_results[p_idx]["ids"]
+        ids_kv = kv_results[p_idx]["ids"]
+        pred_auto = auto_results[p_idx]["pred"]
+        pred_kv = kv_results[p_idx]["pred"]
+        prompt_length = auto_results[p_idx]["prompt_length"]
+
+        min_len = min(len(ids_auto), len(ids_kv))
+        if min_len > 0:
+            matches = sum(1 for a, b in zip(ids_auto[:min_len], ids_kv[:min_len]) if a == b)
+            match_rate = matches / min_len * 100
+        else:
+            match_rate = 0.0
+            matches = 0
+
+        first_diff = -1
+        for k in range(min_len):
+            if ids_auto[k] != ids_kv[k]:
+                first_diff = k
+                break
+
+        identical = ids_auto == ids_kv
+
+        print(f"\n  Prompt {p_idx + 1} (len={prompt_length}):")
+        print(f"    AutoModel:  {pred_auto[:120]}{'...' if len(pred_auto) > 120 else ''}")
+        print(f"    KVLlama:    {pred_kv[:120]}{'...' if len(pred_kv) > 120 else ''}")
+        print(f"    Match: {match_rate:.1f}% ({matches}/{min_len})", end="")
+        if first_diff >= 0:
+            token_auto = tokenizer.decode([ids_auto[first_diff]])
+            token_kv = tokenizer.decode([ids_kv[first_diff]])
+            print(f", first diff at {first_diff}: '{token_auto}' vs '{token_kv}'")
+        else:
+            print(", identical")
+        print(f"    => {'IDENTICAL' if identical else 'DIFFERENT'}")
+
+        all_prompt_results.append({
             "prompt_idx": p_idx,
             "prompt_length": prompt_length,
-            "results": results,
-            "identical": all_same,
+            "auto_model": pred_auto,
+            "kv_llama_full": pred_kv,
+            "token_match_rate": f"{match_rate:.1f}%",
+            "identical": identical,
         })
-    
+
     # =========================================================================
-    # 5. 전체 요약 및 저장
+    # 4. 전체 요약 및 저장
     # =========================================================================
     print("\n" + "=" * 70)
     print("OVERALL SUMMARY")
     print("=" * 70)
-    identical_count = sum(1 for r in all_results if r["identical"])
-    print(f"  Identical outputs: {identical_count}/{len(all_results)}")
-    for r in all_results:
+    identical_count = sum(1 for r in all_prompt_results if r["identical"])
+    print(f"  Identical outputs: {identical_count}/{len(all_prompt_results)}")
+    for r in all_prompt_results:
         status = "IDENTICAL" if r["identical"] else "DIFFERENT"
         print(f"    Prompt {r['prompt_idx'] + 1} (len={r['prompt_length']}): {status}")
-    
-    save_path = "test_cache_comparison.json"
+
+    save_path = "test_2_comparison.json"
     save_data = {
         "model": MODEL_NAME,
-        "total_budget": TOTAL_BUDGET,
+        "model_path": model_path,
         "max_new_tokens": MAX_NEW_TOKENS,
         "seed": SEED,
         "num_prompts": len(PROMPTS),
-        "prompt_results": all_results,
+        "identical_count": identical_count,
+        "prompt_results": all_prompt_results,
     }
-    with open(save_path, 'w', encoding='utf-8') as f:
+    with open(save_path, "w", encoding="utf-8") as f:
         json.dump(save_data, f, ensure_ascii=False, indent=2)
     print(f"\nResults saved to: {save_path}")
 

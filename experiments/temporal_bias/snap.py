@@ -5,7 +5,6 @@ import sys
 import random
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.optimize import curve_fit
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
@@ -73,95 +72,44 @@ def analyze_block_hit_rate(prefill_attention_maps, answer_indices, max_window, t
     return np.array(block_sim)
 
 
-def analyze_optimal_contribution(prefill_attention_maps, answer_indices, max_window, token_budget, num_kv_heads=0, group_size=1, block_size=8):
+def analyze_cumulative_similarity(prefill_attention_maps, answer_indices, max_window, token_budget, num_kv_heads=0, group_size=1, block_size=8):
     """
-    Find optimal contribution coefficients for each block (8 positions) from the end
-    Returns: (optimal_coefficients, hit_rates) - both are lists for each block from -1~-8, -9~-16, ...
+    Accumulate blocks with coefficient 1.0 and compute similarity at each step.
+    Block 0 → Block 0+1 → Block 0+1+2 → ...
+    Returns: cumulative_similarities list
     """
     num_layers = prefill_attention_maps.size(0)
     num_heads = prefill_attention_maps.size(1)
     seq_len = prefill_attention_maps.size(2)
     
-    # Test coefficients from 0.0 to 1.0 in 0.1 steps
-    test_coefficients = np.arange(0.0, 1.1, 0.1)
-    
-    optimal_coefficients = []
-    hit_rates = []
+    cumulative_similarities = []
     accumulated_score = torch.zeros(
         num_layers, num_heads, seq_len,
         device=prefill_attention_maps.device
     )
-    
-    local_budget = int(token_budget * 0.125)
-    selective_budget = token_budget - local_budget
 
-    # Calculate number of blocks
     num_blocks = (min(max_window, seq_len) + block_size - 1) // block_size
     
-    # Process in blocks of block_size
     for block_idx in range(num_blocks):
         start_offset = block_idx * block_size + 1
         end_offset = min((block_idx + 1) * block_size + 1, max_window + 1, seq_len + 1)
         
-        # First block: fix coefficient to 1.0
-        if block_idx == 0:
-            best_coeff = 1.0
-            print(f"  >>> Block {block_idx+1}/{num_blocks} (positions {start_offset}~{end_offset-1} from end) - fixed to 1.0", end="", flush=True)
-            
-            # Update accumulated score with coefficient 1.0 for all positions in first block
-            accumulated_score += prefill_attention_maps[:, :, -end_offset:-start_offset, :].sum(dim=2)
-            
-            # Calculate hit rate for first block
-            temp_indices = gqa_topk(accumulated_score, token_budget, num_kv_heads, group_size)
-            similarities = layer_wise_analysis(answer_indices, temp_indices)
-            best_hit_rate = similarities
-            
-            optimal_coefficients.append(best_coeff)
-            hit_rates.append(best_hit_rate)
-            print(f" Done (coeff={best_coeff:.1f}, hit_rate={best_hit_rate:.4f})")
-        else:
-            # Other blocks: find optimal coefficient
-            print(f"  >>> Finding optimal coefficient for block {block_idx+1}/{num_blocks} (positions {start_offset}~{end_offset-1} from end)", end="", flush=True)
-            
-            best_coeff = 0.0
-            
-            # Try each coefficient
-            for coeff_idx, coeff in enumerate(test_coefficients):
-                # Create temporary score with current coefficient applied to all positions in this block
-                temp_score = accumulated_score.clone()
-                # Apply coefficient to all positions in this block
-                temp_score += coeff * prefill_attention_maps[:, :, -end_offset:-start_offset, :].sum(dim=2)
-                
-                # Calculate hit rate
-                temp_score[:,:,-local_budget:] = temp_score.max()
-                temp_indices = gqa_topk(temp_score, selective_budget, num_kv_heads, group_size)
-                similarities = layer_wise_analysis(answer_indices, temp_indices)
-                
-                # Update best if this is better, or if equal and coefficient is larger
-                if similarities > best_hit_rate:
-                    best_hit_rate = similarities
-                    best_coeff = coeff
-                
-                # Show progress for coefficient testing
-                if (coeff_idx + 1) % 3 == 0 or coeff_idx == len(test_coefficients) - 1:
-                    print(".", end="", flush=True)
-            
-            # Update accumulated score with best coefficient for all positions in this block
-            accumulated_score += best_coeff * prefill_attention_maps[:, :, -end_offset:-start_offset, :].sum(dim=2)
-            
-            optimal_coefficients.append(best_coeff)
-            hit_rates.append(best_hit_rate)
-            
-            print(f" Done (coeff={best_coeff:.1f}, hit_rate={best_hit_rate:.4f})")
+        accumulated_score += prefill_attention_maps[:, :, -end_offset:-start_offset, :].sum(dim=2)
+        
+        temp_indices = gqa_topk(accumulated_score, token_budget, num_kv_heads, group_size)
+        similarity = layer_wise_analysis(answer_indices, temp_indices)
+        cumulative_similarities.append(similarity)
+        
+        print(f"  >>> Block 0~{block_idx} (up to position {end_offset-1} from end): similarity={similarity:.4f}")
     
-    return optimal_coefficients, hit_rates
+    return cumulative_similarities
 
 
-def plot_single_result(group_name, dataset_name, prompt_idx, block_hit_rates, optimal_coefficients, hit_rates,
+def plot_single_result(group_name, dataset_name, prompt_idx, block_hit_rates, cumulative_similarities,
                        workpath, seq_len, gen_len):
     """
     Plot temporal bias analysis result for a single prompt.
-    Saves to task_name/block_hit/ and task_name/coeff_hit/ with filename dataset_name_{idx}.png
+    Saves block_hit and cumulative_sim plots.
     """
     max_blocks = len(block_hit_rates)
     block_indices = list(range(max_blocks))
@@ -181,13 +129,13 @@ def plot_single_result(group_name, dataset_name, prompt_idx, block_hit_rates, op
 
     base_folder = os.path.join(workpath, "plots", group_name.replace(' ', '_'))
     block_hit_folder = os.path.join(base_folder, "block_hit")
-    coeff_hit_folder = os.path.join(base_folder, "coeff_hit")
+    cumulative_folder = os.path.join(base_folder, "cumulative_sim")
     os.makedirs(block_hit_folder, exist_ok=True)
-    os.makedirs(coeff_hit_folder, exist_ok=True)
+    os.makedirs(cumulative_folder, exist_ok=True)
 
     file_suffix = f"{dataset_name.replace(' ', '_')}_{prompt_idx}"
 
-    # 첫 번째 그래프: 블록별 Hit rate → task_name/block_hit/
+    # 블록별 Hit rate
     fig1, ax1 = plt.subplots(1, 1, figsize=(7.5, 5))
     ax1.plot(
         block_indices,
@@ -220,76 +168,23 @@ def plot_single_result(group_name, dataset_name, prompt_idx, block_hit_rates, op
     print(f"Saved block hit rate plot to {save_path_block}")
     plt.close(fig1)
 
-    # 두 번째 그래프: Optimal coefficient & Hit rate → task_name/coeff_hit/
+    # 누적 유사도 그래프 (Block 0, Block 0+1, Block 0+1+2, ...)
+    cum_blocks = list(range(len(cumulative_similarities)))
     fig2, ax2 = plt.subplots(1, 1, figsize=(7.5, 5))
-    ax2_twin = ax2.twinx()
-    x_vals = np.array(block_indices, dtype=np.float64)
-    y_vals = np.array(optimal_coefficients, dtype=np.float64)
-
     ax2.plot(
-        x_vals,
-        y_vals,
+        cum_blocks,
+        cumulative_similarities,
         alpha=0.9,
         linewidth=2.5,
         linestyle='-',
         color=color,
         marker='o',
         markersize=4,
-        label='Coefficient',
     )
-
-    def sigmoid_func(x, a, b):
-        return 1/(1+np.exp(a*(x-b)))
-    
-    popt1, _ = curve_fit(
-        sigmoid_func,
-        x_vals,
-        y_vals,
-        p0=[1.0, 16.0],
-        bounds=((0, 0), (np.inf, np.inf)),
-    )
-    
-    sigmoid_fit_curve = sigmoid_func(x_vals, *popt1)
-    
-    ax2.plot(
-        block_indices,
-        sigmoid_fit_curve,
-        alpha=0.8,
-        linewidth=2.0,
-        linestyle=':',
-        color='red',
-        marker=None,
-        label='Sigmoid fit',
-    )
-    ax2.text(
-        0.98,
-        0.65,
-        f"a = {popt1[0]:.2f}, b = {popt1[1]:.2f}",
-        transform=ax2.transAxes,
-        fontsize=16,
-        verticalalignment='top',
-        horizontalalignment='right',
-        bbox=dict(boxstyle='round', facecolor='white', alpha=0.7),
-    )
-
-    ax2_twin.plot(
-        block_indices,
-        hit_rates,
-        alpha=0.7,
-        linewidth=2.0,
-        linestyle='--',
-        color=color,
-        # marker='s',
-        # markersize=3,
-        label='Hit rate',
-    )
-    ax2.set_xlabel("QueryBlock index", fontsize=22)
-    ax2.set_ylabel("Optimal coefficient", fontsize=22, color='black')
-    ax2.tick_params(labelsize=22, axis='y', labelcolor='black')
-    ax2.set_ylim(-0.05, 1.05)
+    ax2.set_xlabel("Accumulated blocks (0 ~ N)", fontsize=22)
+    ax2.set_ylabel("Similarity", fontsize=22)
+    ax2.tick_params(labelsize=22)
     ax2.grid(True, linestyle='--', alpha=0.5, linewidth=0.8)
-    ax2_twin.set_ylabel("Hit rate", fontsize=22, color='black')
-    ax2_twin.tick_params(labelsize=22, axis='y', labelcolor='black')
     ax2.text(
         0.98,
         0.50,
@@ -302,9 +197,9 @@ def plot_single_result(group_name, dataset_name, prompt_idx, block_hit_rates, op
     )
     ax2.set_title(f"{dataset_name} (prompt {prompt_idx})", fontsize=24, fontweight='bold')
     plt.tight_layout()
-    save_path_coeff = os.path.join(coeff_hit_folder, f"{file_suffix}.png")
-    plt.savefig(save_path_coeff, dpi=300, bbox_inches='tight')
-    print(f"Saved coefficient & hit rate plot to {save_path_coeff}")
+    save_path_cum = os.path.join(cumulative_folder, f"{file_suffix}.png")
+    plt.savefig(save_path_cum, dpi=300, bbox_inches='tight')
+    print(f"Saved cumulative similarity plot to {save_path_cum}")
     plt.close(fig2)
 
 
@@ -437,11 +332,11 @@ for dataset_name, selected_items in dataset_selected_data.items():
         max_window, block_size = 128, 4
 
         block_hit_rates_data = analyze_block_hit_rate(prefill_attention_maps, answer_indices, max_window, token_budget, num_kv_heads, group_size, block_size)
-        optimal_coefficients, hit_rates = analyze_optimal_contribution(prefill_attention_maps, answer_indices, max_window, token_budget, num_kv_heads, group_size, block_size)
+        cumulative_similarities = analyze_cumulative_similarity(prefill_attention_maps, answer_indices, max_window, token_budget, num_kv_heads, group_size, block_size)
 
         plot_single_result(
             task_name, dataset_name, idx,
-            block_hit_rates_data, optimal_coefficients, hit_rates,
+            block_hit_rates_data, cumulative_similarities,
             workpath, seq_len, generated_token_length
         )
 

@@ -62,7 +62,7 @@ def count_tokens(tokenizer, text: str) -> int:
         return 0
     return len(tokenizer.encode(text, add_special_tokens=False))
 
-def format_prompt_for_task(task_type: str, context: str = "", question: str = "") -> str:
+def format_prompt_for_leval(task_type: str, context: str = "", question: str = "") -> str:
     """Format prompt based on task type, similar to LongBench prompt formats"""
     
     if task_type == "summarization":
@@ -108,9 +108,8 @@ def load_zeroscrolls_datasets(tokenizer) -> List[Dict[str, Any]]:
         
         for example in tqdm(dataset, desc=f"Processing {subset}"):
             # Extract fields from ZeroSCROLLS
-            all_input = example.get("input", "")
-            # Format prompt
-            prompt = format_prompt_for_task(task_type, context="", question=all_input)
+            # ZeroSCROLLS의 경우 input이 System Prompt와 함께 제공됨
+            prompt = example.get("input", "")
             
             # Filter by token length
             token_count = count_tokens(tokenizer, prompt)
@@ -185,7 +184,7 @@ def load_leval_datasets(tokenizer) -> List[Dict[str, Any]]:
             question = example.get("instructions", "")
             
             # Format prompt
-            prompt = format_prompt_for_task(task_type, context=context, question=question)
+            prompt = format_prompt_for_leval(task_type, context=context, question=question)
             
             # Filter by token length (8K 근처)
             token_count = count_tokens(tokenizer, prompt)
@@ -301,6 +300,8 @@ def generate_answer(model, tokenizer, sample: Dict[str, Any], model_name: str) -
         else:
             generated_ids = input_ids.new_zeros((1, 0))
 
+        generated_text = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+
         # 전체 시퀀스 (프롬프트 + 생성 토큰)
         output_ids = torch.cat([input_ids, generated_ids], dim=-1)
 
@@ -310,19 +311,29 @@ def generate_answer(model, tokenizer, sample: Dict[str, Any], model_name: str) -
             "decode_attentions": [torch.cat(all_decode_attention, dim=0) for all_decode_attention in all_decode_attentions],
         }
 
+    num_heads = model.config.num_attention_heads
+    num_kv_heads = getattr(model.config, 'num_key_value_heads', num_heads)
+    group_size = num_heads // num_kv_heads
+
     first_decode_attention = output["decode_attentions"][0]
     scores = torch.zeros(*first_decode_attention.shape[:3], input_ids.size(1), device=first_decode_attention.device, dtype=first_decode_attention.dtype)
     for decode_attention in output["decode_attentions"]:
         scores += decode_attention[:,:,:,:input_ids.size(1)]
 
-    answer_indices = scores.topk(128, dim=3).indices.squeeze(2).tolist()
+    num_layers = scores.size(0)
+    seq_len = scores.size(3)
+    # (num_layers, num_heads, 1, seq_len) -> (num_layers, num_kv_heads, group_size, 1, seq_len)
+    scores = scores.view(num_layers, num_kv_heads, group_size, 1, seq_len)
+    grouped_scores = scores.sum(dim=2)
+    answer_indices = grouped_scores.topk(128, dim=3).indices.tolist()
     
     return {
         "dataset": dataset_name,
-        "input_prompt": prompt,
-        "generation_length": len(output["decode_attentions"]),
-        "answer_indices": answer_indices,
         "task_type": task_type,
+        "input_prompt": prompt_for_gen,
+        "generation_length": len(output["decode_attentions"]),
+        "generated_text": generated_text,
+        "answer_indices": answer_indices,
     }
 
 def main(args):
@@ -355,45 +366,35 @@ def main(args):
     print(f"{'='*50}")
     
     # ------------------------------------------------------------------
-    # 1) Generate model outputs ONCE for all original samples (no duplication)
-    # ------------------------------------------------------------------
-    print(f"\n{'='*50}")
-    print("Generating model outputs for all samples (no batch)...")
-    print(f"{'='*50}")
-    
-    generated_all_samples: List[Dict[str, Any]] = []
-    for sample in tqdm(all_samples, desc="Generating model outputs"):
-        result = generate_answer(model, tokenizer, sample, model_name)
-        generated_all_samples.append(result)
-    
-    print(f"\nTotal generated samples: {len(generated_all_samples)}")
-    
-    # ------------------------------------------------------------------
-    # 2) Save balanced, generated training data (no additional generation)
+    # Generate model outputs and save each sample immediately
     # ------------------------------------------------------------------
     os.makedirs(os.path.dirname(args.output_file), exist_ok=True)
+    
+    print(f"\n{'='*50}")
+    print("Generating model outputs and saving line by line...")
+    print(f"{'='*50}")
     
     total_samples = 0
     processed_counts = {}
     with open(args.output_file, 'w', encoding='utf-8') as f:
-        for sample in tqdm(generated_all_samples, desc="Saving training data"):
-            dataset_name = sample.get("dataset", "unknown")
-            prompt = sample["input_prompt"]
-            generation_length = sample["generation_length"]
-            answer_indices = sample["answer_indices"]
-    
+        for sample in tqdm(all_samples, desc="Generating & saving"):
             try:
+                result = generate_answer(model, tokenizer, sample, model_name)
+    
                 training_sample = {
-                    "dataset": dataset_name,
-                    "input_prompt": prompt,
-                    "generation_length": generation_length,
-                    "answer_indices": answer_indices
+                    "dataset": result["dataset"],
+                    "task_type": result["task_type"],
+                    "input_prompt": result["input_prompt"],
+                    "generation_length": result["generation_length"],
+                    "generated_text": result["generated_text"],
+                    "answer_indices": result["answer_indices"]
                 }
     
                 f.write(json.dumps(training_sample, ensure_ascii=False, separators=(",", ":")) + "\n")
                 f.flush()
     
                 total_samples += 1
+                dataset_name = result["dataset"]
                 if dataset_name not in processed_counts:
                     processed_counts[dataset_name] = 0
                 processed_counts[dataset_name] += 1
@@ -452,7 +453,7 @@ def check_training_data_stats(file_path):
     
     print("\n" + "="*60)
     
-    # Task type별로도 집계 (dataset 이름에서 추론)
+    # Task type별로도 집계
     task_type_mapping = {
         "gov_report": "summarization",
         "summ_screen_fd": "summarization",
@@ -510,13 +511,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate training data from ZeroSCROLLS and L-Eval datasets, or check statistics")
     parser.add_argument("--output_file", type=str, default="./datasets/training_data.jsonl", help="Output file for training data")
     parser.add_argument("--model", type=str, default="llama3", choices=["llama", "llama2", "llama3", "opt"], help="Model to use")
-    parser.add_argument("--stats-only", action="store_true", help="Only check statistics of existing file without generating new data")
     
     args = parser.parse_args()
     
-    if args.stats_only:
-        # Only check statistics
-        check_training_data_stats(args.output_file)
-    else:
-        # Generate training data (original main function)
-        main(args)
+    # Generate training data (original main function)
+    main(args)
