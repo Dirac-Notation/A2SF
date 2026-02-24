@@ -40,7 +40,18 @@ def layer_wise_analysis(answer_indices, window_indices):
     return sum(similarities) / num_layers
 
 
-def analyze_block_hit_rate(prefill_attention_maps, answer_indices, max_window, token_budget, block_size=8):
+def gqa_topk(scores, k, num_kv_heads, group_size):
+    """Apply topk with GQA grouping. scores: (num_layers, num_heads, seq_len)"""
+    if group_size <= 1:
+        return scores.topk(k, dim=2).indices
+    num_layers, num_heads, seq_len = scores.shape
+    grouped = scores.view(num_layers, num_kv_heads, group_size, seq_len)
+    grouped_scores = grouped.sum(dim=2)
+    grouped_indices = grouped_scores.topk(k, dim=2).indices
+    return grouped_indices.repeat_interleave(group_size, dim=1)
+
+
+def analyze_block_hit_rate(prefill_attention_maps, answer_indices, max_window, token_budget, num_kv_heads=0, group_size=1, block_size=8):
     """
     Calculate hit rate for each block (8 positions) from the end
     Returns: data_to_plot (Blocks, Layers)
@@ -56,13 +67,13 @@ def analyze_block_hit_rate(prefill_attention_maps, answer_indices, max_window, t
         
         block_score = prefill_attention_maps[:, :, -end_offset:-start_offset, :].sum(dim=2)
         
-        block_indices = block_score.topk(token_budget, dim=2).indices
+        block_indices = gqa_topk(block_score, token_budget, num_kv_heads, group_size)
         block_sim.append(layer_wise_analysis(answer_indices, block_indices))
     
     return np.array(block_sim)
 
 
-def analyze_optimal_contribution(prefill_attention_maps, answer_indices, max_window, token_budget, block_size=8):
+def analyze_optimal_contribution(prefill_attention_maps, answer_indices, max_window, token_budget, num_kv_heads=0, group_size=1, block_size=8):
     """
     Find optimal contribution coefficients for each block (8 positions) from the end
     Returns: (optimal_coefficients, hit_rates) - both are lists for each block from -1~-8, -9~-16, ...
@@ -101,7 +112,7 @@ def analyze_optimal_contribution(prefill_attention_maps, answer_indices, max_win
             accumulated_score += prefill_attention_maps[:, :, -end_offset:-start_offset, :].sum(dim=2)
             
             # Calculate hit rate for first block
-            temp_indices = accumulated_score.topk(token_budget, dim=2).indices
+            temp_indices = gqa_topk(accumulated_score, token_budget, num_kv_heads, group_size)
             similarities = layer_wise_analysis(answer_indices, temp_indices)
             best_hit_rate = similarities
             
@@ -123,7 +134,7 @@ def analyze_optimal_contribution(prefill_attention_maps, answer_indices, max_win
                 
                 # Calculate hit rate
                 temp_score[:,:,-local_budget:] = temp_score.max()
-                temp_indices = temp_score.topk(selective_budget, dim=2).indices
+                temp_indices = gqa_topk(temp_score, selective_budget, num_kv_heads, group_size)
                 similarities = layer_wise_analysis(answer_indices, temp_indices)
                 
                 # Update best if this is better, or if equal and coefficient is larger
@@ -364,6 +375,10 @@ attention_model = AutoModelForCausalLM.from_pretrained(
     attn_implementation="eager"
 ).eval()
 
+num_heads = attention_model.config.num_attention_heads
+num_kv_heads = getattr(attention_model.config, 'num_key_value_heads', num_heads)
+group_size = num_heads // num_kv_heads
+
 prefill_attention_list = []
 
 def get_attn_hook(module, input, output):
@@ -418,11 +433,11 @@ for dataset_name, selected_items in dataset_selected_data.items():
         for atmaps in decoding_attention_maps:
             answer_score += atmaps[:,:,0,:seq_len]
 
-        answer_indices = answer_score.topk(token_budget, dim=2).indices
+        answer_indices = gqa_topk(answer_score, token_budget, num_kv_heads, group_size)
         max_window, block_size = 128, 4
 
-        block_hit_rates_data = analyze_block_hit_rate(prefill_attention_maps, answer_indices, max_window, token_budget, block_size)
-        optimal_coefficients, hit_rates = analyze_optimal_contribution(prefill_attention_maps, answer_indices, max_window, token_budget, block_size)
+        block_hit_rates_data = analyze_block_hit_rate(prefill_attention_maps, answer_indices, max_window, token_budget, num_kv_heads, group_size, block_size)
+        optimal_coefficients, hit_rates = analyze_optimal_contribution(prefill_attention_maps, answer_indices, max_window, token_budget, num_kv_heads, group_size, block_size)
 
         plot_single_result(
             task_name, dataset_name, idx,

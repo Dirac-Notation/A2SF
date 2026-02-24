@@ -22,19 +22,12 @@ class H2OCache(LayerCache):
         if self.seq_length <= self.total_budget:
             return
         
-        selected_indices = scores[:,:,:-self.recent_budget].topk(self.select_budget, dim=-1).indices
+        scores[:, :, -self.recent_budget:] = scores.max()
+        selected_indices = scores.topk(self.total_budget, dim=-1).indices
         
-        selected_indices = selected_indices.unsqueeze(-1).expand(-1,-1,-1,self.key_data.size(-1))
-        
-        self.key_data = torch.cat((
-            self.key_data.gather(self.seq_dim, selected_indices),
-            self.key_data[:,:,-self.recent_budget:,:]
-        ), dim=self.seq_dim)
-        
-        self.value_data = torch.cat((
-            self.value_data.gather(self.seq_dim, selected_indices),
-            self.value_data[:,:,-self.recent_budget:,:]
-        ), dim=self.seq_dim)
+        selected_indices = selected_indices.unsqueeze(-1).expand(-1, -1, -1, self.key_data.size(-1))
+        self.key_data = self.key_data.gather(self.seq_dim, selected_indices)
+        self.value_data = self.value_data.gather(self.seq_dim, selected_indices)
         
         # Update cache lists for compatibility with transformers 4.46.2
         if len(self.key_cache) > 0:

@@ -13,19 +13,128 @@ import os
 
 from utils import load_model, set_seed, CompressionConfig
 
-PROMPT = (
-    "Answer the following question based on the given context.\n\n"
-    "Context: The Eiffel Tower is a wrought-iron lattice tower on the Champ de Mars in Paris, France. "
-    "It is named after the engineer Gustave Eiffel, whose company designed and built the tower. "
-    "Locally nicknamed 'La dame de fer', it was constructed from 1887 to 1889 as the centerpiece "
-    "of the 1889 World's Fair. The tower is 330 metres tall, about the same height as an 81-storey building. "
-    "The tower has three levels for visitors, with restaurants on the first and second levels. "
-    "The top level's upper platform is 276 m above the ground. Tickets can be purchased to ascend by stairs "
-    "or lift to the first and second levels. The climb from ground level to the first level is over 300 steps, "
-    "as is the climb from the first level to the second. Although there is a staircase to the top level, "
-    "it is usually accessible only by lift.\n\n"
-    "Question: How tall is the Eiffel Tower?\n\nAnswer:"
-)
+PROMPTS = [
+    (
+        "Answer the following question based on the given context.\n\n"
+        "Context: The Eiffel Tower is a wrought-iron lattice tower on the Champ de Mars in Paris, France. "
+        "It is named after the engineer Gustave Eiffel, whose company designed and built the tower. "
+        "Locally nicknamed 'La dame de fer', it was constructed from 1887 to 1889 as the centerpiece "
+        "of the 1889 World's Fair. The tower is 330 metres tall, about the same height as an 81-storey building. "
+        "The tower has three levels for visitors, with restaurants on the first and second levels. "
+        "The top level's upper platform is 276 m above the ground. Tickets can be purchased to ascend by stairs "
+        "or lift to the first and second levels. The climb from ground level to the first level is over 300 steps, "
+        "as is the climb from the first level to the second. Although there is a staircase to the top level, "
+        "it is usually accessible only by lift.\n\n"
+        "Question: How tall is the Eiffel Tower?\n\nAnswer:"
+    ),
+    (
+        "Answer the following question based on the given context.\n\n"
+        "Context: The Great Wall of China is a series of fortifications that were built across the historical "
+        "northern borders of ancient Chinese states and Imperial China as protection against various nomadic groups. "
+        "Several walls were built from as early as the 7th century BC, with selective stretches later joined by "
+        "Qin Shi Huang (220-206 BC), the first emperor of China. Little of the Qin wall remains. "
+        "Later on, many successive dynasties built and maintained multiple stretches of border walls. "
+        "The best-known sections of the wall were built by the Ming dynasty (1368-1644). "
+        "The total length of all sections ever built is over 21,196 kilometres. "
+        "The wall's width ranges from 4.5 to 9.1 metres at the base and tapers to 3.7 metres at the top.\n\n"
+        "Question: What is the total length of the Great Wall of China?\n\nAnswer:"
+    ),
+    (
+        "Answer the following question based on the given context.\n\n"
+        "Context: Photosynthesis is a process used by plants and other organisms to convert light energy into "
+        "chemical energy that, through cellular respiration, can later be released to fuel the organism's activities. "
+        "Some of this chemical energy is stored in carbohydrate molecules, such as sugars and starches, which are "
+        "synthesized from carbon dioxide and water. In most cases, oxygen is also released as a waste product that "
+        "sustains nearly all life on Earth. Most plants, algae, and cyanobacteria perform photosynthesis; such "
+        "organisms are called photoautotrophs. Photosynthesis is largely responsible for producing and maintaining "
+        "the oxygen content of the Earth's atmosphere, and supplies most of the biological energy necessary for "
+        "complex life on Earth.\n\n"
+        "Question: What is the waste product released during photosynthesis?\n\nAnswer:"
+    ),
+    (
+        "Answer the following question based on the given context.\n\n"
+        "Context: The Amazon River is the largest river by discharge volume of water in the world, and the "
+        "disputed longest river in the world compared to the Nile. The headwaters of the Apurimac River on "
+        "Nevado Mismi had been considered for nearly a century as the Amazon's most distant source. The river "
+        "has a series of major tributaries in Colombia, Ecuador, and Peru, some of which flow into the Maranon "
+        "and Ucayali, and others directly into the Amazon itself. The Amazon basin is the largest drainage basin "
+        "in the world, with an area of approximately 7,050,000 square kilometres. It covers roughly 40 percent "
+        "of the South American continent. The Amazon enters Brazil with only one-fifth of the flow it finally "
+        "discharges into the Atlantic Ocean.\n\n"
+        "Question: What percentage of the South American continent does the Amazon basin cover?\n\nAnswer:"
+    ),
+    (
+        "Answer the following question based on the given context.\n\n"
+        "Context: The human brain is the central organ of the human nervous system, and with the spinal cord "
+        "makes up the central nervous system. The brain consists of the cerebrum, the brainstem and the cerebellum. "
+        "It controls most of the activities of the body, processing, integrating, and coordinating the information "
+        "it receives from the sense organs, and making decisions as to the instructions sent to the rest of the body. "
+        "The brain is contained in, and protected by, the skull bones of the head. The cerebrum is the largest part "
+        "of the human brain. It is divided into two cerebral hemispheres. The cerebral cortex is an outer layer of "
+        "grey matter, covering the core of white matter. The adult human brain weighs on average about 1.2 to "
+        "1.4 kilograms, which is about 2% of the total body weight.\n\n"
+        "Question: What is the average weight of an adult human brain?\n\nAnswer:"
+    ),
+    (
+        "Answer the following question based on the given context.\n\n"
+        "Context: The theory of general relativity was published by Albert Einstein in 1915. It is the geometric "
+        "theory of gravitation and the current description of gravitation in modern physics. General relativity "
+        "generalizes special relativity and refines Newton's law of universal gravitation, providing a unified "
+        "description of gravity as a geometric property of space and time, or four-dimensional spacetime. In "
+        "particular, the curvature of spacetime is directly related to the energy and momentum of whatever matter "
+        "and radiation are present. Some predictions of general relativity differ significantly from those of "
+        "classical physics, especially concerning the passage of time, the geometry of space, the motion of bodies "
+        "in free fall, and the propagation of light.\n\n"
+        "Question: When was the theory of general relativity published?\n\nAnswer:"
+    ),
+    (
+        "Answer the following question based on the given context.\n\n"
+        "Context: The Pacific Ocean is the largest and deepest of Earth's five oceanic divisions. It extends from "
+        "the Arctic Ocean in the north to the Southern Ocean in the south, and is bounded by the continents of Asia "
+        "and Australia in the west and the Americas in the east. At 165,250,000 square kilometres in area, this "
+        "largest division of the World Ocean covers about 46% of Earth's water surface and about 32% of its total "
+        "surface area, making it larger than all of Earth's land area combined. The Mariana Trench in the western "
+        "North Pacific is the deepest point in the world, reaching a depth of 10,994 metres. The Pacific Ocean was "
+        "sighted by Europeans early in the 16th century, first by Spanish explorer Vasco Nunez de Balboa in 1513.\n\n"
+        "Question: What is the deepest point in the Pacific Ocean and how deep is it?\n\nAnswer:"
+    ),
+    (
+        "Answer the following question based on the given context.\n\n"
+        "Context: DNA, or deoxyribonucleic acid, is a molecule composed of two polynucleotide chains that coil "
+        "around each other to form a double helix. The molecule carries genetic instructions for the development, "
+        "functioning, growth, and reproduction of all known organisms and many viruses. DNA and ribonucleic acid "
+        "(RNA) are nucleic acids. Alongside proteins, lipids and complex carbohydrates, nucleic acids are one of "
+        "the four major types of macromolecules that are essential for all known forms of life. The two DNA strands "
+        "are known as polynucleotides as they are composed of simpler monomeric units called nucleotides. Each "
+        "nucleotide is composed of one of four nitrogen-containing nucleobases (cytosine, guanine, adenine, or "
+        "thymine), a sugar called deoxyribose, and a phosphate group.\n\n"
+        "Question: What are the four nucleobases found in DNA?\n\nAnswer:"
+    ),
+    (
+        "Answer the following question based on the given context.\n\n"
+        "Context: The Industrial Revolution, which took place from the 18th to 19th centuries, was a period during "
+        "which predominantly agrarian, rural societies in Europe and America became industrial and urban. Prior to "
+        "the Industrial Revolution, manufacturing was often done in people's homes, using hand tools or basic machines. "
+        "Industrialization marked a shift to powered, special-purpose machinery, factories and mass production. "
+        "The iron and textile industries, along with the development of the steam engine, played central roles in "
+        "the Industrial Revolution. It began in Britain in the late 1700s and from there spread to other parts of "
+        "the world, including the United States, by the early 1800s. The revolution improved standards of living "
+        "for some, but resulted in poor working and living conditions for the working class.\n\n"
+        "Question: Where did the Industrial Revolution begin?\n\nAnswer:"
+    ),
+    (
+        "Answer the following question based on the given context.\n\n"
+        "Context: The International Space Station (ISS) is a modular space station in low Earth orbit. It is a "
+        "multinational collaborative project involving five participating space agencies: NASA, Roscosmos, JAXA, "
+        "ESA, and CSA. The station serves as a microgravity and space environment research laboratory in which "
+        "scientific research is conducted in astrobiology, astronomy, meteorology, physics, and other fields. "
+        "The ISS maintains an orbit with an average altitude of 408 kilometres by means of reboost manoeuvres "
+        "using the engines of the Zvezda Service Module or visiting spacecraft. The ISS circles the Earth in "
+        "roughly 92 minutes, completing 15.5 orbits per day. The station has been continuously occupied since "
+        "November 2000, making it the longest continuous human presence in low Earth orbit.\n\n"
+        "Question: How many orbits per day does the ISS complete?\n\nAnswer:"
+    ),
+]
 
 MODEL_NAME = "llama3"
 TOTAL_BUDGET = 128
@@ -61,153 +170,150 @@ def main():
     model, tokenizer = load_model(MODEL_NAME)
     num_layers = model.config.num_hidden_layers
     print(f"  - Number of layers: {num_layers}")
-    
-    # =========================================================================
-    # 2. 프롬프트 준비
-    # =========================================================================
-    formatted_prompt = f"[INST]{PROMPT}[/INST]"
-    
-    input_enc = tokenizer(formatted_prompt, truncation=False, return_tensors="pt")
-    input_ids = input_enc.input_ids.to(model.device)
-    attention_mask = input_enc.attention_mask.to(torch.bfloat16).to(model.device)
-    
-    prompt_length = input_ids.shape[1]
-    print(f"  - Prompt length (tokens): {prompt_length}")
     print(f"  - Total budget: {TOTAL_BUDGET}")
     print(f"  - Max new tokens: {MAX_NEW_TOKENS}")
+    print(f"  - Number of prompts: {len(PROMPTS)}")
+    
+    all_results = []
+    
+    for p_idx, prompt in enumerate(PROMPTS):
+        print("\n" + "#" * 70)
+        print(f"  PROMPT {p_idx + 1}/{len(PROMPTS)}")
+        print("#" * 70)
+        
+        # =====================================================================
+        # 2. 프롬프트 준비
+        # =====================================================================
+        formatted_prompt = f"[INST]{prompt}[/INST]"
+        
+        input_enc = tokenizer(formatted_prompt, truncation=False, return_tensors="pt")
+        input_ids = input_enc.input_ids.to(model.device)
+        attention_mask = input_enc.attention_mask.to(torch.bfloat16).to(model.device)
+        
+        prompt_length = input_ids.shape[1]
+        print(f"  Prompt length (tokens): {prompt_length}")
+        
+        # =====================================================================
+        # 3. 각 캐시 방식으로 생성 수행
+        # =====================================================================
+        results = {}
+        output_ids = {}
+        
+        # ----- (1) A2SF Cache -----
+        print(f"\n  [1/3] A2SF Cache (forgetting_factor=0.75)")
+        
+        config_a2sf = CompressionConfig()
+        config_a2sf["compression_method"] = "a2sf"
+        config_a2sf["total_budget"] = TOTAL_BUDGET
+        config_a2sf["forgetting_factor"] = 0.75
+        config_a2sf["layerwise_ratios"] = [1.0] * num_layers
+        config_a2sf["local_ratios"] = 0.125
+        
+        output = run_generation(model, tokenizer, input_ids, attention_mask, config_a2sf, MAX_NEW_TOKENS, SEED)
+        pred_a2sf = tokenizer.decode(output[prompt_length:], skip_special_tokens=True)
+        results["a2sf"] = pred_a2sf
+        output_ids["a2sf"] = output[prompt_length:].tolist()
+        print(f"    Generated: {pred_a2sf[:200]}{'...' if len(pred_a2sf) > 200 else ''}")
+        
+        # ----- (2) Snap Cache -----
+        print(f"  [2/3] Snap Cache (observation_window=16)")
+        
+        config_snap = CompressionConfig()
+        config_snap["compression_method"] = "snap"
+        config_snap["total_budget"] = TOTAL_BUDGET
+        config_snap["observation_window"] = 16
+        
+        output = run_generation(model, tokenizer, input_ids, attention_mask, config_snap, MAX_NEW_TOKENS, SEED)
+        pred_snap = tokenizer.decode(output[prompt_length:], skip_special_tokens=True)
+        results["snap"] = pred_snap
+        output_ids["snap"] = output[prompt_length:].tolist()
+        print(f"    Generated: {pred_snap[:200]}{'...' if len(pred_snap) > 200 else ''}")
+        
+        # ----- (3) Sigmoid Cache -----
+        print(f"  [3/3] Sigmoid Cache (a=10.0, b=16)")
+        
+        config_sigmoid = CompressionConfig()
+        config_sigmoid["compression_method"] = "sigmoid"
+        config_sigmoid["total_budget"] = TOTAL_BUDGET
+        config_sigmoid["a"] = 10.0
+        config_sigmoid["b"] = 16
+        
+        output = run_generation(model, tokenizer, input_ids, attention_mask, config_sigmoid, MAX_NEW_TOKENS, SEED)
+        pred_sigmoid = tokenizer.decode(output[prompt_length:], skip_special_tokens=True)
+        results["sigmoid"] = pred_sigmoid
+        output_ids["sigmoid"] = output[prompt_length:].tolist()
+        print(f"    Generated: {pred_sigmoid[:200]}{'...' if len(pred_sigmoid) > 200 else ''}")
+        
+        # =====================================================================
+        # 4. 결과 비교
+        # =====================================================================
+        print(f"\n  --- COMPARISON (Prompt {p_idx + 1}) ---")
+        
+        method_names = list(results.keys())
+        
+        for name in method_names:
+            print(f"\n    [{name}] {results[name][:120]}{'...' if len(results[name]) > 120 else ''}")
+        
+        print(f"\n  TOKEN-LEVEL:")
+        for i in range(len(method_names)):
+            for j in range(i + 1, len(method_names)):
+                name_i = method_names[i]
+                name_j = method_names[j]
+                ids_i = output_ids[name_i]
+                ids_j = output_ids[name_j]
+                
+                min_len = min(len(ids_i), len(ids_j))
+                if min_len > 0:
+                    matches = sum(1 for a, b in zip(ids_i[:min_len], ids_j[:min_len]) if a == b)
+                    match_rate = matches / min_len * 100
+                else:
+                    match_rate = 0.0
+                    matches = 0
+                
+                first_diff = -1
+                for k in range(min_len):
+                    if ids_i[k] != ids_j[k]:
+                        first_diff = k
+                        break
+                
+                print(f"    [{name_i}] vs [{name_j}]: {match_rate:.1f}% ({matches}/{min_len})", end="")
+                if first_diff >= 0:
+                    token_i = tokenizer.decode([ids_i[first_diff]])
+                    token_j = tokenizer.decode([ids_j[first_diff]])
+                    print(f", first diff at {first_diff}: '{token_i}' vs '{token_j}'")
+                else:
+                    print(", identical")
+        
+        all_same = (output_ids[method_names[0]] == output_ids[method_names[1]] == output_ids[method_names[2]])
+        print(f"  => {'IDENTICAL' if all_same else 'DIFFERENT'}")
+        
+        all_results.append({
+            "prompt_idx": p_idx,
+            "prompt_length": prompt_length,
+            "results": results,
+            "identical": all_same,
+        })
     
     # =========================================================================
-    # 3. 각 캐시 방식으로 생성 수행
-    # =========================================================================
-    results = {}
-    output_ids = {}
-    
-    # ----- (1) A2SF Cache: forgetting_factor=0.0 -----
-    print("\n" + "=" * 70)
-    print("[1/3] A2SF Cache (forgetting_factor=1.0)")
-    print("=" * 70)
-    
-    config_a2sf = CompressionConfig()
-    config_a2sf["compression_method"] = "a2sf"
-    config_a2sf["total_budget"] = TOTAL_BUDGET
-    config_a2sf["forgetting_factor"] = 0.75
-    config_a2sf["layerwise_ratios"] = [1.0] * num_layers
-    config_a2sf["local_ratios"] = 0.125
-    
-    output = run_generation(model, tokenizer, input_ids, attention_mask, config_a2sf, MAX_NEW_TOKENS, SEED)
-    pred_a2sf = tokenizer.decode(output[prompt_length:], skip_special_tokens=True)
-    results["a2sf (ff=1.0)"] = pred_a2sf
-    output_ids["a2sf (ff=1.0)"] = output[prompt_length:].tolist()
-    print(f"  Generated: {pred_a2sf[:200]}{'...' if len(pred_a2sf) > 200 else ''}")
-    
-    # ----- (2) Snap Cache: observation_window=prompt_length -----
-    print("\n" + "=" * 70)
-    print(f"[2/3] Snap Cache (observation_window={prompt_length})")
-    print("=" * 70)
-    
-    config_snap = CompressionConfig()
-    config_snap["compression_method"] = "snap"
-    config_snap["total_budget"] = TOTAL_BUDGET
-    config_snap["observation_window"] = 16
-    
-    output = run_generation(model, tokenizer, input_ids, attention_mask, config_snap, MAX_NEW_TOKENS, SEED)
-    pred_snap = tokenizer.decode(output[prompt_length:], skip_special_tokens=True)
-    results["snap (ow=prompt_len)"] = pred_snap
-    output_ids["snap (ow=prompt_len)"] = output[prompt_length:].tolist()
-    print(f"  Generated: {pred_snap[:200]}{'...' if len(pred_snap) > 200 else ''}")
-    
-    # ----- (3) Sigmoid Cache: a=10.0, b=prompt_length -----
-    print("\n" + "=" * 70)
-    print(f"[3/3] Sigmoid Cache (a=10.0, b={prompt_length})")
-    print("=" * 70)
-    
-    config_sigmoid = CompressionConfig()
-    config_sigmoid["compression_method"] = "sigmoid"
-    config_sigmoid["total_budget"] = TOTAL_BUDGET
-    config_sigmoid["a"] = 10.0
-    config_sigmoid["b"] = 16
-    
-    output = run_generation(model, tokenizer, input_ids, attention_mask, config_sigmoid, MAX_NEW_TOKENS, SEED)
-    pred_sigmoid = tokenizer.decode(output[prompt_length:], skip_special_tokens=True)
-    results["sigmoid (a=10, b=prompt_len)"] = pred_sigmoid
-    output_ids["sigmoid (a=10, b=prompt_len)"] = output[prompt_length:].tolist()
-    print(f"  Generated: {pred_sigmoid[:200]}{'...' if len(pred_sigmoid) > 200 else ''}")
-    
-    # =========================================================================
-    # 4. 결과 비교
+    # 5. 전체 요약 및 저장
     # =========================================================================
     print("\n" + "=" * 70)
-    print("COMPARISON")
+    print("OVERALL SUMMARY")
     print("=" * 70)
+    identical_count = sum(1 for r in all_results if r["identical"])
+    print(f"  Identical outputs: {identical_count}/{len(all_results)}")
+    for r in all_results:
+        status = "IDENTICAL" if r["identical"] else "DIFFERENT"
+        print(f"    Prompt {r['prompt_idx'] + 1} (len={r['prompt_length']}): {status}")
     
-    method_names = list(results.keys())
-    
-    # 전체 텍스트 출력
-    for name in method_names:
-        print(f"\n--- {name} ---")
-        print(results[name])
-    
-    # 토큰 레벨 비교
-    print("\n" + "-" * 70)
-    print("TOKEN-LEVEL COMPARISON")
-    print("-" * 70)
-    
-    # 각 쌍 비교
-    for i in range(len(method_names)):
-        for j in range(i + 1, len(method_names)):
-            name_i = method_names[i]
-            name_j = method_names[j]
-            ids_i = output_ids[name_i]
-            ids_j = output_ids[name_j]
-            
-            # 토큰 일치율 계산
-            min_len = min(len(ids_i), len(ids_j))
-            if min_len > 0:
-                matches = sum(1 for a, b in zip(ids_i[:min_len], ids_j[:min_len]) if a == b)
-                match_rate = matches / min_len * 100
-            else:
-                match_rate = 0.0
-            
-            # 첫 번째 불일치 토큰 위치
-            first_diff = -1
-            for k in range(min_len):
-                if ids_i[k] != ids_j[k]:
-                    first_diff = k
-                    break
-            
-            print(f"\n  [{name_i}] vs [{name_j}]")
-            print(f"    Token match rate: {match_rate:.1f}% ({matches}/{min_len})")
-            print(f"    Length: {len(ids_i)} vs {len(ids_j)} tokens")
-            if first_diff >= 0:
-                token_i = tokenizer.decode([ids_i[first_diff]])
-                token_j = tokenizer.decode([ids_j[first_diff]])
-                print(f"    First difference at token {first_diff}: '{token_i}' vs '{token_j}'")
-            elif min_len > 0:
-                print(f"    Outputs are identical up to min length ({min_len} tokens)")
-    
-    # 세 방법 모두 동일한지 확인
-    print("\n" + "-" * 70)
-    all_same = (output_ids[method_names[0]] == output_ids[method_names[1]] == output_ids[method_names[2]])
-    if all_same:
-        print("ALL THREE METHODS PRODUCED IDENTICAL OUTPUT")
-    else:
-        print("METHODS PRODUCED DIFFERENT OUTPUTS")
-    print("-" * 70)
-    
-    # 결과를 JSON으로 저장
     save_path = "test_cache_comparison.json"
     save_data = {
         "model": MODEL_NAME,
-        "prompt_length": prompt_length,
         "total_budget": TOTAL_BUDGET,
         "max_new_tokens": MAX_NEW_TOKENS,
         "seed": SEED,
-        "configs": {
-            "a2sf": {"forgetting_factor": 1.0, "layerwise_ratios": "all 1.0", "local_ratios": 0.125},
-            "snap": {"observation_window": prompt_length},
-            "sigmoid": {"a": 10.0, "b": prompt_length},
-        },
-        "results": results,
+        "num_prompts": len(PROMPTS),
+        "prompt_results": all_results,
     }
     with open(save_path, 'w', encoding='utf-8') as f:
         json.dump(save_data, f, ensure_ascii=False, indent=2)

@@ -77,30 +77,27 @@ class A2SFModelRunner:
     ) -> float:
         """
         Compute average Jaccard similarity between ground-truth answer_indices
-        and model's selected_indices across all (layer, kv_head) pairs.
+        and model's selected_indices across all (layer, query_head) pairs.
         
-        answer_indices: [num_layers][num_attention_heads][128]
+        In GQA, query heads in the same group share the same KV head's
+        selected indices, so each query head is compared individually
+        against its corresponding KV head's prediction.
+        
+        answer_indices: [num_layers][num_attention_heads][top_k]
         model_selected: list of tensors (1, num_kv_heads, select_budget) or None per layer
         """
         jaccard_scores = []
         
         for layer_idx in range(self.num_layers):
             sel = model_selected[layer_idx]
-            if sel is None:
-                continue
             
             # sel: (1, num_kv_heads, select_budget) -> (num_kv_heads, select_budget)
             sel = sel[0]
             
-            for kv_head_idx in range(self.num_kv_heads):
-                # Union of ground-truth indices across attention heads in this GQA group
-                gt_set = set()
-                for h in range(kv_head_idx * self.gqa_group_size,
-                               (kv_head_idx + 1) * self.gqa_group_size):
-                    gt_set.update(answer_indices[layer_idx][h])
-                
+            for q_head_idx in range(self.num_attention_heads):
+                kv_head_idx = q_head_idx // self.gqa_group_size
+                gt_set = set(answer_indices[layer_idx][kv_head_idx][0])
                 pred_set = set(sel[kv_head_idx].cpu().tolist())
-                
                 intersection = len(gt_set & pred_set)
                 union = len(gt_set | pred_set)
                 jaccard = intersection / union if union > 0 else 1.0
