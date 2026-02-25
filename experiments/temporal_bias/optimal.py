@@ -157,11 +157,45 @@ def analyze_optimal_contribution(prefill_attention_maps, answer_indices, max_win
     return optimal_coefficients, hit_rates
 
 
+def analyze_cumulative_similarity(prefill_attention_maps, answer_indices, max_window, token_budget, num_kv_heads=0, group_size=1, block_size=8):
+    """
+    Accumulate blocks with coefficient 1.0 and compute similarity at each step.
+    Block 0 -> Block 0+1 -> Block 0+1+2 -> ...
+    Returns: cumulative_similarities list
+    """
+    num_layers = prefill_attention_maps.size(0)
+    num_heads = prefill_attention_maps.size(1)
+    seq_len = prefill_attention_maps.size(2)
+
+    cumulative_similarities = []
+    accumulated_score = torch.zeros(
+        num_layers, num_heads, seq_len,
+        device=prefill_attention_maps.device
+    )
+
+    num_blocks = (min(max_window, seq_len) + block_size - 1) // block_size
+
+    for block_idx in range(num_blocks):
+        start_offset = block_idx * block_size + 1
+        end_offset = min((block_idx + 1) * block_size + 1, max_window + 1, seq_len + 1)
+
+        accumulated_score += prefill_attention_maps[:, :, -end_offset:-start_offset, :].sum(dim=2)
+
+        temp_indices = gqa_topk(accumulated_score, token_budget, num_kv_heads, group_size)
+        similarity = layer_wise_analysis(answer_indices, temp_indices)
+        cumulative_similarities.append(similarity)
+
+        print(f"  >>> Block 0~{block_idx} (up to position {end_offset-1} from end): similarity={similarity:.4f}")
+
+    return cumulative_similarities
+
+
 def plot_single_result(group_name, dataset_name, prompt_idx, block_hit_rates, optimal_coefficients, hit_rates,
-                       workpath, seq_len, gen_len):
+                       cumulative_similarities, workpath, seq_len, gen_len):
     """
     Plot temporal bias analysis result for a single prompt.
-    Saves to task_name/block_hit/ and task_name/coeff_hit/ with filename dataset_name_{idx}.png
+    Saves to task_name/block_hit/, task_name/coeff_hit/, and task_name/cumulative_sim/
+    with filename dataset_name_{idx}.png
     """
     max_blocks = len(block_hit_rates)
     block_indices = list(range(max_blocks))
@@ -182,8 +216,10 @@ def plot_single_result(group_name, dataset_name, prompt_idx, block_hit_rates, op
     base_folder = os.path.join(workpath, "plots", group_name.replace(' ', '_'))
     block_hit_folder = os.path.join(base_folder, "block_hit")
     coeff_hit_folder = os.path.join(base_folder, "coeff_hit")
+    cumulative_folder = os.path.join(base_folder, "cumulative_sim")
     os.makedirs(block_hit_folder, exist_ok=True)
     os.makedirs(coeff_hit_folder, exist_ok=True)
+    os.makedirs(cumulative_folder, exist_ok=True)
 
     file_suffix = f"{dataset_name.replace(' ', '_')}_{prompt_idx}"
 
@@ -306,6 +342,40 @@ def plot_single_result(group_name, dataset_name, prompt_idx, block_hit_rates, op
     plt.savefig(save_path_coeff, dpi=300, bbox_inches='tight')
     print(f"Saved coefficient & hit rate plot to {save_path_coeff}")
     plt.close(fig2)
+
+    # 세 번째 그래프: cumulative similarity -> task_name/cumulative_sim/
+    cum_blocks = list(range(len(cumulative_similarities)))
+    fig3, ax3 = plt.subplots(1, 1, figsize=(7.5, 5))
+    ax3.plot(
+        cum_blocks,
+        cumulative_similarities,
+        alpha=0.9,
+        linewidth=2.5,
+        linestyle='-',
+        color=color,
+        marker='o',
+        markersize=4,
+    )
+    ax3.set_xlabel("Accumulated blocks (0 ~ N)", fontsize=22)
+    ax3.set_ylabel("Similarity", fontsize=22)
+    ax3.tick_params(labelsize=22)
+    ax3.grid(True, linestyle='--', alpha=0.5, linewidth=0.8)
+    ax3.text(
+        0.98,
+        0.50,
+        f"Prefill: {seq_len:.0f}tokens\nGen: {gen_len:.0f}tokens",
+        transform=ax3.transAxes,
+        fontsize=16,
+        verticalalignment='top',
+        horizontalalignment='right',
+        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5),
+    )
+    ax3.set_title(f"{dataset_name} (prompt {prompt_idx})", fontsize=24, fontweight='bold')
+    plt.tight_layout()
+    save_path_cum = os.path.join(cumulative_folder, f"{file_suffix}.png")
+    plt.savefig(save_path_cum, dpi=300, bbox_inches='tight')
+    print(f"Saved cumulative similarity plot to {save_path_cum}")
+    plt.close(fig3)
 
 
 # ---------------------------------------------------------
@@ -434,14 +504,15 @@ for dataset_name, selected_items in dataset_selected_data.items():
             answer_score += atmaps[:,:,0,:seq_len]
 
         answer_indices = gqa_topk(answer_score, token_budget, num_kv_heads, group_size)
-        max_window, block_size = 128, 4
+        max_window, block_size = 128, 1
 
         block_hit_rates_data = analyze_block_hit_rate(prefill_attention_maps, answer_indices, max_window, token_budget, num_kv_heads, group_size, block_size)
         optimal_coefficients, hit_rates = analyze_optimal_contribution(prefill_attention_maps, answer_indices, max_window, token_budget, num_kv_heads, group_size, block_size)
+        cumulative_similarities = analyze_cumulative_similarity(prefill_attention_maps, answer_indices, max_window, token_budget, num_kv_heads, group_size, block_size)
 
         plot_single_result(
             task_name, dataset_name, idx,
-            block_hit_rates_data, optimal_coefficients, hit_rates,
+            block_hit_rates_data, optimal_coefficients, hit_rates, cumulative_similarities,
             workpath, seq_len, generated_token_length
         )
 

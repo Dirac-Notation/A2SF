@@ -38,14 +38,14 @@ class A2SFRLConfig:
     l2_coef: float = 1e-6  # L2 regularization coefficient for weight decay
     
     # ----- Learning Rate Scheduler -----
-    scheduler_T_max: int = 1000  # For CosineAnnealingLR: maximum iterations
+    scheduler_T_max: int = 3000  # For CosineAnnealingLR: maximum iterations
     
     # ----- Training Configuration -----
-    iterations: int = 1000  # Number of training iterations
+    iterations: int = 3000  # Number of training iterations
     episodes_per_update: int = 16  # Number of episodes per update
     
     # ----- Evaluation Configuration -----
-    eval_frequency: int = 50
+    eval_frequency: int = 100
     eval_samples: int = 100
     
     # ----- Misc -----
