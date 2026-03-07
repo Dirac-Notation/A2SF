@@ -20,21 +20,24 @@ class A2SFRLConfig:
     # a: sigmoid steepness parameter
     a_values: torch.Tensor = field(
         default_factory=lambda: torch.tensor(
-            [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+            # [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+            [0.0, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0],
             dtype=torch.float32,
         )
     )
     # b: sigmoid shift parameter
     b_values: torch.Tensor = field(
         default_factory=lambda: torch.tensor(
-            [1, 8, 16, 32, 64, 128],
+            # [1, 8, 16, 32, 64, 128],
+            [0],
             dtype=torch.float32,
         )
     )
     
     # ----- NeuralUCB Hyperparameters -----
     lr: float = 1e-2
-    ucb_beta: float = 0.5  # Exploration parameter for UCB
+    ucb_beta_max: float = 10.0  # Initial exploration parameter for UCB
+    ucb_beta_min: float = 0.1   # Final exploration parameter for UCB
     l2_coef: float = 1e-6  # L2 regularization coefficient for weight decay
     
     # ----- Learning Rate Scheduler -----
@@ -65,6 +68,11 @@ class A2SFRLConfig:
             return "cuda"
         return "cpu"
     
+    @property
+    def ucb_beta(self) -> float:
+        """Backward compatibility: initial UCB beta."""
+        return self.ucb_beta_max
+    
     @classmethod
     def from_args(cls):
         """Create configuration from command line arguments (no GPU args; GPU는 CUDA_VISIBLE_DEVICES로 제어)"""
@@ -91,7 +99,8 @@ class A2SFRLConfig:
             a_values=default_config.a_values,
             b_values=default_config.b_values,
             lr=default_config.lr,
-            ucb_beta=default_config.ucb_beta,
+            ucb_beta_max=default_config.ucb_beta_max,
+            ucb_beta_min=default_config.ucb_beta_min,
             l2_coef=default_config.l2_coef,
             iterations=default_config.iterations,
             episodes_per_update=default_config.episodes_per_update,
@@ -118,7 +127,7 @@ def main():
     print(f"  Episodes per update: {config.episodes_per_update}")
     print(f"  Learning rate: {config.lr}")
     print(f"  LR Scheduler: cosine (T_max: {config.scheduler_T_max})")
-    print(f"  UCB beta: {config.ucb_beta}")
+    print(f"  UCB beta (max -> min): {config.ucb_beta_max} -> {config.ucb_beta_min}")
     print(f"  Save directory: {config.save_dir}")
     print()
     

@@ -327,12 +327,24 @@ class A2SFTrainer:
             T_max=config.scheduler_T_max,
             eta_min=config.lr * 0.01  # Minimum learning rate (1% of initial)
         )
+    
+    def _get_ucb_beta(self, iteration: int, total_iterations: int) -> float:
+        """
+        Linearly decay UCB beta from config.ucb_beta_max to config.ucb_beta_min.
+        """
+        if total_iterations <= 1:
+            return float(self.config.ucb_beta_max)
+        
+        progress = iteration / float(total_iterations - 1)
+        beta = self.config.ucb_beta_max + (self.config.ucb_beta_min - self.config.ucb_beta_max) * progress
+        return float(beta)
 
     def train(self, num_iterations: int = 1000):
         print(f"Starting training for {num_iterations} iterations")
         
         # Create an iterator that cycles through the data loader
         train_iter = iter(self.train_loader)
+        total_iterations = max(1, int(num_iterations))
         
         for iteration in range(num_iterations):
             # Initialize stats for this iteration
@@ -340,6 +352,7 @@ class A2SFTrainer:
             iteration_actions_a = []
             iteration_actions_b = []
             iteration_losses = []
+            current_beta = self._get_ucb_beta(iteration, total_iterations)
             
             # Get a batch from the data loader
             # If we've exhausted the loader, create a new iterator (with new shuffle)
@@ -362,7 +375,7 @@ class A2SFTrainer:
                 prompt_length = tokenized_prompt.input_ids.size(1)
                 
                 # Token budget candidates: [64, 128, 256, 512, 1024, 2048]
-                token_budget_candidates = [128]
+                token_budget_candidates = [64, 128, 512]
                 # Filter candidates that are less than prompt length
                 valid_budgets = [budget for budget in token_budget_candidates if budget < prompt_length]
                 
@@ -379,12 +392,13 @@ class A2SFTrainer:
                     answer_indices=episode_data["answer_indices"],
                     token_budget=token_budget,
                     dataset=episode_data["dataset"],
+                    reference_text=episode_data.get("generated_text"),
                 )
                 state = state.to(self.device)
 
                 # Get action (forward pass happens inside act, but we'll reuse state for update)
                 # action is now a tuple of (a, b)
-                action, ucb_value = self.policy.act(state, beta=self.config.ucb_beta)
+                action, ucb_value = self.policy.act(state, beta=current_beta)
                 
                 # Get reward
                 reward, info = self.env.step(action)
@@ -418,14 +432,24 @@ class A2SFTrainer:
             # Update learning rate scheduler
             self.scheduler.step()
 
-            self._log_progress(iteration, avg_loss_stats, iteration_rewards, iteration_actions_a, iteration_actions_b)
+            self._log_progress(
+                iteration=iteration,
+                loss_stats=avg_loss_stats,
+                iteration_rewards=iteration_rewards,
+                iteration_actions_a=iteration_actions_a,
+                iteration_actions_b=iteration_actions_b,
+                current_beta=current_beta,
+            )
             
             if iteration % self.config.eval_frequency == 0 and iteration > 0:
                 self._save_checkpoint(iteration)
-                self._evaluate(iteration)
+                self._evaluate(iteration, current_beta=current_beta, total_iterations=total_iterations)
     
-    def _evaluate(self, iteration: int):
+    def _evaluate(self, iteration: int, current_beta: Optional[float] = None, total_iterations: Optional[int] = None):
         print(f"Evaluating at iteration {iteration}")
+        if current_beta is None:
+            effective_total_iterations = max(1, int(total_iterations or self.config.iterations))
+            current_beta = self._get_ucb_beta(iteration, effective_total_iterations)
         
         # Set to evaluation mode
         self.policy.eval()
@@ -461,11 +485,12 @@ class A2SFTrainer:
                 answer_indices=episode_data["answer_indices"],
                 token_budget=token_budget,
                 dataset=episode_data["dataset"],
+                reference_text=episode_data.get("generated_text"),
             )
             state = state.to(self.device)
 
             with torch.no_grad():
-                action, ucb_value = self.policy.act(state, beta=self.config.ucb_beta)
+                action, ucb_value = self.policy.act(state, beta=current_beta)
 
             reward, info = self.env.step(action)
 
@@ -482,11 +507,13 @@ class A2SFTrainer:
         
         print("Evaluation Results:")
         print(f"  Avg Reward:   {avg_eval_reward:.4f}")
+        print(f"  UCB Beta:     {current_beta:.4f}")
         print()
         
         eval_data = {
             "iteration": iteration,
             "eval_avg_reward": avg_eval_reward,
+            "ucb_beta": round(current_beta, 6),
             "eval_rewards": eval_rewards_rounded,
             "eval_actions_a": eval_actions_a,
             "eval_actions_b": eval_actions_b,
@@ -495,7 +522,15 @@ class A2SFTrainer:
         with open(os.path.join(self.config.save_dir, "evaluation_progress.jsonl"), "a") as f:
             f.write(json.dumps(eval_data) + "\n")
 
-    def _log_progress(self, iteration: int, loss_stats: Dict[str, float], iteration_rewards: List, iteration_actions_a: List, iteration_actions_b: List):
+    def _log_progress(
+        self,
+        iteration: int,
+        loss_stats: Dict[str, float],
+        iteration_rewards: List,
+        iteration_actions_a: List,
+        iteration_actions_b: List,
+        current_beta: float,
+    ):
         avg_reward = sum(iteration_rewards) / len(iteration_rewards) if iteration_rewards else 0.0
         
         prediction_loss = round(loss_stats.get("prediction_loss", 0.0), 4)
@@ -507,6 +542,7 @@ class A2SFTrainer:
         print(f"  Prediction Loss:   {prediction_loss:.4f}")
         print(f"  L2 Loss:           {l2_loss:.4f}")
         print(f"  Total Loss:        {total_loss:.4f}")
+        print(f"  UCB Beta:          {current_beta:.4f}")
         print()
         
         # Get current learning rate
@@ -519,6 +555,7 @@ class A2SFTrainer:
             "l2_loss": l2_loss,
             "total_loss": total_loss,
             "learning_rate": round(current_lr, 6),
+            "ucb_beta": round(current_beta, 6),
             "actions_a": iteration_actions_a,
             "actions_b": iteration_actions_b,
         }

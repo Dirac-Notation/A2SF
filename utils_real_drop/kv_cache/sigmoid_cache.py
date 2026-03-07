@@ -16,15 +16,18 @@ class SigmoidCache(LayerCache):
         
     def init_cache(self, compression_config, layer_idx):
         """Initialize Sigmoid cache settings"""
+        self.seq_length = 0
         self.total_budget = compression_config.total_budget
         self.recent_budget = int(self.total_budget * 0.125)
-        self.select_budget = self.total_budget - self.recent_budget
         self.a = compression_config.a
         self.b = compression_config.b
         self.prompt = False
         self.selected_indices = None
         
     def select(self, scores):
+        if self.seq_length <= self.total_budget:
+            return
+
         scores[:, :, -self.recent_budget:] = scores.max()
         selected_indices = scores.topk(self.total_budget, dim=-1).indices
         self.selected_indices = selected_indices
@@ -104,8 +107,8 @@ class SigmoidCache(LayerCache):
     def flash_attention(self, query, key, value, attn_mask, head_dim, block_size=1024):
         if not self.prompt:
             self.prompt = True
-            seq_len = query.size(2)
-            self.window = 1/(1+torch.exp(-self.a * (self.exponents - (seq_len - self.b - 0.5))))
+            self.seq_length = query.size(2)
+            self.window = 1/(torch.exp(-self.a * (self.exponents - (self.seq_length - self.b - 1))))
             return self.prompt_flash_attention(query, key, value, attn_mask, head_dim, block_size)
         else:
             return super().flash_attention(query, key, value, attn_mask, head_dim, block_size)

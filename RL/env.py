@@ -9,22 +9,23 @@ from .main import A2SFRLConfig
 
 # Import RoPE functions from transformers
 try:
-    from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
+    from transformers.models.llama.modeling_llama import apply_rotary_pos_emb, repeat_kv
 except ImportError:
     # Fallback: try to import from utils_real_drop if transformers import fails
     import sys
     import os
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from utils_real_drop.kv_llama import apply_rotary_pos_emb
+    from utils_real_drop.kv_llama import apply_rotary_pos_emb, repeat_kv
 
 class AttentionEncoder(nn.Module):
     """
-    Attention-based encoder using cloned parameters from target model's first layer, first head
+    Attention-based encoder using cloned parameters from target model's first layer
     - Clones target model's embedding layer weights
-    - Clones first layer's first head Q, K projections from target model
+    - Clones first layer's full Q, K projections from target model
     - Query: last 16 tokens, Key: all tokens
     - Creates independent RoPE from first layer's config
     - Performs attention: softmax(Q*K^T/sqrt(head_dim))
+    - Averages attention across all heads
     - Sums over query dimension to get (1, seq_len) vector
     - Pads to 8192 dimensions
     - All parameters are frozen (no training)
@@ -61,36 +62,35 @@ class AttentionEncoder(nn.Module):
         # Register embedding as buffer
         self.register_buffer('embed_weight', embed_weight)
         
-        # Extract only first head's parameters from q_proj and k_proj
+        # Extract full Q/K projection parameters from first layer
         # q_proj.weight shape: (num_heads * head_dim, hidden_size)
         # k_proj.weight shape: (num_key_value_heads * head_dim, hidden_size)
-        # First head: weight[0:head_dim, :]
         with torch.no_grad():
-            q_proj_first_head_weight = first_layer_attn.q_proj.weight[0:self.head_dim, :].clone().to(dtype=torch.float32)  # (head_dim, hidden_size)
-            k_proj_first_head_weight = first_layer_attn.k_proj.weight[0:self.head_dim, :].clone().to(dtype=torch.float32)  # (head_dim, hidden_size)
+            q_proj_weight = first_layer_attn.q_proj.weight.clone().to(dtype=torch.float32)
+            k_proj_weight = first_layer_attn.k_proj.weight.clone().to(dtype=torch.float32)
             
-            # Extract bias if exists (first head only)
+            # Extract full bias if exists
             if first_layer_attn.q_proj.bias is not None:
-                q_proj_first_head_bias = first_layer_attn.q_proj.bias[0:self.head_dim].clone().to(dtype=torch.float32)  # (head_dim,)
+                q_proj_bias = first_layer_attn.q_proj.bias.clone().to(dtype=torch.float32)
             else:
-                q_proj_first_head_bias = None
+                q_proj_bias = None
                 
             if first_layer_attn.k_proj.bias is not None:
-                k_proj_first_head_bias = first_layer_attn.k_proj.bias[0:self.head_dim].clone().to(dtype=torch.float32)  # (head_dim,)
+                k_proj_bias = first_layer_attn.k_proj.bias.clone().to(dtype=torch.float32)
             else:
-                k_proj_first_head_bias = None
+                k_proj_bias = None
         
         # Register as buffers (not parameters, so they won't be trained)
-        self.register_buffer('q_proj_first_head', q_proj_first_head_weight)
-        self.register_buffer('k_proj_first_head', k_proj_first_head_weight)
-        if q_proj_first_head_bias is not None:
-            self.register_buffer('q_proj_first_head_bias', q_proj_first_head_bias)
+        self.register_buffer('q_proj_weight', q_proj_weight)
+        self.register_buffer('k_proj_weight', k_proj_weight)
+        if q_proj_bias is not None:
+            self.register_buffer('q_proj_bias', q_proj_bias)
         else:
-            self.register_buffer('q_proj_first_head_bias', None)
-        if k_proj_first_head_bias is not None:
-            self.register_buffer('k_proj_first_head_bias', k_proj_first_head_bias)
+            self.register_buffer('q_proj_bias', None)
+        if k_proj_bias is not None:
+            self.register_buffer('k_proj_bias', k_proj_bias)
         else:
-            self.register_buffer('k_proj_first_head_bias', None)
+            self.register_buffer('k_proj_bias', None)
         
         # Create independent RoPE from first layer's config
         # Clone rotary embedding parameters
@@ -159,7 +159,7 @@ class AttentionEncoder(nn.Module):
     
     def encode_context(self, text: str, generation_length: int, token_budget: int) -> torch.Tensor:
         """
-        Encode text using attention mechanism with target model's first layer, first head
+        Encode text using attention mechanism with target model's first layer
         
         Args:
             text: Input text string
@@ -197,29 +197,25 @@ class AttentionEncoder(nn.Module):
             key_embeddings = token_embeddings  # (1, seq_len, embedding_dim)
             actual_query_len = self.num_query_tokens
         
-        # Use first head's parameters directly (already extracted in __init__)
+        # Use first layer's full Q/K projections directly (already extracted in __init__)
         with torch.no_grad():
-            # Project using first head's q_proj and k_proj parameters
+            # Project using full q_proj and k_proj parameters
             # query_embeddings: (1, actual_query_len, embedding_dim)
             # key_embeddings: (1, seq_len, embedding_dim)
-            # q_proj_first_head: (head_dim, hidden_size)
-            # k_proj_first_head: (head_dim, hidden_size)
-            # Ensure both are float32 for matmul
             query_embeddings_f32 = query_embeddings.to(dtype=torch.float32)
             key_embeddings_f32 = key_embeddings.to(dtype=torch.float32)
-            query_states = torch.matmul(query_embeddings_f32, self.q_proj_first_head.t())  # (1, actual_query_len, head_dim)
-            key_states = torch.matmul(key_embeddings_f32, self.k_proj_first_head.t())  # (1, seq_len, head_dim)
+            query_states = torch.matmul(query_embeddings_f32, self.q_proj_weight.t())  # (1, actual_query_len, num_heads * head_dim)
+            key_states = torch.matmul(key_embeddings_f32, self.k_proj_weight.t())  # (1, seq_len, num_kv_heads * head_dim)
             
             # Add bias if exists
-            if self.q_proj_first_head_bias is not None:
-                query_states = query_states + self.q_proj_first_head_bias.unsqueeze(0)  # (1, actual_query_len, head_dim)
-            if self.k_proj_first_head_bias is not None:
-                key_states = key_states + self.k_proj_first_head_bias.unsqueeze(0)  # (1, seq_len, head_dim)
+            if self.q_proj_bias is not None:
+                query_states = query_states + self.q_proj_bias.unsqueeze(0)
+            if self.k_proj_bias is not None:
+                key_states = key_states + self.k_proj_bias.unsqueeze(0)
             
-            # Reshape for RoPE: need (batch, num_heads, seq_len, head_dim) format
-            # Add head dimension: (1, 1, seq_len, head_dim)
-            query_states = query_states.unsqueeze(1)  # (1, 1, actual_query_len, head_dim)
-            key_states = key_states.unsqueeze(1)  # (1, 1, seq_len, head_dim)
+            # Reshape for multi-head attention
+            query_states = query_states.view(1, actual_query_len, self.num_heads, self.head_dim).transpose(1, 2)
+            key_states = key_states.view(1, seq_len, -1, self.head_dim).transpose(1, 2)
             
             # Apply RoPE from first layer
             # Create position_ids for query and key
@@ -238,32 +234,28 @@ class AttentionEncoder(nn.Module):
             cos_query, sin_query = self.rotary_emb(query_states, query_position_ids)
             cos_key, sin_key = self.rotary_emb(key_states, key_position_ids)
             
-            # Apply RoPE - apply_rotary_pos_emb(query, key, cos, sin) returns (rotated_query, rotated_key)
-            # Since query and key have different position_ids, we apply RoPE separately
-            # For query: use query's cos/sin
-            query_states_rotated, _ = apply_rotary_pos_emb(query_states, query_states, cos_query, sin_query)
-            query_states = query_states_rotated
-            # For key: use key's cos/sin
-            _, key_states_rotated = apply_rotary_pos_emb(key_states, key_states, cos_key, sin_key)
-            key_states = key_states_rotated
+            # Since query/key use different position_ids, apply RoPE separately
+            query_states, _ = apply_rotary_pos_emb(query_states, query_states, cos_query, sin_query)
+            _, key_states = apply_rotary_pos_emb(key_states, key_states, cos_key, sin_key)
             
-            # Now query_states: (1, 1, actual_query_len, head_dim)
-            # key_states: (1, 1, seq_len, head_dim)
-            # Squeeze head dimension for attention computation
-            query_states = query_states.squeeze(1)  # (1, actual_query_len, head_dim)
-            key_states = key_states.squeeze(1)  # (1, seq_len, head_dim)
+            # Expand KV heads to query heads for GQA-compatible attention
+            num_kv_groups = self.num_heads // key_states.size(1)
+            key_states = repeat_kv(key_states, num_kv_groups)
         
         # Compute attention scores: Q * K^T
-        # Q: (1, actual_query_len, head_dim)
-        # K: (1, seq_len, head_dim)
-        # Q * K^T: (1, actual_query_len, seq_len)
-        attention_scores = torch.bmm(query_states, key_states.transpose(1, 2))  # (1, actual_query_len, seq_len)
+        # Q: (1, num_heads, actual_query_len, head_dim)
+        # K: (1, num_heads, seq_len, head_dim)
+        # Q * K^T: (1, num_heads, actual_query_len, seq_len)
+        attention_scores = torch.matmul(query_states, key_states.transpose(2, 3))
         
         # Scale by sqrt(head_dim)
         attention_scores = attention_scores * self.scale
         
         # Apply softmax
-        attention_weights = torch.softmax(attention_scores, dim=-1)  # (1, actual_query_len, seq_len)
+        attention_weights = torch.softmax(attention_scores, dim=-1)  # (1, num_heads, actual_query_len, seq_len)
+        
+        # Use average attention across all heads
+        attention_weights = attention_weights.mean(dim=1)  # (1, actual_query_len, seq_len)
         
         # Sum over query dimension (axis 1) to get (1, seq_len)
         attention_output = attention_weights.sum(dim=1)  # (1, seq_len)
@@ -280,9 +272,10 @@ class AttentionEncoder(nn.Module):
             attention_output = attention_output[-self.output_dim:]  # (output_dim,)
         
         # Add generation_length and token_budget features
-        generation_feature = torch.zeros(1, device=self.device) + (generation_length/512)
+        # generation_feature = torch.zeros(1, device=self.device) + (generation_length/512)
         token_budget_feature = torch.zeros(1, device=self.device) + (token_budget/2048)
-        attention_output = torch.cat([attention_output, generation_feature, token_budget_feature], dim=0)  # (output_dim + 2,)
+        # attention_output = torch.cat([attention_output, generation_feature, token_budget_feature], dim=0)  # (output_dim + 2,)
+        attention_output = torch.cat([attention_output, token_budget_feature], dim=0)  # (output_dim + 1,)
         
         return attention_output
 
@@ -315,13 +308,23 @@ class A2SFEnv:
         self.current_prompt = None
         self.current_dataset = None
         self.current_answer_indices = None
+        self.current_reference_text = None
         self.current_generation_length = None
         self.current_token_budget = None
     
-    def encode_to_state(self, prompt: str, generation_length: int, answer_indices: List, token_budget: int, dataset: str = None) -> torch.Tensor:
+    def encode_to_state(
+        self,
+        prompt: str,
+        generation_length: int,
+        answer_indices: List,
+        token_budget: int,
+        dataset: str = None,
+        reference_text: str = None,
+    ) -> torch.Tensor:
         self.current_prompt = prompt
         self.current_dataset = dataset
         self.current_answer_indices = answer_indices
+        self.current_reference_text = reference_text
         self.current_generation_length = generation_length
         self.current_token_budget = token_budget
         
@@ -345,6 +348,8 @@ class A2SFEnv:
                 b=b_val,
                 token_budget=self.current_token_budget,
                 answer_indices=self.current_answer_indices,
+                generation_length=self.current_generation_length,
+                reference_text=self.current_reference_text,
                 dataset=self.current_dataset,
             )
         

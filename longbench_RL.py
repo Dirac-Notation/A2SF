@@ -20,6 +20,15 @@ from longbench_eval import data_group, evaluate_results
 # Prediction Functions (from longbench_pred_RL.py)
 # ============================================================================
 
+TASK_LIST = [
+    "Code Complete",
+    "Few Shot",
+    "Single-doc QA",
+    "Multi-doc QA",
+    "Passage Retrieval",
+    "Summarization",
+]
+
 def parse_args(args=None):
     parser = argparse.ArgumentParser(description="LongBench end-to-end evaluation with RL-trained A2SF model")
     parser.add_argument('--model', type=str, required=True, choices=["llama", "llama2", "llama3", "opt"])
@@ -38,6 +47,27 @@ def load_jsonl_file(file_path):
             if line.strip():
                 data.append(json.loads(line))
     return data
+
+
+def resolve_selected_datasets(args):
+    if args.datasets is not None:
+        print(f"Processing specified datasets: {args.datasets}")
+        return args.datasets
+
+    if args.task is None:
+        selected_tasks = TASK_LIST
+    else:
+        selected_tasks = []
+        for task_num in args.task:
+            if 0 <= task_num < len(TASK_LIST):
+                selected_tasks.append(TASK_LIST[task_num])
+            else:
+                print(f"Warning: Task number {task_num} is out of range (0-{len(TASK_LIST)-1}), skipping")
+
+    selected_datasets = []
+    for task in selected_tasks:
+        selected_datasets.extend(data_group[task])
+    return selected_datasets
 
 def load_rl_policy(checkpoint_path, device, target_model, target_tokenizer):
     """Load RL policy from checkpoint"""
@@ -214,36 +244,7 @@ if __name__ == '__main__':
     
     output_dir = None
     
-    # If --datasets is specified, process only those datasets
-    if args.datasets is not None:
-        selected_datasets = args.datasets
-        print(f"Processing specified datasets: {selected_datasets}")
-    else:
-        # Otherwise, use task-based selection
-        task_list = [
-            "Code Complete",
-            "Few Shot",
-            "Single-doc QA",
-            "Multi-doc QA",
-            "Passage Retrieval",
-            "Summarization",
-        ]
-        
-        # Task 번호를 task 이름으로 변환
-        if args.task is None:
-            selected_tasks = task_list
-        else:
-            selected_tasks = []
-            for task_num in args.task:
-                if 0 <= task_num < len(task_list):
-                    selected_tasks.append(task_list[task_num])
-                else:
-                    print(f"Warning: Task number {task_num} is out of range (0-{len(task_list)-1}), skipping")
-        
-        # Collect all datasets from selected tasks
-        selected_datasets = []
-        for task in selected_tasks:
-            selected_datasets.extend(data_group[task])
+    selected_datasets = resolve_selected_datasets(args)
     
     # Process each dataset
     for dataset in selected_datasets:

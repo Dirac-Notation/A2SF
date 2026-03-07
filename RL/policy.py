@@ -36,7 +36,7 @@ class NeuralUCBPolicy(nn.Module):
 
         # Backbone network for state encoding
         self.backbone = nn.Sequential(
-            nn.Linear(state_dim, 512), nn.ReLU(),
+            nn.Linear(state_dim-1, 512), nn.ReLU(),
             nn.Linear(512, 512), nn.ReLU()
         )
 
@@ -57,8 +57,7 @@ class NeuralUCBPolicy(nn.Module):
             "inverse_lambdas",
             torch.eye(self.feature_dim, device=a_values.device)
             .unsqueeze(0)
-            .repeat(self.num_actions, 1, 1)
-            / lambda_reg,
+            .repeat(self.num_actions, 1, 1) / lambda_reg,
         )
 
         # Action counts for tracking
