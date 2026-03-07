@@ -24,11 +24,94 @@ class SnapCache(LayerCache):
     def select(self, scores):
         if self.seq_length <= self.total_budget:
             return
+        # scores.shape = [batch_size, num_kv_heads, num_tokens]
+        batch_size, num_kv_heads, num_tokens = scores.shape
+        device = scores.device
+
+        # Keep latest tokens separately and run 2-step Top-K only on older tokens.
+        history_len = num_tokens - self.recent_budget
+
+        history_scores = scores[:, :, :history_len].to(torch.float32)
+
+        watch_len = 16
+        # Step-1: pick select_budget/4 seeds from history scores.
+        first_k = self.select_budget // watch_len
+
+        second_target = self.select_budget - first_k
+        history_selected = torch.empty(
+            (batch_size, num_kv_heads, self.select_budget), dtype=torch.long, device=device
+        )
         
-        scores[:, :, -self.recent_budget:] = scores.max()
-        selected_indices = scores.topk(self.total_budget, dim=-1).indices
+        # Select independently for each (batch, kv-head): each head keeps total_budget tokens.
+        for b_idx in range(batch_size):
+            for h_idx in range(num_kv_heads):
+                row_scores = history_scores[b_idx, h_idx]
+
+                # selected_mask guarantees no overlap across seed/neighbor/fill selections.
+                selected_mask = torch.zeros(history_len, dtype=torch.bool, device=device)
+
+                seed_idx = row_scores.topk(first_k, dim=-1).indices
+                selected_mask[seed_idx] = True
+
+                # Step-2: for each seed, pick up to watch_len-1 tokens inside its local window.
+                if second_target > 0 and first_k > 0:
+                    selected_in_step2 = 0
+                    for token_idx in seed_idx.tolist():
+                        if selected_in_step2 >= second_target:
+                            break
+
+                        left = max(0, token_idx - watch_len - 1)
+                        right = min(history_len, token_idx + watch_len)
+
+                        local_mask = torch.zeros(history_len, dtype=torch.bool, device=device)
+                        local_mask[left:right] = True
+                        local_mask &= ~selected_mask
+
+                        local_available = int(local_mask.sum().item())
+                        if local_available == 0:
+                            continue
+
+                        local_k = min(watch_len - 1, local_available, second_target - selected_in_step2)
+                        local_scores = row_scores.masked_fill(~local_mask, float("-inf"))
+                        local_idx = local_scores.topk(local_k, dim=-1).indices
+                        selected_mask[local_idx] = True
+                        selected_in_step2 += local_k
+
+                # If neighbor pool is insufficient, fill the remaining budget globally.
+                selected_count = int(selected_mask.sum().item())
+                if selected_count < self.select_budget:
+                    remain = self.select_budget - selected_count
+                    remain_mask = ~selected_mask
+                    remain_available = int(remain_mask.sum().item())
+                    if remain_available > 0:
+                        fill_k = min(remain, remain_available)
+                        fill_scores = row_scores.masked_fill(~remain_mask, float("-inf"))
+                        fill_idx = fill_scores.topk(fill_k, dim=-1).indices
+                        selected_mask[fill_idx] = True
+
+                # Keep temporal order in cache.
+                chosen = torch.nonzero(selected_mask, as_tuple=False).squeeze(-1)
+                if chosen.numel() > self.select_budget:
+                    chosen = chosen[:self.select_budget]
+                elif chosen.numel() < self.select_budget:
+                    # Defensive fallback; should be rare when history_len >= select_budget.
+                    pad_needed = self.select_budget - chosen.numel()
+                    remain_mask = torch.ones(history_len, dtype=torch.bool, device=device)
+                    remain_mask[chosen] = False
+                    fill_scores = row_scores.masked_fill(~remain_mask, float("-inf"))
+                    extra = fill_scores.topk(
+                        min(pad_needed, int(remain_mask.sum().item())), dim=-1
+                    ).indices
+                    chosen = torch.cat([chosen, extra], dim=0)
+                    chosen, _ = torch.sort(chosen)
+
+                history_selected[b_idx, h_idx] = chosen
+
+        recent_indices = torch.arange(history_len, num_tokens, device=device, dtype=torch.long)
+        recent_indices = recent_indices.view(1, 1, -1).expand(batch_size, num_kv_heads, -1)
+        selected_indices = torch.cat([history_selected, recent_indices], dim=-1)
+
         self.selected_indices = selected_indices
-        
         selected_indices = selected_indices.unsqueeze(-1).expand(-1, -1, -1, self.key_data.size(-1))
         self.key_data = self.key_data.gather(self.seq_dim, selected_indices)
         self.value_data = self.value_data.gather(self.seq_dim, selected_indices)
@@ -106,6 +189,7 @@ class SnapCache(LayerCache):
     def flash_attention(self, query, key, value, attn_mask, head_dim, block_size=1024):
         if not self.prompt:
             self.prompt = True
+            self.seq_length = query.size(2)
             return self.prompt_flash_attention(query, key, value, attn_mask, head_dim, block_size)
         else:
             return super().flash_attention(query, key, value, attn_mask, head_dim, block_size)

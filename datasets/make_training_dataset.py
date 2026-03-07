@@ -18,9 +18,9 @@ MIN_TOKENS = 4000   # 필터링을 위한 최소 토큰 수
 MAX_TOKENS = 7500  # 필터링을 위한 최대 토큰 수
 
 MAX_LEN = {
-    "summarization": 512,
-    "qa": 64,
-    "retrieval": 32
+    "summarization": 8,
+    "qa": 8,
+    "retrieval": 8
 }
 
 def set_seed(seed):

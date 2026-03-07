@@ -3,22 +3,22 @@
 # Ctrl+C(SIGINT)를 받으면 현재 스크립트가 실행한 모든 자식 프로세스를 종료하도록 설정
 trap "kill 0" EXIT
 
-budget=128
+budget=512
 model=llama3
-rl_checkpoint=policy_950.pt
+rl_checkpoint=policy_1700.pt
 
-# 16개 데이터셋을 4개 그룹으로 나눔 (code와 summarization 데이터셋이 한 그룹에 몰리지 않도록 분산)
-# 그룹 1: repobench-p (code), narrativeqa, hotpotqa, trec
-CUDA_VISIBLE_DEVICES=0,1 python longbench_RL.py --model $model --budget $budget --datasets repobench-p narrativeqa hotpotqa trec --rl_checkpoint $rl_checkpoint --skip_eval &
+# 요청한 실행 시간 기준으로 4개 그룹 구성
+# 그룹 1: 약 158분 (가장 무거운 gov_report 중심)
+CUDA_VISIBLE_DEVICES=0,1 python longbench_RL.py --model $model --budget $budget --datasets gov_report lcc 2wikimqa --rl_checkpoint $rl_checkpoint --skip_eval &
 
-# 그룹 2: lcc (code), qasper, 2wikimqa, triviaqa
-CUDA_VISIBLE_DEVICES=2,3 python longbench_RL.py --model $model --budget $budget --datasets lcc qasper 2wikimqa passage_retrieval_en --rl_checkpoint $rl_checkpoint --skip_eval &
+# 그룹 2: 약 168분
+CUDA_VISIBLE_DEVICES=2,3 python longbench_RL.py --model $model --budget $budget --datasets qmsum samsum musique triviaqa --rl_checkpoint $rl_checkpoint --skip_eval &
 
-# 그룹 3: gov_report (summarization), multifieldqa_en, musique, samsum
-CUDA_VISIBLE_DEVICES=4,5 python longbench_RL.py --model $model --budget $budget --datasets gov_report multifieldqa_en triviaqa samsum --rl_checkpoint $rl_checkpoint --skip_eval &
+# 그룹 3: 약 164분
+CUDA_VISIBLE_DEVICES=4,5 python longbench_RL.py --model $model --budget $budget --datasets multi_news qasper passage_count hotpotqa --rl_checkpoint $rl_checkpoint --skip_eval &
 
-# 그룹 4: qmsum (summarization), multi_news, passage_retrieval_en, passage_count
-CUDA_VISIBLE_DEVICES=6,7 python longbench_RL.py --model $model --budget $budget --datasets qmsum multi_news musique passage_count --rl_checkpoint $rl_checkpoint --skip_eval &
+# 그룹 4: 약 170분 (작은 데이터셋들을 묶어 밸런싱)
+CUDA_VISIBLE_DEVICES=6,7 python longbench_RL.py --model $model --budget $budget --datasets repobench-p passage_retrieval_en trec narrativeqa multifieldqa_en --rl_checkpoint $rl_checkpoint --skip_eval &
 
 # 모든 백그라운드 작업이 끝날 때까지 기다립니다.
 wait

@@ -11,6 +11,15 @@ from longbench_eval import data_group, evaluate_results
 # Prediction Functions (from longbench_pred.py)
 # ============================================================================
 
+TASK_LIST = [
+    "Code Complete",
+    "Few Shot",
+    "Single-doc QA",
+    "Multi-doc QA",
+    "Passage Retrieval",
+    "Summarization",
+]
+
 def parse_args(args=None):
     parser = argparse.ArgumentParser(description="LongBench end-to-end evaluation")
     parser.add_argument('--model', type=str, required=True, choices=["llama", "llama2", "llama3", "opt"])
@@ -18,6 +27,7 @@ def parse_args(args=None):
     parser.add_argument('--window', type=int, default=16)
     parser.add_argument('--budget', type=int, default=128)
     parser.add_argument('--task', type=int, nargs='*', default=None, help="List of task numbers (0-5). If not specified, all tasks will be executed.")
+    parser.add_argument('--datasets', type=str, nargs='*', default=None, help="List of specific dataset names to process. If specified, only these datasets will be processed (ignoring --task).")
     parser.add_argument('--skip_eval', action='store_true', help="Skip evaluation after prediction")
     return parser.parse_args(args)
 
@@ -28,6 +38,27 @@ def load_jsonl_file(file_path):
             if line.strip():
                 data.append(json.loads(line))
     return data
+
+
+def resolve_selected_datasets(args):
+    if args.datasets is not None:
+        print(f"Processing specified datasets: {args.datasets}")
+        return args.datasets
+
+    if args.task is None:
+        selected_tasks = TASK_LIST
+    else:
+        selected_tasks = []
+        for task_num in args.task:
+            if 0 <= task_num < len(TASK_LIST):
+                selected_tasks.append(TASK_LIST[task_num])
+            else:
+                print(f"Warning: Task number {task_num} is out of range (0-{len(TASK_LIST)-1}), skipping")
+
+    selected_datasets = []
+    for task in selected_tasks:
+        selected_datasets.extend(data_group[task])
+    return selected_datasets
 
 def get_pred(data, max_length, max_gen, dataset, model, tokenizer, out_path, model_name, config):
     for json_obj in tqdm(data):
@@ -87,33 +118,32 @@ if __name__ == '__main__':
     
     model, tokenizer = load_model(model_name)
 
-    task_list = [
-        "Code Complete",
-        "Few Shot",
-        "Single-doc QA",
-        "Multi-doc QA",
-        "Passage Retrieval",
-        "Summarization",
-    ]
-    
-    if args.task is None:
-        selected_tasks = task_list
-    else:
-        selected_tasks = []
-        for task_num in args.task:
-            if 0 <= task_num < len(task_list):
-                selected_tasks.append(task_list[task_num])
-            else:
-                print(f"Warning: Task number {task_num} is out of range (0-{len(task_list)-1}), skipping")
-    
     dataset2maxlen = json.load(open("config/dataset2maxlen.json", "r"))
     
     if not os.path.exists("result_txt/pred"):
         os.makedirs("result_txt/pred")
     
     output_dir = None
-    
-    for task in selected_tasks:
+
+    selected_datasets = resolve_selected_datasets(args)
+
+    # Process each dataset
+    for dataset in selected_datasets:
+        print(f"\nProcessing dataset: {dataset}")
+        
+        jsonl_path = f"datasets/longbench/{dataset}.jsonl"
+        if not os.path.exists(jsonl_path):
+            print(f"Warning: {jsonl_path} not found, skipping {dataset}")
+            continue
+        data = load_jsonl_file(jsonl_path)
+        output_dir = f"result_txt/pred/{args.model}_{args.method}_{args.window}_{args.budget}"
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        out_path = f"{output_dir}/{dataset}.jsonl"
+        
+        if os.path.exists(out_path):
+            os.remove(out_path)
+
         config = CompressionConfig()
         config["compression_method"] = args.method
         config["observation_window"] = args.window
@@ -121,27 +151,9 @@ if __name__ == '__main__':
         config["a"] = 10
         config["b"] = args.window
         
-        datasets = data_group[task]
+        max_gen = dataset2maxlen[dataset]
         
-        for dataset in datasets:
-            print(f"\nProcessing dataset: {dataset}")
-            
-            jsonl_path = f"datasets/longbench/{dataset}.jsonl"
-            if not os.path.exists(jsonl_path):
-                print(f"Warning: {jsonl_path} not found, skipping {dataset}")
-                continue
-            data = load_jsonl_file(jsonl_path)
-            output_dir = f"result_txt/pred/{args.model}_{args.method}_{args.window}_{args.budget}"
-            if not os.path.exists(output_dir):
-                os.makedirs(output_dir)
-            out_path = f"{output_dir}/{dataset}.jsonl"
-            
-            if os.path.exists(out_path):
-                os.remove(out_path)
-            
-            max_gen = dataset2maxlen[dataset]
-            
-            get_pred(data, max_length, max_gen, dataset, model, tokenizer, out_path, model_name, config)
+        get_pred(data, max_length, max_gen, dataset, model, tokenizer, out_path, model_name, config)
     
     if not args.skip_eval and output_dir and os.path.exists(output_dir):
         evaluate_results(output_dir)
