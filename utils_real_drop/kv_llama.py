@@ -25,7 +25,7 @@ from transformers.models.llama.modeling_llama import (
     repeat_kv
 )
 
-from .kv_cache import KVCache
+from .kv_cache import DynamicCustomCache
 
 # This makes `_prepare_4d_causal_attention_mask` a leaf function in the FX graph.
 # It means that the function will not be traced through and simply appear as a node in the graph.
@@ -83,13 +83,13 @@ class LlamaAttention(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional["KVCache"] = None,
+        past_key_value: Optional[DynamicCustomCache] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         **kwargs,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional["KVCache"]]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[DynamicCustomCache]]:
         if "padding_mask" in kwargs:
             warnings.warn(
                 "Passing `padding_mask` is deprecated and will be removed in v4.37. Please make sure use `attention_mask` instead.`"
@@ -97,7 +97,6 @@ class LlamaAttention(nn.Module):
 
         bsz, q_len, _ = hidden_states.size()
 
-        # Use past_key_value from parameter if provided, otherwise use self.past_key_value
         cache = past_key_value if past_key_value is not None else self.past_key_value
         
         # QKV projection on GPU
@@ -118,10 +117,14 @@ class LlamaAttention(nn.Module):
             cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
-        # Update cache with new key and value states
-        # Pass cache_kwargs for transformers 4.46.2 compatibility
-        cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-        key_states, value_states = cache.update(key_states, value_states, layer_idx=self.layer_idx, cache_kwargs=cache_kwargs)
+        if cache is not None:
+            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+            key_states, value_states = cache.update(
+                key_states,
+                value_states,
+                layer_idx=self.layer_idx,
+                cache_kwargs=cache_kwargs,
+            )
 
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
@@ -132,17 +135,27 @@ class LlamaAttention(nn.Module):
         if attention_mask is not None:
             causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
         
-        # Always use flash attention from our KV Cache implementation
-        layer_cache = cache.layer_caches[self.layer_idx]
-        attn_output = layer_cache.flash_attention(
-            query=query_states,
-            key=key_states,
-            value=value_states,
-            attn_mask=causal_mask,
-            head_dim=self.head_dim
-        )
-        # if self.layer_idx == 0:
-        #     import pdb; pdb.set_trace()
+        if cache is not None:
+            attn_output = cache.flash_attention(
+                layer_idx=self.layer_idx,
+                query=query_states,
+                key=key_states,
+                value=value_states,
+                attn_mask=causal_mask,
+                head_dim=self.head_dim,
+            )
+        else:
+            attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+            if causal_mask is not None:
+                attn_weights = attn_weights + causal_mask
+            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+            attn_weights = nn.functional.dropout(
+                attn_weights,
+                p=self.attention_dropout,
+                training=self.training,
+            )
+            attn_output = torch.matmul(attn_weights, value_states)
+
         attn_output = attn_output.transpose(1, 2).contiguous()
 
         attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
@@ -157,7 +170,7 @@ class LlamaAttention(nn.Module):
         if not output_attentions:
             attn_weights = None
 
-        return attn_output, attn_weights, past_key_value
+        return attn_output, attn_weights, cache
 
 
 class LlamaDecoderLayer(nn.Module):
@@ -174,13 +187,13 @@ class LlamaDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Union["KVCache", Tuple[torch.Tensor]]] = None,
+        past_key_value: Optional[DynamicCustomCache] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         **kwargs,
-    ) -> Tuple[torch.FloatTensor, Optional[Union["KVCache", Tuple[torch.FloatTensor, torch.FloatTensor]]]]:
+    ) -> Tuple[torch.FloatTensor, Optional[DynamicCustomCache]]:
         residual = hidden_states
 
         hidden_states = self.input_layernorm(hidden_states)
@@ -230,6 +243,7 @@ class LlamaModel(LlamaPreTrainedModel):
         self.rotary_emb = LlamaRotaryEmbedding(config=config)
 
         self.gradient_checkpointing = False
+        self.compression_config = None
         # Initialize weights and apply final processing
         self.post_init()
     
@@ -277,7 +291,8 @@ class LlamaModel(LlamaPreTrainedModel):
         Initialize cache configuration. This stores the compression_config which will be used
         by _prepare_cache_for_generation to automatically create the appropriate cache.
         """
-        self.compression_method = compression_config.compression_method
+        self.compression_config = compression_config
+        self.compression_method = None if compression_config is None else compression_config.compression_method
         # Note: Actual cache creation is done in _prepare_cache_for_generation
         # This method just stores the config for later use
         
@@ -297,10 +312,12 @@ class LlamaModel(LlamaPreTrainedModel):
                 exponents = torch.arange(0, orig_shape[1], device=input_ids.device).view(orig_shape[0], 1, orig_shape[1])
 
         # Set exponents in cache
-        for layer_cache in past_key_values.layer_caches:
-            if hasattr(layer_cache, 'exponents'):
-                device = layer_cache.device
-                layer_cache.exponents = exponents.to(device) if exponents is not None else None
+        if hasattr(past_key_values, "layer_caches"):
+            for layer_cache in past_key_values.layer_caches:
+                if hasattr(layer_cache, 'exponents'):
+                    # Keep exponents on input device. Per-layer cache hooks
+                    # align to the layer's device at use-time.
+                    layer_cache.exponents = exponents
 
     def get_input_embeddings(self):
         return self.embed_tokens
@@ -313,7 +330,7 @@ class LlamaModel(LlamaPreTrainedModel):
         input_ids: torch.LongTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional["KVCache"] = None,
+        past_key_values: Optional[DynamicCustomCache] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
@@ -339,7 +356,22 @@ class LlamaModel(LlamaPreTrainedModel):
         else:
             raise ValueError("You have to specify either input_ids or inputs_embeds")
 
-        # Get past_key_values_length from our KVCache
+        if use_cache and past_key_values is not None and not isinstance(past_key_values, DynamicCustomCache):
+            raise TypeError("`past_key_values` must be `DynamicCustomCache` for KVLlama.")
+
+        if use_cache and past_key_values is None:
+            cache_device = (
+                inputs_embeds.device
+                if inputs_embeds is not None
+                else (input_ids.device if input_ids is not None else self.device)
+            )
+            past_key_values = DynamicCustomCache(
+                config=self.config,
+                compression_config=getattr(self, "compression_config", None),
+                device=cache_device,
+            )
+
+        # Get past_key_values_length from cache
         past_key_values_length = 0
         if past_key_values is not None:
             past_key_values_length = past_key_values.get_seq_length()
@@ -358,7 +390,7 @@ class LlamaModel(LlamaPreTrainedModel):
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
 
-        if input_ids is not None:
+        if input_ids is not None and past_key_values is not None:
             self.set_forget(input_ids, past_key_values)
         
         # Create position embeddings to be shared across decoder layers (transformers 4.46.2)
@@ -408,8 +440,6 @@ class LlamaModel(LlamaPreTrainedModel):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
-            # Use passed cache (from _prepare_cache_for_generation or user-provided)
-            # past_key_values will be set by _prepare_cache_for_generation if compression_config is set
             past_key_value = past_key_values
 
             if self.gradient_checkpointing and self.training:
@@ -439,10 +469,7 @@ class LlamaModel(LlamaPreTrainedModel):
             hidden_states = layer_outputs[0]
 
             if use_cache:
-                # Cache is updated in-place, so we return the same cache object
-                # This ensures generate() can use it in the next iteration
-                if next_decoder_cache is None:
-                    next_decoder_cache = past_key_value
+                next_decoder_cache = layer_outputs[2 if output_attentions else 1]
 
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
@@ -454,6 +481,9 @@ class LlamaModel(LlamaPreTrainedModel):
             all_hidden_states += (hidden_states,)
 
         next_cache = next_decoder_cache if use_cache else None
+        if next_cache is not None:
+            # 외부 코드(RL 등) 하위 호환
+            self.layer_caches = next_cache.layer_caches
         
         if not return_dict:
             return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns] if v is not None)
@@ -477,6 +507,7 @@ class KVLlamaForCausalLM(LlamaForCausalLM):
         
         # Store compression config for use in _prepare_cache_for_generation
         self.compression_config = None
+        self.layer_caches = None
     
     def init_cache(self, compression_config):
         """Initialize cache with compression config. Can also be called automatically via _prepare_cache_for_generation."""
@@ -506,40 +537,29 @@ class KVLlamaForCausalLM(LlamaForCausalLM):
         if generation_config.use_cache is False:
             return
         
-        # Create compressed cache using our KVCache
-        from .kv_cache import KVCache
-        self.layer_caches = []
-        
-        for idx, layer in enumerate(self.model.layers):
-            device = next(layer.parameters()).device
-            if self.compression_config.compression_method == "full":
-                from .kv_cache.full_cache import FullCache
-                layer_cache = FullCache(layer.self_attn.num_key_value_heads, device=device)
-            elif self.compression_config.compression_method == "h2o":
-                from .kv_cache.h2o_cache import H2OCache
-                layer_cache = H2OCache(layer.self_attn.num_key_value_heads, device=device)
-            elif self.compression_config.compression_method == "a2sf":
-                from .kv_cache.a2sf_cache import A2SFCache
-                layer_cache = A2SFCache(layer.self_attn.num_key_value_heads, device=device)
-            elif self.compression_config.compression_method == "snap":
-                from .kv_cache.snap_cache import SnapCache
-                layer_cache = SnapCache(layer.self_attn.num_key_value_heads, device=device)
-            elif self.compression_config.compression_method == "sigmoid":
-                from .kv_cache.sigmoid_cache import SigmoidCache
-                layer_cache = SigmoidCache(layer.self_attn.num_key_value_heads, device=device)
+        inferred_device = device
+        if inferred_device is None:
+            input_ids = model_kwargs.get("input_ids")
+            inputs_embeds = model_kwargs.get("inputs_embeds")
+            if isinstance(inputs_embeds, torch.Tensor):
+                inferred_device = inputs_embeds.device
+            elif isinstance(input_ids, torch.Tensor):
+                inferred_device = input_ids.device
             else:
-                raise ValueError(f"Unsupported compression method: {self.compression_config.compression_method}")
-            
-            layer_cache.init_cache(self.compression_config, layer_idx=idx)
-            self.layer_caches.append(layer_cache)
-        
-        model_kwargs[cache_name] = KVCache(layer_caches=self.layer_caches)
+                inferred_device = self.device
+
+        model_kwargs[cache_name] = DynamicCustomCache(
+            config=self.model.config,
+            compression_config=self.compression_config,
+            device=inferred_device,
+        )
+        self.layer_caches = model_kwargs[cache_name].layer_caches
 
     def prepare_inputs_for_generation(
         self, input_ids, past_key_values=None, attention_mask=None, inputs_embeds=None, **kwargs
     ):
         if past_key_values is not None:
-            # Our KVCache always has get_seq_length method
+            # DynamicCustomCache follows DynamicCache API including get_seq_length.
             past_length = past_key_values.get_seq_length()
 
             # Some generation methods already pass only the last input ID

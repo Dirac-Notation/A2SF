@@ -8,12 +8,15 @@ import matplotlib.pyplot as plt
 from collections import defaultdict
 import datetime
 import sys
+import re
 
 # Add the current directory to the path for imports
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from utils import load_model, set_seed, CompressionConfig
-
+from RL.main import A2SFRLConfig
+from RL.policy import NeuralUCBPolicy
+from RL.env import AttentionEncoder
 
 def check_exact_match(expected, predicted):
     """Check if the expected answer appears exactly in the predicted text."""
@@ -33,7 +36,6 @@ def check_exact_match(expected, predicted):
         return True
     
     # Extract numbers from predicted text and check if expected number is present
-    import re
     numbers_in_pred = re.findall(r'\d+', predicted_clean)
     if expected_clean in numbers_in_pred:
         return True
@@ -48,7 +50,59 @@ def load_dataset(file_path):
             data.append(json.loads(line))
     return data
 
-def evaluate_model(model, tokenizer, dataset, device, method, config=None, model_name=None, window=None, budget=None):
+def load_rl_policy(checkpoint_path, device, target_model, target_tokenizer):
+    """Load RL policy and frozen attention encoder for inference."""
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
+
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    config = checkpoint.get("config", A2SFRLConfig())
+
+    context_encoder = AttentionEncoder(
+        target_model=target_model,
+        target_tokenizer=target_tokenizer,
+        device=device,
+        output_dim=8192,
+        num_query_tokens=16,
+    ).to(device)
+
+    policy = NeuralUCBPolicy(
+        state_dim=8193,  # 8192 context + 1 token_budget feature
+        a_values=config.a_values,
+        b_values=config.b_values,
+    ).to(device)
+
+    if "policy_state_dict" not in checkpoint:
+        raise ValueError("Policy state dict not found in checkpoint")
+    policy.load_state_dict(checkpoint["policy_state_dict"])
+    policy.eval()
+    context_encoder.eval()
+    return policy, context_encoder, config
+
+
+def get_rl_action(policy, context_encoder, prompt, generation_length, token_budget, device, ucb_beta=1.0):
+    state = context_encoder.encode_context(prompt, generation_length, token_budget).to(device, dtype=torch.float32)
+    with torch.no_grad():
+        (a_tensor, b_tensor), _ = policy.act(state, beta=ucb_beta)
+    a_val = float(a_tensor.view(-1)[0].item()) if isinstance(a_tensor, torch.Tensor) else float(a_tensor)
+    b_val = float(b_tensor.view(-1)[0].item()) if isinstance(b_tensor, torch.Tensor) else float(b_tensor)
+    return a_val, b_val
+
+
+def evaluate_model(
+    model,
+    tokenizer,
+    dataset,
+    device,
+    method,
+    config=None,
+    model_name=None,
+    window=None,
+    budget=None,
+    rl_policy=None,
+    context_encoder=None,
+    rl_ucb_beta=1.0,
+):
     """Evaluate the model on the needle-in-haystack task with budget settings."""
     results = defaultdict(list)
     
@@ -71,10 +125,28 @@ def evaluate_model(model, tokenizer, dataset, device, method, config=None, model
             # Add [INST] tags for Llama models
             if "llama" in model_name.lower():
                 prompt = f"[INST]{prompt}[/INST]"
+
+            run_config = config
+            if run_config and method == "sigmoid" and rl_policy is not None and context_encoder is not None:
+                token_budget = int(run_config.total_budget) if run_config.total_budget is not None else int(budget)
+                a_val, b_val = get_rl_action(
+                    rl_policy,
+                    context_encoder,
+                    prompt,
+                    generation_length=64,
+                    token_budget=token_budget,
+                    device=device,
+                    ucb_beta=rl_ucb_beta,
+                )
+                run_config = CompressionConfig()
+                for k, v in config.items():
+                    run_config[k] = v
+                run_config.a = float(a_val)
+                run_config.b = float(b_val)
             
             # Initialize cache with budget settings if provided
-            if config:
-                model.init_cache(config)
+            if run_config:
+                model.init_cache(run_config)
 
             # Tokenize the input
             inputs = tokenizer(prompt, return_tensors="pt")
@@ -128,11 +200,7 @@ def calculate_metrics(results):
     
     for (total_tokens, position), samples in results.items():
         total_count = len(samples)
-        
-        # Count exact matches
         exact_match_count = sum(1 for sample in samples if sample.get("exact_match", False))
-        
-        # Calculate accuracy as exact match rate
         accuracy = exact_match_count / total_count if total_count > 0 else 0.0
         
         metrics[(total_tokens, position)] = {
@@ -145,57 +213,44 @@ def calculate_metrics(results):
 
 def create_heatmap(metrics, output_file):
     """Create a heatmap visualization of the results."""
-    # Extract unique context lengths and positions
     context_lengths = sorted(list(set(k[0] for k in metrics.keys())))
     positions = sorted(list(set(k[1] for k in metrics.keys())))
     
-    # Create a 2D array for the heatmap
     heatmap_data = np.zeros((len(positions), len(context_lengths)))
     
-    # Fill the heatmap data
     for i, position in enumerate(positions):
         for j, length in enumerate(context_lengths):
             if (length, position) in metrics:
                 heatmap_data[i, j] = metrics[(length, position)]["accuracy"]
     
-    # Create the heatmap using matplotlib
     plt.figure(figsize=(15, 10))
-    
-    # Create the heatmap
     im = plt.imshow(heatmap_data, cmap='RdYlGn', vmin=0.0, vmax=1.0)
     
-    # Set axis labels with larger font size
     plt.xlabel('Context Length (tokens)', fontsize=30)
     plt.ylabel('Needle Position (%)', fontsize=30)
     
-    # Set tick labels with larger font size and rotate x-axis labels
     plt.xticks(np.arange(len(context_lengths)), context_lengths, fontsize=26, rotation=45)
     plt.yticks(np.arange(len(positions)), positions, fontsize=26)
     
     plt.tight_layout()
-    
-    # Save the heatmap with high DPI for better quality
     plt.savefig(output_file, dpi=300, bbox_inches='tight')
+    plt.close() # Close to free memory
     print(f"Heatmap saved to {output_file}")
 
 def main(args):
     set_seed(42)
     
-    # Initialize budget and hyperparameter lists
     datasets = args.dataset
     budget_list = args.budget
     methods = args.method
     models = args.model
     window_list = args.window
     
-    # Check and extend list lengths
     max_len = len(datasets) * len(budget_list) * len(methods) * len(models) * len(window_list)
     
-    # Create directory for saving results
     os.makedirs("result_json/needle", exist_ok=True)
     os.makedirs("plots/needle", exist_ok=True)
     
-    # Dictionary to store all results
     all_results = {
         "experiment_info": {
             "models": models,
@@ -208,31 +263,33 @@ def main(args):
     }
     
     cur_idx = 0
-    for model_name in models:
-        # Normalize model name
-        model_name = model_name.split("_")[0].lower()
-        
-        # Prepare device, model, and tokenizer
+    for model_name_raw in models:
+        model_name = model_name_raw.split("_")[0].lower()
         device = "cuda" if torch.cuda.is_available() else "cpu"
         
-        # Load model and tokenizer using the utility function
         print(f"Loading model: {model_name}")
         model, tokenizer = load_model(model_name)
         print("Model loaded successfully!")
 
-        for dataset in datasets:
-            dataset_name = os.path.basename(dataset).split('.')[0]
-            
-            # Load dataset
-            dataset_data = load_dataset(dataset)
+        rl_policy = None
+        context_encoder = None
+        rl_config = None
+        if args.rl_checkpoint:
+            first_layer_device = next(model.model.layers[0].parameters()).device
+            rl_policy, context_encoder, rl_config = load_rl_policy(
+                args.rl_checkpoint, first_layer_device, model, tokenizer
+            )
+            print(f"Loaded RL policy from: {args.rl_checkpoint}")
 
-            # Nested loops: window → budget → method
+        for dataset_path in datasets:
+            dataset_name = os.path.basename(dataset_path).split('.')[0]
+            dataset_data = load_dataset(dataset_path)
+
             for cur_window in window_list:
-            for cur_budget in budget_list:
-                for cur_method in methods:
-                    cur_idx += 1
-                    
-                        # Create compression config
+                for cur_budget in budget_list:
+                    for cur_method in methods:
+                        cur_idx += 1
+                        
                         config = CompressionConfig()
                         config["compression_method"] = cur_method
                         config["observation_window"] = cur_window
@@ -240,83 +297,75 @@ def main(args):
                         config["a"] = 10
                         config["b"] = cur_window
 
-                    # Evaluate with current configuration
-                    results = evaluate_model(
-                        model=model,
-                        tokenizer=tokenizer,
-                        dataset=dataset_data,
-                        device=device,
-                        method=cur_method,
-                        config=config,
+                        results = evaluate_model(
+                            model=model,
+                            tokenizer=tokenizer,
+                            dataset=dataset_data,
+                            device=device,
+                            method=cur_method,
+                            config=config,
                             model_name=model_name,
                             window=cur_window,
-                            budget=cur_budget
-                    )
+                            budget=cur_budget,
+                            rl_policy=rl_policy,
+                            context_encoder=context_encoder,
+                            rl_ucb_beta=(rl_config.ucb_beta if rl_config is not None else 1.0),
+                        )
 
-                    # Calculate metrics
-                    metrics = calculate_metrics(results)
-                    
-                    # Create heatmap
+                        metrics = calculate_metrics(results)
+                        
                         if cur_method == "full":
-                        output_file = f"plots/needle/needle_heatmap_{model_name}_full.png"
-                    else:
+                            output_file = f"plots/needle/needle_heatmap_{model_name}_full.png"
+                        else:
                             output_file = f"plots/needle/needle_heatmap_{model_name}_{cur_method}_window{cur_window}_budget{cur_budget}.png"
-                    
-                    create_heatmap(metrics, output_file)
-                    
-                    # Store results in the dictionary
+                        
+                        create_heatmap(metrics, output_file)
+                        
                         result_key = f"{model_name}_{dataset_name}_{cur_method}_window{cur_window}_budget{cur_budget}"
-                    
-                    all_results["results"][result_key] = {
-                        "model": model_name,
-                        "dataset": dataset_name,
+                        
+                        all_results["results"][result_key] = {
+                            "model": model_name,
+                            "dataset": dataset_name,
                             "method": cur_method,
                             "window": cur_window,
                             "budget": cur_budget,
-                        "metrics": {
-                            f"{length}_{position}": {
-                                "accuracy": metrics[(length, position)]["accuracy"],
-                                "correct_count": metrics[(length, position)]["correct_count"],
-                                "total_count": metrics[(length, position)]["total_count"]
+                            "metrics": {
+                                f"{length}_{pos}": metrics[(length, pos)]
+                                for length, pos in metrics.keys()
                             }
-                            for length, position in metrics.keys()
                         }
-                    }
-                    
-                    # Print summary
+                        
                         print(f"\nConfig {cur_idx}/{max_len} | model={model_name}, dataset={dataset_name}, method={cur_method}, window={cur_window}, budget={cur_budget}")
-                    print("Position | Accuracy | Correct/Total")
-                    print("-" * 40)
-                    for position in sorted(set(k[1] for k in metrics.keys())):
-                        # Calculate average accuracy across all context lengths for this position
-                        position_samples = [(k[0], v) for k, v in metrics.items() if k[1] == position]
-                        total_correct = sum(sample[1]["correct_count"] for sample in position_samples)
-                        total_samples = sum(sample[1]["total_count"] for sample in position_samples)
-                        avg_accuracy = total_correct / total_samples if total_samples > 0 else 0
-                        print(f"{position:3.2f} | {avg_accuracy:.2%} | {total_correct}/{total_samples}")
+                        print("Position | Accuracy | Correct/Total")
+                        print("-" * 40)
+                        for position in sorted(set(k[1] for k in metrics.keys())):
+                            pos_samples = [v for k, v in metrics.items() if k[1] == position]
+                            total_correct = sum(s["correct_count"] for s in pos_samples)
+                            total_samples = sum(s["total_count"] for s in pos_samples)
+                            avg_accuracy = total_correct / total_samples if total_samples > 0 else 0
+                            print(f"{position:3.2f} | {avg_accuracy:.2%} | {total_correct}/{total_samples}")
         
-        # Clear GPU memory after processing each model
         del model
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     
-    # Save all results to a JSON file
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        result_file = f"result_json/needle/needle_results_{timestamp}.json"
-    with open(result_file, 'w', encoding='utf-8') as f:
+    final_result_file = f"result_json/needle/needle_results_{timestamp}.json"
+    with open(final_result_file, 'w', encoding='utf-8') as f:
         json.dump(all_results, f, indent=2, ensure_ascii=False)
-    print(f"\nAll results saved to {result_file}")
+    print(f"\nAll results saved to {final_result_file}")
 
 def parse_args(args=None):
-    parser = argparse.ArgumentParser(description="Evaluate model predictions with various budgets on needle-in-haystack task.")
+    parser = argparse.ArgumentParser(description="Evaluate model predictions on needle-in-haystack task.")
     parser.add_argument("--model", type=str, nargs='+', default=["llama2"], choices=["llama", "llama2", "llama3", "opt", "qwen2"])
     parser.add_argument("--dataset", type=str, nargs='+', default=["datasets/needle_dataset.jsonl"])
     parser.add_argument("--budget", type=int, nargs='+', default=[128], help="Total budget for compression")
     parser.add_argument("--method", type=str, nargs='+', default=["snap"], help="Compression method (full, a2sf, h2o, snap, sigmoid)")
     parser.add_argument("--window", type=int, nargs='+', default=[16], help="Observation window size")
+    parser.add_argument("--rl_checkpoint", type=str, default=None, help="Optional RL checkpoint path. If set, sigmoid method uses RL-selected a,b per sample.")
     
     return parser.parse_args(args)
 
 if __name__ == "__main__":
     args = parse_args()
-    
     main(args)

@@ -24,7 +24,7 @@ rcParams.update({
 # ---------------------------------------------------------
 # 2. Data Loading
 # ---------------------------------------------------------
-folder_name = "runs/a2sf_rl_all"
+folder_name = "runs/a2sf_rl"
 data_file = f"{folder_name}/training_progress.jsonl"
 
 iterations = []
@@ -35,18 +35,18 @@ with open(data_file, 'r') as f:
     for line in f:
         if line.strip():  # Skip empty lines
             data = json.loads(line)
-            iterations.append(data['iteration'])
-            avg_rewards.append(data['avg_reward'])
-            total_losses.append(data['total_loss'])
+            iterations.append(int(data['iteration']))
+            avg_rewards.append(float(data['avg_reward']))
+            total_losses.append(float(data['total_loss']))
 
-iterations = np.array(iterations)
-avg_rewards = np.array(avg_rewards)
-total_losses = np.array(total_losses)
+iterations = np.array(iterations, dtype=np.int64)
+avg_rewards = np.array(avg_rewards, dtype=np.float64)
+total_losses = np.array(total_losses, dtype=np.float64)
 
 # ---------------------------------------------------------
 # 2.5. Data Smoothing (5-point moving average)
 # ---------------------------------------------------------
-window_size = 10
+window_size = 80
 
 def smooth_data(data, window_size):
     """5개씩 묶어서 평균 계산"""
