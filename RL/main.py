@@ -36,9 +36,9 @@ class A2SFRLConfig:
     
     # ----- NeuralUCB Hyperparameters -----
     lr: float = 1e-2
-    ucb_beta_max: float = 10.0  # Initial exploration parameter for UCB
+    ucb_beta_max: float = 1.0  # Initial exploration parameter for UCB
     ucb_beta_min: float = 0.1   # Final exploration parameter for UCB
-    l2_coef: float = 1e-6  # L2 regularization coefficient for weight decay
+    l2_coef: float = 1e-5  # L2 regularization coefficient for weight decay
     
     # ----- Learning Rate Scheduler -----
     scheduler_T_max: int = 3000  # For CosineAnnealingLR: maximum iterations
@@ -143,14 +143,19 @@ def main():
     # Train
     trainer.train(num_iterations=config.iterations)
     
-    # Save final model
+    # Save final model with the same structure as periodic checkpoints
     final_checkpoint_path = os.path.join(config.save_dir, "policy_final.pt")
-    torch.save({
-        "policy_state_dict": trainer.policy.state_dict(),
-        "attention_encoder_state_dict": trainer.env.context_encoder.state_dict(),
-        "optimizer_state_dict": trainer.optimizer.state_dict(),
-        "config": config,
-    }, final_checkpoint_path)
+    torch.save(
+        {
+            "iteration": config.iterations,
+            "policy_state_dict": trainer.policy.state_dict(),
+            "attention_encoder_state_dict": {},  # Keep identical to trainer checkpoints
+            "optimizer_state_dict": trainer.optimizer.state_dict(),
+            "config": config,
+            "scheduler_state_dict": trainer.scheduler.state_dict(),
+        },
+        final_checkpoint_path,
+    )
     
     print(f"Training completed. Final model saved to: {final_checkpoint_path}")
 

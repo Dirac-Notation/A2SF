@@ -1,18 +1,13 @@
 import torch
-import json
 import os
-import math
-import re
-from typing import Dict, Any, List, Tuple, Set, Optional
-from collections import Counter
+from typing import Dict, Any
 from dataclasses import dataclass
 import time
 
 import sys
-import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from utils import load_model, set_seed, CompressionConfig
+from utils import load_model, CompressionConfig
 from .main import A2SFRLConfig
 
 @dataclass
@@ -28,9 +23,7 @@ class A2SFModelRunner:
         self.model, self.tokenizer = load_model(config.model_name)
         
         self.num_layers = self.model.config.num_hidden_layers
-        self.num_attention_heads = self.model.config.num_attention_heads
-        self.num_kv_heads = self.model.config.num_key_value_heads
-        self.gqa_group_size = self.num_attention_heads // self.num_kv_heads
+        self.debug_shapes = os.environ.get("A2SF_DEBUG_SHAPES", "0") == "1"
     
     def run_with_compression(
         self,
@@ -38,9 +31,7 @@ class A2SFModelRunner:
         a: float,
         b: float,
         token_budget: int,
-        answer_indices: List[List[List[int]]],
-        generation_length: int,
-        reference_text: Optional[str] = None,
+        target_prob_data: Dict[str, torch.Tensor],
         dataset: str = None,
     ) -> ModelResult:
         start_time = time.time()
@@ -51,106 +42,99 @@ class A2SFModelRunner:
         
         compression_config = self._create_compression_config(a, b, token_budget)
         self.model.init_cache(compression_config)
+
+        answer_token_ids = target_prob_data["answer_token_ids"].to(self.model.device)
+        teacher_topk_indices = target_prob_data["teacher_topk_indices"].to(self.model.device)
+        teacher_topk_probs = target_prob_data["teacher_topk_probs"].to(self.model.device)
         
         with torch.no_grad():
-            output_ids = self.model.generate(
+            prefill_outputs = self.model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                max_new_tokens=generation_length,
-                do_sample=False,
-                temperature=1.0,
-                pad_token_id=self.tokenizer.eos_token_id,
+                use_cache=True,
+                output_attentions=False,
             )
-        generated_ids = output_ids[0][input_ids.shape[1]:]
-        generated_text = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
-        
-        # Extract selected_indices from each layer cache after prefill
-        model_selected = []
-        for layer_idx in range(self.num_layers):
-            layer_cache = self.model.layer_caches[layer_idx]
-            model_selected.append(layer_cache.selected_indices)
+            prefill_logits = prefill_outputs.logits[:, -1, :]  # (1, vocab)
+            past_key_values = prefill_outputs.past_key_values
+
+            answer_len = int(answer_token_ids.size(0))
+            if answer_len == 0:
+                kl_value = 0.0
+            else:
+                # 첫 번째 정답 토큰 확률은 prefill 마지막 logits에서 계산
+                logits_steps = [prefill_logits.unsqueeze(1)]  # (1, 1, vocab)
+
+                # 나머지 정답 토큰은 teacher forcing으로 한 번에 계산
+                if answer_len > 1:
+                    decode_input_ids = answer_token_ids[:-1].unsqueeze(0)
+                    decode_attention_mask = torch.cat(
+                        [
+                            attention_mask,
+                            attention_mask.new_ones((attention_mask.size(0), answer_len - 1)),
+                        ],
+                        dim=-1,
+                    )
+                    decode_outputs = self.model(
+                        input_ids=decode_input_ids,
+                        attention_mask=decode_attention_mask,
+                        past_key_values=past_key_values,
+                        use_cache=True,
+                        output_attentions=False,
+                    )
+                    logits_steps.append(decode_outputs.logits)  # (1, answer_len-1, vocab)
+
+                if self.debug_shapes:
+                    print("[A2SF_DEBUG] answer_len:", answer_len)
+                    print("[A2SF_DEBUG] prefill_logits.shape:", tuple(prefill_logits.shape))
+                    if answer_len > 1:
+                        print("[A2SF_DEBUG] decode_input_ids.shape:", tuple(decode_input_ids.shape))
+                        print("[A2SF_DEBUG] decode_outputs.logits.shape:", tuple(decode_outputs.logits.shape))
+                    for idx, t in enumerate(logits_steps):
+                        print(f"[A2SF_DEBUG] logits_steps[{idx}].shape:", tuple(t.shape))
+
+                student_logits = torch.cat(logits_steps, dim=1)  # (1, answer_len, vocab)
+                kl_value = self._compute_sparse_kl_divergence(
+                    student_logits=student_logits,
+                    teacher_topk_indices=teacher_topk_indices,
+                    teacher_topk_probs=teacher_topk_probs,
+                )
         
         inference_time = time.time() - start_time
-        # print(f"Inference time: {inference_time}")
-        
-        token_similarity = self._compute_jaccard_reward(answer_indices, model_selected)
-        rouge1_score = self._compute_rouge1_f1(generated_text, reference_text)
-        # reward = self._geometric_mean(token_similarity, rouge1_score)
-        reward = rouge1_score
+        reward = -kl_value
         
         return ModelResult(reward=reward, inference_time=inference_time)
 
-    def _geometric_mean(self, x: float, y: float) -> float:
-        x = max(0.0, float(x))
-        y = max(0.0, float(y))
-        return math.sqrt(x * y)
-    
-    def _compute_jaccard_reward(
+    def _compute_sparse_kl_divergence(
         self,
-        answer_indices: List[List[List[int]]],
-        model_selected: List[Optional[torch.Tensor]],
+        student_logits: torch.Tensor,
+        teacher_topk_indices: torch.Tensor,
+        teacher_topk_probs: torch.Tensor,
     ) -> float:
         """
-        Compute average Jaccard similarity between ground-truth answer_indices
-        and model's selected_indices across all (layer, query_head) pairs.
-        
-        In GQA, query heads in the same group share the same KV head's
-        selected indices, so each query head is compared individually
-        against its corresponding KV head's prediction.
-        
-        answer_indices: [num_layers][num_attention_heads][top_k]
-        model_selected: list of tensors (1, num_kv_heads, select_budget) or None per layer
+        Compute KL(P_teacher || P_student) on teacher top-k support only.
         """
-        jaccard_scores = []
-        
-        for layer_idx in range(self.num_layers):
-            sel = model_selected[layer_idx]
-            
-            # sel: (1, num_kv_heads, select_budget) -> (num_kv_heads, select_budget)
-            sel = sel[0]
-            
-            for q_head_idx in range(self.num_attention_heads):
-                kv_head_idx = q_head_idx // self.gqa_group_size
-                gt_set = set(answer_indices[layer_idx][kv_head_idx][0])
-                pred_set = set(sel[kv_head_idx].cpu().tolist())
-                intersection = len(gt_set & pred_set)
-                union = len(gt_set | pred_set)
-                jaccard = intersection / union if union > 0 else 1.0
-                jaccard_scores.append(jaccard)
-        
-        if not jaccard_scores:
-            return 0.0
-        return sum(jaccard_scores) / len(jaccard_scores)
-
-    def _compute_rouge1_f1(self, prediction: str, reference: Optional[str]) -> float:
-        """
-        Compute ROUGE-1 F1 score with simple whitespace/punctuation tokenization.
-        """
-        if reference is None:
+        if teacher_topk_indices.numel() == 0 or teacher_topk_probs.numel() == 0:
             return 0.0
 
-        pred_tokens = self._tokenize_for_rouge(prediction)
-        ref_tokens = self._tokenize_for_rouge(reference)
-
-        if not pred_tokens or not ref_tokens:
+        # Align by shortest available sequence length for stability
+        seq_len = min(student_logits.size(1), teacher_topk_indices.size(0), teacher_topk_probs.size(0))
+        if seq_len == 0:
             return 0.0
 
-        pred_counts = Counter(pred_tokens)
-        ref_counts = Counter(ref_tokens)
-        overlap = sum((pred_counts & ref_counts).values())
-        if overlap == 0:
-            return 0.0
+        student_log_probs = torch.log_softmax(student_logits[:, :seq_len, :], dim=-1)
+        support_idx = teacher_topk_indices[:seq_len].unsqueeze(0).long()
+        support_teacher_probs = teacher_topk_probs[:seq_len].to(student_log_probs.dtype)
 
-        precision = overlap / len(pred_tokens)
-        recall = overlap / len(ref_tokens)
-        if precision + recall == 0:
-            return 0.0
-        return 2 * precision * recall / (precision + recall)
+        # Normalize sparse teacher probs so KL is well-defined on support
+        support_teacher_probs = support_teacher_probs / support_teacher_probs.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+        support_teacher_log_probs = torch.log(support_teacher_probs.clamp_min(1e-12))
 
-    def _tokenize_for_rouge(self, text: Optional[str]) -> List[str]:
-        if not text:
-            return []
-        return re.findall(r"\w+", text.lower())
+        support_student_log_probs = torch.gather(student_log_probs, dim=-1, index=support_idx).squeeze(0)
+        token_kl = torch.sum(
+            support_teacher_probs * (support_teacher_log_probs - support_student_log_probs),
+            dim=-1,
+        )
+        return float(token_kl.mean().item())
     
     def _create_compression_config(self, a: float, b: float, token_budget: int) -> Dict[str, Any]:
         base_config = CompressionConfig()

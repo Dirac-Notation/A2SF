@@ -208,7 +208,15 @@ def load_leval_datasets(tokenizer) -> List[Dict[str, Any]]:
     
     return all_samples
 
-def generate_answer(model, tokenizer, sample: Dict[str, Any], model_name: str) -> Dict[str, Any]:
+def generate_answer(
+    model,
+    tokenizer,
+    sample: Dict[str, Any],
+    model_name: str,
+    sample_id: int,
+    probs_dir: str,
+    teacher_topk: int,
+) -> Dict[str, Any]:
     """
     Generate answer for a single sample using full cache (no compression).
     sample should contain: "input_prompt", "generation_length", "dataset", "task_type"
@@ -245,6 +253,7 @@ def generate_answer(model, tokenizer, sample: Dict[str, Any], model_name: str) -
         next_token = torch.argmax(logits, dim=-1, keepdim=True)
 
         generated_tokens = []
+        step_logits = []
         all_decode_attentions = []
 
         # attention mask는 생성될 때마다 길이를 1씩 늘려서 유지
@@ -254,10 +263,12 @@ def generate_answer(model, tokenizer, sample: Dict[str, Any], model_name: str) -
         for step in range(generation_length):
             if step == 0:
                 cur_input_ids = next_token
+                step_logits.append(logits.detach().to(torch.float32).cpu())
             else:
                 # 직전 step의 logits에서 greedy decoding
                 logits = outputs.logits[:, -1, :]
                 cur_input_ids = torch.argmax(logits, dim=-1, keepdim=True)
+                step_logits.append(logits.detach().to(torch.float32).cpu())
 
             generated_tokens.append(cur_input_ids)
 
@@ -326,14 +337,37 @@ def generate_answer(model, tokenizer, sample: Dict[str, Any], model_name: str) -
     scores = scores.view(num_layers, num_kv_heads, group_size, 1, seq_len)
     grouped_scores = scores.sum(dim=2)
     answer_indices = grouped_scores.topk(128, dim=3).indices.tolist()
+
+    if step_logits:
+        step_logits_tensor = torch.stack(step_logits, dim=1)  # (1, gen_len, vocab)
+        step_logits_tensor = step_logits_tensor.squeeze(0)
+        topk = min(int(teacher_topk), step_logits_tensor.size(-1))
+        teacher_probs = torch.softmax(step_logits_tensor, dim=-1)
+        teacher_topk_probs, teacher_topk_indices = torch.topk(teacher_probs, k=topk, dim=-1)
+    else:
+        teacher_topk_indices = torch.empty((0, 0), dtype=torch.long)
+        teacher_topk_probs = torch.empty((0, 0), dtype=torch.float32)
+
+    probs_path = os.path.join(probs_dir, f"{sample_id}.pt")
+    torch.save(
+        {
+            "sample_id": sample_id,
+            "answer_token_ids": generated_ids[0].detach().to(torch.long).cpu(),
+            "teacher_topk_indices": teacher_topk_indices.to(torch.long).cpu(),
+            "teacher_topk_probs": teacher_topk_probs.to(torch.float32).cpu(),
+        },
+        probs_path,
+    )
     
     return {
+        "sample_id": sample_id,
         "dataset": dataset_name,
         "task_type": task_type,
         "input_prompt": prompt_for_gen,
         "generation_length": len(output["decode_attentions"]),
         "generated_text": generated_text,
         "answer_indices": answer_indices,
+        "target_prob_file": probs_path,
     }
 
 def main(args):
@@ -368,7 +402,10 @@ def main(args):
     # ------------------------------------------------------------------
     # Generate model outputs and save each sample immediately
     # ------------------------------------------------------------------
-    os.makedirs(os.path.dirname(args.output_file), exist_ok=True)
+    output_parent = os.path.dirname(args.output_file)
+    if output_parent:
+        os.makedirs(output_parent, exist_ok=True)
+    os.makedirs(args.probs_dir, exist_ok=True)
     
     print(f"\n{'='*50}")
     print("Generating model outputs and saving line by line...")
@@ -377,17 +414,27 @@ def main(args):
     total_samples = 0
     processed_counts = {}
     with open(args.output_file, 'w', encoding='utf-8') as f:
-        for sample in tqdm(all_samples, desc="Generating & saving"):
+        for sample_id, sample in enumerate(tqdm(all_samples, desc="Generating & saving")):
             try:
-                result = generate_answer(model, tokenizer, sample, model_name)
+                result = generate_answer(
+                    model,
+                    tokenizer,
+                    sample,
+                    model_name,
+                    sample_id=sample_id,
+                    probs_dir=args.probs_dir,
+                    teacher_topk=args.teacher_topk,
+                )
     
                 training_sample = {
+                    "sample_id": result["sample_id"],
                     "dataset": result["dataset"],
                     "task_type": result["task_type"],
                     "input_prompt": result["input_prompt"],
                     "generation_length": result["generation_length"],
                     "generated_text": result["generated_text"],
-                    "answer_indices": result["answer_indices"]
+                    "answer_indices": result["answer_indices"],
+                    "target_prob_file": result["target_prob_file"],
                 }
     
                 f.write(json.dumps(training_sample, ensure_ascii=False, separators=(",", ":")) + "\n")
@@ -510,6 +557,8 @@ def check_training_data_stats(file_path):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate training data from ZeroSCROLLS and L-Eval datasets, or check statistics")
     parser.add_argument("--output_file", type=str, default="./datasets/training_data.jsonl", help="Output file for training data")
+    parser.add_argument("--probs_dir", type=str, default="./datasets/training_probs", help="Directory to save prompt-wise teacher probability files (*.pt)")
+    parser.add_argument("--teacher_topk", type=int, default=128, help="Top-k teacher probabilities to store per output token")
     parser.add_argument("--model", type=str, default="llama3", choices=["llama", "llama2", "llama3", "opt"], help="Model to use")
     
     args = parser.parse_args()

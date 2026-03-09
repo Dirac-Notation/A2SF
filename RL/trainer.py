@@ -50,9 +50,10 @@ class A2SFTrainer:
         
         self.model_runner = A2SFModelRunner(config)
         self.env = A2SFEnv(self.model_runner, config)
+        self._target_prob_cache: Dict[str, Dict[str, torch.Tensor]] = {}
         
-        # State dimension is fixed to 8192 (output_dim of AttentionEncoder) + 2 (generation_length + token_budget features)
-        state_dim = 8192 + 2
+        # State dimension is fixed to 8192 (attention output) + 1 (token_budget feature)
+        state_dim = 8192 + 1
         
         self.policy = NeuralUCBPolicy(
             state_dim=state_dim,
@@ -102,18 +103,71 @@ class A2SFTrainer:
         print(f"Training batches per epoch: {len(self.train_loader)}")
         os.makedirs(config.save_dir, exist_ok=True)
         
+    @staticmethod
+    def _format_fixed(value: float, digits: int) -> str:
+        return f"{float(value):.{digits}f}"
+
+    def _format_list_fixed(self, values: List[Any], digits: int) -> List[Any]:
+        formatted = []
+        for v in values:
+            if isinstance(v, (float, int)):
+                formatted.append(self._format_fixed(v, digits))
+            else:
+                formatted.append(v)
+        return formatted
+
+    def _serialize_with_fixed_precision(self, payload: Dict[str, Any], digits_map: Dict[str, int]) -> Dict[str, Any]:
+        serialized = {}
+        for key, value in payload.items():
+            if key in digits_map and isinstance(value, (float, int)):
+                serialized[key] = self._format_fixed(value, digits_map[key])
+            elif key in digits_map and isinstance(value, list):
+                serialized[key] = self._format_list_fixed(value, digits_map[key])
+            else:
+                serialized[key] = value
+        return serialized
+    
     
     def load_training_data(self) -> List[Dict[str, Any]]:
         training_data_path = "datasets/training_data.jsonl"
         
         training_data = open(training_data_path, 'r', encoding='utf-8')
         training_data = [json.loads(line) for line in training_data]
+
+        base_dir = os.path.dirname(training_data_path)
+        for idx, sample in enumerate(training_data):
+            prob_file = sample.get("target_prob_file")
+            if not prob_file:
+                raise ValueError(
+                    f"Sample #{idx} does not contain 'target_prob_file'. "
+                    "Regenerate dataset with updated make_training_dataset.py."
+                )
+            resolved_prob_file = prob_file
+            if not os.path.isabs(resolved_prob_file):
+                if not os.path.exists(resolved_prob_file):
+                    candidate = os.path.normpath(os.path.join(base_dir, resolved_prob_file))
+                    if os.path.exists(candidate):
+                        resolved_prob_file = candidate
+                resolved_prob_file = os.path.normpath(resolved_prob_file)
+            sample["target_prob_file"] = resolved_prob_file
+            if not os.path.exists(resolved_prob_file):
+                raise FileNotFoundError(f"Target probability file not found: {resolved_prob_file}")
         
         # for data in training_data:
         #     data["input_prompt"] = self.model_runner.prepare_prompt(data["input_prompt"], data["dataset"])
         
         print(f"Loaded {len(training_data)} total samples from {training_data_path}")
         return training_data
+
+    def _load_target_prob_data(self, path: str) -> Dict[str, torch.Tensor]:
+        if path not in self._target_prob_cache:
+            data = torch.load(path, map_location="cpu")
+            required_keys = {"answer_token_ids", "teacher_topk_indices", "teacher_topk_probs"}
+            missing = required_keys - set(data.keys())
+            if missing:
+                raise KeyError(f"Missing keys {missing} in target probability file: {path}")
+            self._target_prob_cache[path] = data
+        return self._target_prob_cache[path]
     
     def _split_data(self, all_data: List[Dict[str, Any]], eval_samples: int, seed: int) -> tuple:
         """
@@ -386,13 +440,13 @@ class A2SFTrainer:
                     token_budget = random.choice(valid_budgets)
                 
                 # Encode state (only once)
+                target_prob_data = self._load_target_prob_data(episode_data["target_prob_file"])
                 state = self.env.encode_to_state(
                     prompt=prompt,
                     generation_length=episode_data["generation_length"],
-                    answer_indices=episode_data["answer_indices"],
+                    target_prob_data=target_prob_data,
                     token_budget=token_budget,
                     dataset=episode_data["dataset"],
-                    reference_text=episode_data.get("generated_text"),
                 )
                 state = state.to(self.device)
 
@@ -482,10 +536,9 @@ class A2SFTrainer:
             state = self.env.encode_to_state(
                 prompt=prompt,
                 generation_length=episode_data["generation_length"],
-                answer_indices=episode_data["answer_indices"],
+                target_prob_data=self._load_target_prob_data(episode_data["target_prob_file"]),
                 token_budget=token_budget,
                 dataset=episode_data["dataset"],
-                reference_text=episode_data.get("generated_text"),
             )
             state = state.to(self.device)
 
@@ -502,9 +555,6 @@ class A2SFTrainer:
         avg_eval_reward = sum(eval_rewards) / len(eval_rewards) if eval_rewards else 0.0
         avg_eval_reward = round(avg_eval_reward, 4)
         
-        # Round individual rewards to 4 decimal places
-        eval_rewards_rounded = [round(r, 4) for r in eval_rewards]
-        
         print("Evaluation Results:")
         print(f"  Avg Reward:   {avg_eval_reward:.4f}")
         print(f"  UCB Beta:     {current_beta:.4f}")
@@ -513,11 +563,18 @@ class A2SFTrainer:
         eval_data = {
             "iteration": iteration,
             "eval_avg_reward": avg_eval_reward,
-            "ucb_beta": round(current_beta, 6),
-            "eval_rewards": eval_rewards_rounded,
+            "ucb_beta": current_beta,
             "eval_actions_a": eval_actions_a,
             "eval_actions_b": eval_actions_b,
         }
+        eval_data = self._serialize_with_fixed_precision(
+            eval_data,
+            digits_map={
+                "eval_avg_reward": 4,
+                "ucb_beta": 6,
+                "eval_actions_a": 4,
+            },
+        )
         
         with open(os.path.join(self.config.save_dir, "evaluation_progress.jsonl"), "a") as f:
             f.write(json.dumps(eval_data) + "\n")
@@ -550,15 +607,27 @@ class A2SFTrainer:
         
         progress_data = {
             "iteration": iteration,
-            "avg_reward": round(avg_reward.item() if isinstance(avg_reward, torch.Tensor) else avg_reward, 4),
+            "avg_reward": avg_reward.item() if isinstance(avg_reward, torch.Tensor) else avg_reward,
             "prediction_loss": prediction_loss,
             "l2_loss": l2_loss,
             "total_loss": total_loss,
-            "learning_rate": round(current_lr, 6),
-            "ucb_beta": round(current_beta, 6),
+            "learning_rate": current_lr,
+            "ucb_beta": current_beta,
             "actions_a": iteration_actions_a,
             "actions_b": iteration_actions_b,
         }
+        progress_data = self._serialize_with_fixed_precision(
+            progress_data,
+            digits_map={
+                "avg_reward": 4,
+                "prediction_loss": 4,
+                "l2_loss": 4,
+                "total_loss": 4,
+                "learning_rate": 6,
+                "ucb_beta": 6,
+                "actions_a": 4,
+            },
+        )
         
         with open(os.path.join(self.config.save_dir, "training_progress.jsonl"), "a") as f:
             f.write(json.dumps(progress_data) + "\n")

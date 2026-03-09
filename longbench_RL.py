@@ -97,8 +97,8 @@ def load_rl_policy(checkpoint_path, device, target_model, target_tokenizer):
         num_query_tokens=16
     ).to(device)
     
-    # State dimension is fixed to 8192 (output_dim of AttentionEncoder) + 2 (generation_length + token_budget features)
-    state_dim = 8194
+    # State dimension is fixed to 8192 (attention output) + 1 (token_budget feature)
+    state_dim = 8193
     
     # Initialize policy with config values (discrete sigmoid cache a, b candidates)
     policy = NeuralUCBPolicy(
@@ -119,7 +119,7 @@ def load_rl_policy(checkpoint_path, device, target_model, target_tokenizer):
     
     return policy, context_encoder, config
 
-def get_rl_action(policy, context_encoder, prompt, generation_length, token_budget, dataset, model_name, device, ucb_beta=1.0):
+def get_rl_action(policy, context_encoder, prompt, generation_length, token_budget, device, ucb_beta=1.0):
     """Get RL action (a, b) for sigmoid cache from given prompt"""
     # Encode context with generation_length and token_budget
     context_embedding = context_encoder.encode_context(prompt, generation_length, token_budget)
@@ -132,8 +132,14 @@ def get_rl_action(policy, context_encoder, prompt, generation_length, token_budg
         (a_tensor, b_tensor), ucb_value = policy.act(state, beta=ucb_beta)
     
     # Extract scalar a, b values
-    a_val = a_tensor.item() if isinstance(a_tensor, torch.Tensor) else a_tensor
-    b_val = b_tensor.item() if isinstance(b_tensor, torch.Tensor) else b_tensor
+    if isinstance(a_tensor, torch.Tensor):
+        a_val = float(a_tensor.view(-1)[0].item())
+    else:
+        a_val = float(a_tensor)
+    if isinstance(b_tensor, torch.Tensor):
+        b_val = float(b_tensor.view(-1)[0].item())
+    else:
+        b_val = float(b_tensor)
     
     return a_val, b_val
 
@@ -142,13 +148,6 @@ def get_pred_rl(data, max_length, max_gen, dataset, model, tokenizer, out_path, 
     """Generate predictions using RL-determined sigmoid cache parameters (a, b)"""
     for json_obj in tqdm(data):
         prompt = json_obj["input_prompt"]
-
-        # Get RL action (a, b) for sigmoid cache from this prompt
-        # Pass max_gen as generation_length and budget as token_budget to consider both in state encoding
-        a_val, b_val = get_rl_action(
-            rl_policy, context_encoder, prompt, max_gen, budget, dataset, model_name, device,
-            ucb_beta=rl_config.ucb_beta,
-        )
 
         tokenized_prompt = tokenizer(prompt, truncation=False, return_tensors="pt").input_ids[0]
         
@@ -160,6 +159,17 @@ def get_pred_rl(data, max_length, max_gen, dataset, model, tokenizer, out_path, 
         if dataset not in ["trec", "triviaqa", "samsum", "lsht", "lcc", "repobench-p"]:
             if "llama" in model_name:
                 prompt = f"[INST]{prompt}[/INST]"
+
+        # RL action은 실제 모델 입력 prompt와 동일한 텍스트로 추론
+        a_val, b_val = get_rl_action(
+            rl_policy,
+            context_encoder,
+            prompt,
+            max_gen,
+            budget,
+            device,
+            ucb_beta=rl_config.ucb_beta,
+        )
         
         input = tokenizer(prompt, truncation=False, return_tensors="pt")
         

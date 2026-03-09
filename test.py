@@ -1,10 +1,9 @@
 """
-세 가지 캐시 방식의 결과 비교 테스트:
-1. A2SF Cache (forgetting_factor=1.0)
-2. Snap Cache (observation_window=prompt_length)
-3. Sigmoid Cache (a=10.0, b=prompt_length)
+선택한 캐시 기법 1개에 대해 두 구현을 비교:
+1) model.generate(...) 기반 생성
+2) model.forward(...) + past_key_values 기반 수동 디코딩
 
-동일한 프롬프트에 대해 각 캐시의 생성 결과를 비교합니다.
+동일한 프롬프트/시드 조건에서 두 경로의 결과가 일치하는지 확인합니다.
 """
 
 import torch
@@ -140,13 +139,42 @@ MODEL_NAME = "llama3"
 TOTAL_BUDGET = 128
 MAX_NEW_TOKENS = 64
 SEED = 42
+TARGET_METHOD = "sigmoid"  # "a2sf", "snap", "sigmoid", "h2o", "full"
 
 
-def run_generation(model, tokenizer, input_ids, attention_mask, config, max_new_tokens, seed):
-    """주어진 config로 모델 생성을 수행하고 결과를 반환"""
+def build_compression_config(method, total_budget, num_layers):
+    config = CompressionConfig()
+    config["compression_method"] = method
+
+    if method == "a2sf":
+        config["total_budget"] = total_budget
+        config["forgetting_factor"] = 0.75
+        config["layerwise_ratios"] = [1.0] * num_layers
+        config["local_ratios"] = 0.125
+    elif method == "snap":
+        config["total_budget"] = total_budget
+        config["observation_window"] = 16
+    elif method == "sigmoid":
+        config["total_budget"] = total_budget
+        config["a"] = 10.0
+        config["b"] = 16
+    elif method == "h2o":
+        config["total_budget"] = total_budget
+        config["heavy_budget_ratio"] = 0.5
+        config["recent_budget_ratio"] = 0.5
+    elif method == "full":
+        pass
+    else:
+        raise ValueError(f"Unsupported method: {method}")
+
+    return config
+
+
+def run_generate_path(model, tokenizer, input_ids, attention_mask, config, max_new_tokens, seed):
+    """generate 경로 실행"""
     model.init_cache(config)
     set_seed(seed)
-    
+
     with torch.inference_mode():
         output = model.generate(
             input_ids=input_ids.clone(),
@@ -160,6 +188,52 @@ def run_generation(model, tokenizer, input_ids, attention_mask, config, max_new_
     return output
 
 
+def run_forward_path(model, tokenizer, input_ids, attention_mask, config, max_new_tokens, seed):
+    """forward + cache 경로 실행 (greedy)"""
+    model.init_cache(config)
+    set_seed(seed)
+
+    generated_ids = input_ids.clone()
+    cur_attention_mask = attention_mask.clone()
+    past_key_values = None
+
+    with torch.inference_mode():
+        outputs = model(
+            input_ids=generated_ids,
+            attention_mask=cur_attention_mask,
+            past_key_values=past_key_values,
+            use_cache=True,
+            return_dict=True,
+        )
+        past_key_values = outputs.past_key_values
+        next_token_logits = outputs.logits[:, -1, :]
+
+        for _ in range(max_new_tokens):
+            next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
+            generated_ids = torch.cat([generated_ids, next_token], dim=-1)
+            new_mask = torch.ones(
+                (cur_attention_mask.shape[0], 1),
+                dtype=cur_attention_mask.dtype,
+                device=cur_attention_mask.device,
+            )
+            cur_attention_mask = torch.cat([cur_attention_mask, new_mask], dim=-1)
+
+            if tokenizer.eos_token_id is not None and torch.all(next_token == tokenizer.eos_token_id):
+                break
+
+            outputs = model(
+                input_ids=next_token,
+                attention_mask=cur_attention_mask,
+                past_key_values=past_key_values,
+                use_cache=True,
+                return_dict=True,
+            )
+            past_key_values = outputs.past_key_values
+            next_token_logits = outputs.logits[:, -1, :]
+
+    return generated_ids[0]
+
+
 def main():
     set_seed(SEED)
     
@@ -170,6 +244,7 @@ def main():
     model, tokenizer = load_model(MODEL_NAME)
     num_layers = model.config.num_hidden_layers
     print(f"  - Number of layers: {num_layers}")
+    print(f"  - Target method: {TARGET_METHOD}")
     print(f"  - Total budget: {TOTAL_BUDGET}")
     print(f"  - Max new tokens: {MAX_NEW_TOKENS}")
     print(f"  - Number of prompts: {len(PROMPTS)}")
@@ -194,104 +269,79 @@ def main():
         print(f"  Prompt length (tokens): {prompt_length}")
         
         # =====================================================================
-        # 3. 각 캐시 방식으로 생성 수행
+        # 3. 선택한 기법으로 generate/forward 각각 수행
         # =====================================================================
-        results = {}
-        output_ids = {}
-        
-        # ----- (1) A2SF Cache -----
-        print(f"\n  [1/3] A2SF Cache (forgetting_factor=0.75)")
-        
-        config_a2sf = CompressionConfig()
-        config_a2sf["compression_method"] = "a2sf"
-        config_a2sf["total_budget"] = TOTAL_BUDGET
-        config_a2sf["forgetting_factor"] = 0.75
-        config_a2sf["layerwise_ratios"] = [1.0] * num_layers
-        config_a2sf["local_ratios"] = 0.125
-        
-        output = run_generation(model, tokenizer, input_ids, attention_mask, config_a2sf, MAX_NEW_TOKENS, SEED)
-        pred_a2sf = tokenizer.decode(output[prompt_length:], skip_special_tokens=True)
-        results["a2sf"] = pred_a2sf
-        output_ids["a2sf"] = output[prompt_length:].tolist()
-        print(f"    Generated: {pred_a2sf[:200]}{'...' if len(pred_a2sf) > 200 else ''}")
-        
-        # ----- (2) Snap Cache -----
-        print(f"  [2/3] Snap Cache (observation_window=16)")
-        
-        config_snap = CompressionConfig()
-        config_snap["compression_method"] = "snap"
-        config_snap["total_budget"] = TOTAL_BUDGET
-        config_snap["observation_window"] = 16
-        
-        output = run_generation(model, tokenizer, input_ids, attention_mask, config_snap, MAX_NEW_TOKENS, SEED)
-        pred_snap = tokenizer.decode(output[prompt_length:], skip_special_tokens=True)
-        results["snap"] = pred_snap
-        output_ids["snap"] = output[prompt_length:].tolist()
-        print(f"    Generated: {pred_snap[:200]}{'...' if len(pred_snap) > 200 else ''}")
-        
-        # ----- (3) Sigmoid Cache -----
-        print(f"  [3/3] Sigmoid Cache (a=10.0, b=16)")
-        
-        config_sigmoid = CompressionConfig()
-        config_sigmoid["compression_method"] = "sigmoid"
-        config_sigmoid["total_budget"] = TOTAL_BUDGET
-        config_sigmoid["a"] = 10.0
-        config_sigmoid["b"] = 16
-        
-        output = run_generation(model, tokenizer, input_ids, attention_mask, config_sigmoid, MAX_NEW_TOKENS, SEED)
-        pred_sigmoid = tokenizer.decode(output[prompt_length:], skip_special_tokens=True)
-        results["sigmoid"] = pred_sigmoid
-        output_ids["sigmoid"] = output[prompt_length:].tolist()
-        print(f"    Generated: {pred_sigmoid[:200]}{'...' if len(pred_sigmoid) > 200 else ''}")
-        
+        config = build_compression_config(TARGET_METHOD, TOTAL_BUDGET, num_layers)
+
+        print(f"\n  [1/2] generate path ({TARGET_METHOD})")
+        output_generate = run_generate_path(
+            model,
+            tokenizer,
+            input_ids,
+            attention_mask,
+            config,
+            MAX_NEW_TOKENS,
+            SEED,
+        )
+        gen_ids = output_generate[prompt_length:].tolist()
+        pred_generate = tokenizer.decode(output_generate[prompt_length:], skip_special_tokens=True)
+        print(f"    Generated: {pred_generate[:200]}{'...' if len(pred_generate) > 200 else ''}")
+
+        print(f"  [2/2] forward path ({TARGET_METHOD})")
+        output_forward = run_forward_path(
+            model,
+            tokenizer,
+            input_ids,
+            attention_mask,
+            config,
+            MAX_NEW_TOKENS,
+            SEED,
+        )
+        fwd_ids = output_forward[prompt_length:].tolist()
+        pred_forward = tokenizer.decode(output_forward[prompt_length:], skip_special_tokens=True)
+        print(f"    Generated: {pred_forward[:200]}{'...' if len(pred_forward) > 200 else ''}")
+
         # =====================================================================
         # 4. 결과 비교
         # =====================================================================
         print(f"\n  --- COMPARISON (Prompt {p_idx + 1}) ---")
-        
-        method_names = list(results.keys())
-        
-        for name in method_names:
-            print(f"\n    [{name}] {results[name][:120]}{'...' if len(results[name]) > 120 else ''}")
-        
+        print(f"\n    [generate] {pred_generate[:120]}{'...' if len(pred_generate) > 120 else ''}")
+        print(f"    [forward ] {pred_forward[:120]}{'...' if len(pred_forward) > 120 else ''}")
+
+        min_len = min(len(gen_ids), len(fwd_ids))
+        if min_len > 0:
+            matches = sum(1 for a, b in zip(gen_ids[:min_len], fwd_ids[:min_len]) if a == b)
+            match_rate = matches / min_len * 100
+        else:
+            match_rate = 0.0
+            matches = 0
+
+        first_diff = -1
+        for k in range(min_len):
+            if gen_ids[k] != fwd_ids[k]:
+                first_diff = k
+                break
+
         print(f"\n  TOKEN-LEVEL:")
-        for i in range(len(method_names)):
-            for j in range(i + 1, len(method_names)):
-                name_i = method_names[i]
-                name_j = method_names[j]
-                ids_i = output_ids[name_i]
-                ids_j = output_ids[name_j]
-                
-                min_len = min(len(ids_i), len(ids_j))
-                if min_len > 0:
-                    matches = sum(1 for a, b in zip(ids_i[:min_len], ids_j[:min_len]) if a == b)
-                    match_rate = matches / min_len * 100
-                else:
-                    match_rate = 0.0
-                    matches = 0
-                
-                first_diff = -1
-                for k in range(min_len):
-                    if ids_i[k] != ids_j[k]:
-                        first_diff = k
-                        break
-                
-                print(f"    [{name_i}] vs [{name_j}]: {match_rate:.1f}% ({matches}/{min_len})", end="")
-                if first_diff >= 0:
-                    token_i = tokenizer.decode([ids_i[first_diff]])
-                    token_j = tokenizer.decode([ids_j[first_diff]])
-                    print(f", first diff at {first_diff}: '{token_i}' vs '{token_j}'")
-                else:
-                    print(", identical")
-        
-        all_same = (output_ids[method_names[0]] == output_ids[method_names[1]] == output_ids[method_names[2]])
-        print(f"  => {'IDENTICAL' if all_same else 'DIFFERENT'}")
-        
+        print(f"    [generate] vs [forward]: {match_rate:.1f}% ({matches}/{min_len})", end="")
+        if first_diff >= 0:
+            token_gen = tokenizer.decode([gen_ids[first_diff]])
+            token_fwd = tokenizer.decode([fwd_ids[first_diff]])
+            print(f", first diff at {first_diff}: '{token_gen}' vs '{token_fwd}'")
+        else:
+            print(", identical")
+
+        identical = gen_ids == fwd_ids
+        print(f"  => {'IDENTICAL' if identical else 'DIFFERENT'}")
+
         all_results.append({
             "prompt_idx": p_idx,
             "prompt_length": prompt_length,
-            "results": results,
-            "identical": all_same,
+            "method": TARGET_METHOD,
+            "generate_result": pred_generate,
+            "forward_result": pred_forward,
+            "token_match_rate": f"{match_rate:.1f}%",
+            "identical": identical,
         })
     
     # =========================================================================
@@ -309,6 +359,7 @@ def main():
     save_path = "test_cache_comparison.json"
     save_data = {
         "model": MODEL_NAME,
+        "target_method": TARGET_METHOD,
         "total_budget": TOTAL_BUDGET,
         "max_new_tokens": MAX_NEW_TOKENS,
         "seed": SEED,

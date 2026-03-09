@@ -307,8 +307,7 @@ class A2SFEnv:
         # Current episode cache
         self.current_prompt = None
         self.current_dataset = None
-        self.current_answer_indices = None
-        self.current_reference_text = None
+        self.current_target_prob_data = None
         self.current_generation_length = None
         self.current_token_budget = None
     
@@ -316,15 +315,13 @@ class A2SFEnv:
         self,
         prompt: str,
         generation_length: int,
-        answer_indices: List,
+        target_prob_data: Dict[str, torch.Tensor],
         token_budget: int,
         dataset: str = None,
-        reference_text: str = None,
     ) -> torch.Tensor:
         self.current_prompt = prompt
         self.current_dataset = dataset
-        self.current_answer_indices = answer_indices
-        self.current_reference_text = reference_text
+        self.current_target_prob_data = target_prob_data
         self.current_generation_length = generation_length
         self.current_token_budget = token_budget
         
@@ -347,9 +344,7 @@ class A2SFEnv:
                 a=a_val,
                 b=b_val,
                 token_budget=self.current_token_budget,
-                answer_indices=self.current_answer_indices,
-                generation_length=self.current_generation_length,
-                reference_text=self.current_reference_text,
+                target_prob_data=self.current_target_prob_data,
                 dataset=self.current_dataset,
             )
         

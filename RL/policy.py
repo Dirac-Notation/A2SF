@@ -33,14 +33,18 @@ class NeuralUCBPolicy(nn.Module):
         
         # Regularization parameter for covariance matrix
         self.lambda_reg = lambda_reg
+        self.state_dim = int(state_dim)
+        if self.state_dim < 2:
+            raise ValueError(f"state_dim must be >= 2, got {self.state_dim}")
+        self.context_dim = self.state_dim - 1  # last dim is token_budget feature
 
-        # Backbone network for state encoding
-        self.backbone = nn.Sequential(
-            nn.Linear(state_dim-1, 512), nn.ReLU(),
-            nn.Linear(512, 512), nn.ReLU()
+        # 8192 context -> 511 projected feature
+        self.context_projector = nn.Sequential(
+            nn.Linear(self.context_dim, 511),
+            nn.ReLU(),
         )
 
-        # Feature dimension (output of backbone)
+        # Final feature dim after concatenating token_budget
         self.feature_dim = 512
 
         # Reward prediction head: predicts reward for each (a, b) pair
@@ -84,7 +88,20 @@ class NeuralUCBPolicy(nn.Module):
         if state.ndim == 1:
             state = state.unsqueeze(0)
         
-        h = self.backbone(state)  # (B, feature_dim)
+        if state.size(-1) != self.state_dim:
+            raise ValueError(
+                f"Expected state last dim {self.state_dim}, got {state.size(-1)}"
+            )
+
+        # Split state into context(8192) and token_budget(1)
+        context = state[:, :-1]
+        token_budget = state[:, -1:].to(context.dtype)
+
+        # Context projection: (B, 8192) -> (B, 511)
+        context_feature = self.context_projector(context)
+
+        # Merge token_budget to form (B, 512)
+        h = torch.cat([context_feature, token_budget], dim=-1)
         
         # Predict rewards for all (a, b) pairs using reward head
         # Apply sigmoid to ensure rewards are in [0, 1] range for NeuralUCB stability
