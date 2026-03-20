@@ -1,12 +1,27 @@
 # policy.py
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
 
 from typing import Dict, Tuple
 
 EPS = 1e-6
+
+class MLPResidualBlock(nn.Module):
+    """Residual MLP block with ReLU activations."""
+
+    def __init__(self, dim: int, hidden_dim: int, dropout: float = 0.1):
+        super().__init__()
+        self.fc1 = nn.Linear(dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, dim)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        residual = x
+        x = torch.relu(self.fc1(x))
+        x = self.dropout(x)
+        x = self.fc2(x)
+        x = self.dropout(x)
+        return residual + x
 
 class NeuralUCBPolicy(nn.Module):
     """
@@ -34,17 +49,21 @@ class NeuralUCBPolicy(nn.Module):
         # Regularization parameter for covariance matrix
         self.lambda_reg = lambda_reg
         self.state_dim = int(state_dim)
-        if self.state_dim < 2:
-            raise ValueError(f"state_dim must be >= 2, got {self.state_dim}")
-        self.context_dim = self.state_dim - 1  # last dim is token_budget feature
+        if self.state_dim < 1:
+            raise ValueError(f"state_dim must be >= 1, got {self.state_dim}")
 
-        # 8192 context -> 511 projected feature
-        self.context_projector = nn.Sequential(
-            nn.Linear(self.context_dim, 511),
+        # Projection + single normalization + residual ReLU MLP stack.
+        self.input_proj = nn.Sequential(
+            nn.Linear(self.state_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 512),
             nn.ReLU(),
         )
 
-        # Final feature dim after concatenating token_budget
+        self.backbone = nn.Sequential(
+            MLPResidualBlock(dim=512, hidden_dim=1024, dropout=0.1),
+            MLPResidualBlock(dim=512, hidden_dim=1024, dropout=0.1),
+        )
         self.feature_dim = 512
 
         # Reward prediction head: predicts reward for each (a, b) pair
@@ -93,19 +112,13 @@ class NeuralUCBPolicy(nn.Module):
                 f"Expected state last dim {self.state_dim}, got {state.size(-1)}"
             )
 
-        # Split state into context(8192) and token_budget(1)
-        context = state[:, :-1]
-        token_budget = state[:, -1:].to(context.dtype)
-
-        # Context projection: (B, 8192) -> (B, 511)
-        context_feature = self.context_projector(context)
-
-        # Merge token_budget to form (B, 512)
-        h = torch.cat([context_feature, token_budget], dim=-1)
+        # Encode state to NeuralUCB feature vector with residual backbone.
+        x = self.input_proj(state.to(dtype=torch.float32))
+        h = self.backbone(x)
         
         # Predict rewards for all (a, b) pairs using reward head
         # Apply sigmoid to ensure rewards are in [0, 1] range for NeuralUCB stability
-        reward_pred = torch.sigmoid(self.reward_head(h))  # (B, num_actions) in [0, 1]
+        reward_pred = -nn.functional.sigmoid(self.reward_head(h))  # (B, num_actions) in [0, 1]
         
         return {"reward_pred": reward_pred, "feature_vector": h}
 

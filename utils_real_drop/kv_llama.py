@@ -75,9 +75,6 @@ class LlamaAttention(nn.Module):
             base=self.rope_theta,
         )
 
-    def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
-        return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -312,12 +309,12 @@ class LlamaModel(LlamaPreTrainedModel):
                 exponents = torch.arange(0, orig_shape[1], device=input_ids.device).view(orig_shape[0], 1, orig_shape[1])
 
         # Set exponents in cache
-        if hasattr(past_key_values, "layer_caches"):
-            for layer_cache in past_key_values.layer_caches:
-                if hasattr(layer_cache, 'exponents'):
+        if hasattr(past_key_values, "layer_compressors"):
+            for layer_compressor in past_key_values.layer_compressors:
+                if hasattr(layer_compressor, 'exponents'):
                     # Keep exponents on input device. Per-layer cache hooks
                     # align to the layer's device at use-time.
-                    layer_cache.exponents = exponents
+                    layer_compressor.exponents = exponents
 
     def get_input_embeddings(self):
         return self.embed_tokens
@@ -483,7 +480,8 @@ class LlamaModel(LlamaPreTrainedModel):
         next_cache = next_decoder_cache if use_cache else None
         if next_cache is not None:
             # 외부 코드(RL 등) 하위 호환
-            self.layer_caches = next_cache.layer_caches
+            self.layer_compressors = next_cache.layer_compressors
+            self.layer_caches = self.layer_compressors
         
         if not return_dict:
             return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns] if v is not None)
@@ -507,6 +505,7 @@ class KVLlamaForCausalLM(LlamaForCausalLM):
         
         # Store compression config for use in _prepare_cache_for_generation
         self.compression_config = None
+        self.layer_compressors = None
         self.layer_caches = None
     
     def init_cache(self, compression_config):
@@ -553,7 +552,8 @@ class KVLlamaForCausalLM(LlamaForCausalLM):
             compression_config=self.compression_config,
             device=inferred_device,
         )
-        self.layer_caches = model_kwargs[cache_name].layer_caches
+        self.layer_compressors = model_kwargs[cache_name].layer_compressors
+        self.layer_caches = self.layer_compressors
 
     def prepare_inputs_for_generation(
         self, input_ids, past_key_values=None, attention_mask=None, inputs_embeds=None, **kwargs

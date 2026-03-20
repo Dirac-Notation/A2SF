@@ -5,7 +5,7 @@ import torch
 from transformers.cache_utils import Cache
 
 
-class FullCache:
+class BaseCompressor:
     """
     압축 정책 훅만 담당하는 레이어 상태/전략 객체.
     key/value 텐서 저장은 DynamicCustomCache가 직접 관리한다.
@@ -37,25 +37,29 @@ class FullCache:
         return None
 
 
-def _build_layer_cache(compression_method: str, num_key_value_heads: int, device: torch.device) -> FullCache:
+def _build_layer_compressor(
+    compression_method: str,
+    num_key_value_heads: int,
+    device: torch.device,
+) -> BaseCompressor:
     if compression_method in (None, "full"):
-        return FullCache(num_key_value_heads=num_key_value_heads, device=device)
+        return BaseCompressor(num_key_value_heads=num_key_value_heads, device=device)
     if compression_method == "h2o":
-        from .h2o_cache import H2OCache
+        from .h2o_cache import H2OCompressor
 
-        return H2OCache(num_key_value_heads=num_key_value_heads, device=device)
+        return H2OCompressor(num_key_value_heads=num_key_value_heads, device=device)
     if compression_method == "a2sf":
-        from .a2sf_cache import A2SFCache
+        from .a2sf_cache import A2SFCompressor
 
-        return A2SFCache(num_key_value_heads=num_key_value_heads, device=device)
+        return A2SFCompressor(num_key_value_heads=num_key_value_heads, device=device)
     if compression_method == "snap":
-        from .snap_cache import SnapCache
+        from .snap_cache import SnapCompressor
 
-        return SnapCache(num_key_value_heads=num_key_value_heads, device=device)
+        return SnapCompressor(num_key_value_heads=num_key_value_heads, device=device)
     if compression_method == "sigmoid":
-        from .sigmoid_cache import SigmoidCache
+        from .sigmoid_cache import SigmoidCompressor
 
-        return SigmoidCache(num_key_value_heads=num_key_value_heads, device=device)
+        return SigmoidCompressor(num_key_value_heads=num_key_value_heads, device=device)
     raise ValueError(f"Unsupported compression method: {compression_method}")
 
 
@@ -66,7 +70,8 @@ class DynamicCustomCache(Cache):
 
     def __init__(
         self,
-        layer_caches: Optional[List[FullCache]] = None,
+        layer_compressors: Optional[List[BaseCompressor]] = None,
+        layer_caches: Optional[List[BaseCompressor]] = None,
         *,
         config=None,
         compression_config=None,
@@ -74,11 +79,17 @@ class DynamicCustomCache(Cache):
     ):
         super().__init__()
         self._seen_tokens = 0
-        self.layer_caches: List[FullCache] = layer_caches if layer_caches is not None else []
+        if layer_compressors is None and layer_caches is not None:
+            layer_compressors = layer_caches
+        self.layer_compressors: List[BaseCompressor] = (
+            layer_compressors if layer_compressors is not None else []
+        )
+        # Backward compatibility alias
+        self.layer_caches = self.layer_compressors
         self.key_cache: List[torch.Tensor] = []
         self.value_cache: List[torch.Tensor] = []
 
-        if not self.layer_caches and config is not None:
+        if not self.layer_compressors and config is not None:
             method = None if compression_config is None else compression_config.compression_method
             build_device = device if device is not None else torch.device("cpu")
             num_kv_heads = (
@@ -87,14 +98,14 @@ class DynamicCustomCache(Cache):
                 else config.num_key_value_heads
             )
             for layer_idx in range(config.num_hidden_layers):
-                layer_cache = _build_layer_cache(
+                layer_compressor = _build_layer_compressor(
                     compression_method=method,
                     num_key_value_heads=num_kv_heads,
                     device=build_device,
                 )
                 if compression_config is not None:
-                    layer_cache.init_cache(compression_config, layer_idx)
-                self.layer_caches.append(layer_cache)
+                    layer_compressor.init_cache(compression_config, layer_idx)
+                self.layer_compressors.append(layer_compressor)
 
     @classmethod
     def from_legacy_cache(
@@ -146,10 +157,10 @@ class DynamicCustomCache(Cache):
             self.key_cache[layer_idx] = torch.cat([self.key_cache[layer_idx], key_states], dim=-2)
             self.value_cache[layer_idx] = torch.cat([self.value_cache[layer_idx], value_states], dim=-2)
 
-        if len(self.layer_caches) > layer_idx:
+        if len(self.layer_compressors) > layer_idx:
             # Keep logical sequence length (absolute tokens seen), not compressed KV length.
-            self.layer_caches[layer_idx].seq_length = self._seen_tokens
-            self.layer_caches[layer_idx].device = self.key_cache[layer_idx].device
+            self.layer_compressors[layer_idx].seq_length = self._seen_tokens
+            self.layer_compressors[layer_idx].device = self.key_cache[layer_idx].device
 
         return self.key_cache[layer_idx], self.value_cache[layer_idx]
 
@@ -166,9 +177,9 @@ class DynamicCustomCache(Cache):
         self.key_cache[layer_idx] = key_states.gather(dim=2, index=gather_idx)
         self.value_cache[layer_idx] = value_states.gather(dim=2, index=gather_idx)
 
-        if len(self.layer_caches) > layer_idx:
+        if len(self.layer_compressors) > layer_idx:
             # Selection may shrink KV tensors, but logical position index must keep increasing.
-            self.layer_caches[layer_idx].seq_length = self._seen_tokens
+            self.layer_compressors[layer_idx].seq_length = self._seen_tokens
 
     @staticmethod
     def _reduce_to_kv_heads(acc_scores: torch.Tensor, num_key_value_heads: int) -> torch.Tensor:
@@ -197,11 +208,13 @@ class DynamicCustomCache(Cache):
         sm_scale = 1.0 / math.sqrt(head_dim)
 
         output = torch.zeros_like(query)
-        layer_cache = self.layer_caches[layer_idx] if len(self.layer_caches) > layer_idx else None
+        layer_compressor = (
+            self.layer_compressors[layer_idx] if len(self.layer_compressors) > layer_idx else None
+        )
 
         acc_scores = None
-        if layer_cache is not None and layer_cache.should_accumulate_scores(seq_len_q, seq_len_k):
-            layer_cache.prepare_prefill(seq_len_q, seq_len_k, query.device, query.dtype)
+        if layer_compressor is not None and layer_compressor.should_accumulate_scores(seq_len_q, seq_len_k):
+            layer_compressor.prepare_prefill(seq_len_q, seq_len_k, query.device, query.dtype)
             acc_scores = torch.zeros((batch_size, num_heads, seq_len_k), dtype=torch.float32, device=query.device)
 
         for q_start in range(0, seq_len_q, block_size):
@@ -216,7 +229,7 @@ class DynamicCustomCache(Cache):
             output[:, :, q_start:q_end] = torch.matmul(probs, value)
 
             if acc_scores is not None:
-                layer_cache.accumulate_scores(
+                layer_compressor.accumulate_scores(
                     attn_probs=probs,
                     q_start=q_start,
                     q_end=q_end,
@@ -226,9 +239,9 @@ class DynamicCustomCache(Cache):
         if acc_scores is not None:
             reduced_scores = self._reduce_to_kv_heads(
                 acc_scores=acc_scores,
-                num_key_value_heads=layer_cache.num_key_value_heads,
+                num_key_value_heads=layer_compressor.num_key_value_heads,
             )
-            selected = layer_cache.select(reduced_scores, seq_len_k=seq_len_k)
+            selected = layer_compressor.select(reduced_scores, seq_len_k=seq_len_k)
             self._apply_selection(layer_idx=layer_idx, selected_indices=selected)
 
         return output
@@ -264,4 +277,12 @@ class DynamicCustomCache(Cache):
         return self.get_seq_length(layer_idx)
 
 
-__all__ = ["DynamicCustomCache", "FullCache"]
+# Backward compatibility aliases
+FullCache = BaseCompressor
+_build_layer_cache = _build_layer_compressor
+
+__all__ = [
+    "DynamicCustomCache",
+    "BaseCompressor",
+    "FullCache",
+]

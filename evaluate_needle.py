@@ -51,7 +51,7 @@ def load_dataset(file_path):
     return data
 
 def load_rl_policy(checkpoint_path, device, target_model, target_tokenizer):
-    """Load RL policy and frozen attention encoder for inference."""
+    """Load RL policy and frozen metadata encoder for inference."""
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
 
@@ -62,12 +62,12 @@ def load_rl_policy(checkpoint_path, device, target_model, target_tokenizer):
         target_model=target_model,
         target_tokenizer=target_tokenizer,
         device=device,
-        output_dim=8192,
+        output_dim=2,
         num_query_tokens=16,
     ).to(device)
 
     policy = NeuralUCBPolicy(
-        state_dim=8193,  # 8192 context + 1 token_budget feature
+        state_dim=2,  # [sequence_length_feature, task_type_feature]
         a_values=config.a_values,
         b_values=config.b_values,
     ).to(device)
@@ -80,8 +80,14 @@ def load_rl_policy(checkpoint_path, device, target_model, target_tokenizer):
     return policy, context_encoder, config
 
 
-def get_rl_action(policy, context_encoder, prompt, generation_length, token_budget, device, ucb_beta=1.0):
-    state = context_encoder.encode_context(prompt, generation_length, token_budget).to(device, dtype=torch.float32)
+def get_rl_action(policy, context_encoder, prompt, generation_length, token_budget, device, task_type=None, dataset=None, ucb_beta=1.0):
+    state = context_encoder.encode_context(
+        prompt,
+        generation_length,
+        token_budget,
+        task_type=task_type,
+        dataset=dataset,
+    ).to(device, dtype=torch.float32)
     with torch.no_grad():
         (a_tensor, b_tensor), _ = policy.act(state, beta=ucb_beta)
     a_val = float(a_tensor.view(-1)[0].item()) if isinstance(a_tensor, torch.Tensor) else float(a_tensor)
@@ -136,6 +142,8 @@ def evaluate_model(
                     generation_length=64,
                     token_budget=token_budget,
                     device=device,
+                    task_type=sample.get("task_type"),
+                    dataset=sample.get("dataset"),
                     ucb_beta=rl_ucb_beta,
                 )
                 run_config = CompressionConfig()

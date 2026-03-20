@@ -6,6 +6,7 @@
 *.json
 *.sh
 *.pt
+backup
 
 # Custom Directories
 

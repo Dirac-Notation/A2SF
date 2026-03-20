@@ -1,9 +1,9 @@
 import torch
 
-from . import FullCache
+from . import BaseCompressor
 
 
-class H2OCache(FullCache):
+class H2OCompressor(BaseCompressor):
     """H2O: 첫 prefill에서 점수 누적 후 선택."""
 
     def __init__(self, num_key_value_heads: int, device: torch.device):
@@ -43,3 +43,7 @@ class H2OCache(FullCache):
         selected_indices = scores.topk(self.total_budget, dim=-1).indices
         self.selected_indices = selected_indices
         return selected_indices
+
+
+# Backward compatibility alias
+H2OCache = H2OCompressor
