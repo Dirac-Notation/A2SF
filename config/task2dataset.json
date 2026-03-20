@@ -1,0 +1,8 @@
+{
+  "Code Complete": ["repobench-p", "lcc"],
+  "Few Shot": ["trec", "triviaqa", "samsum", "lsht"],
+  "Single-doc QA": ["narrativeqa", "qasper", "multifieldqa_en", "multifieldqa_zh"],
+  "Multi-doc QA": ["hotpotqa", "2wikimqa", "musique", "dureader"],
+  "Summarization": ["gov_report", "qmsum", "multi_news", "vcsum"],
+  "Passage Retrieval": ["passage_retrieval_en", "passage_retrieval_zh", "passage_count"]
+}

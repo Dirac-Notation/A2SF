@@ -181,14 +181,8 @@ dataset2metric = {
     "repobench-p": code_sim_score,
 }
 
-data_group = {
-    "Code Complete": ["repobench-p", "lcc"],
-    "Few Shot": ["trec", "triviaqa", "samsum", "lsht"],
-    "Single-doc QA": ["narrativeqa", "qasper", "multifieldqa_en", "multifieldqa_zh"],
-    "Multi-doc QA": ["hotpotqa", "2wikimqa", "musique", "dureader"],
-    "Summarization": ["gov_report", "qmsum", "multi_news", "vcsum"],
-    "Passage Retrieval": ["passage_retrieval_en", "passage_retrieval_zh", "passage_count"],
-}
+with open(os.path.join(os.path.dirname(__file__), "config", "task2dataset.json"), "r", encoding="utf-8") as f:
+    data_group = json.load(f)
 
 def scorer(dataset, predictions, answers, all_classes):
     total_score = 0.

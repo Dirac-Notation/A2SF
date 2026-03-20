@@ -348,49 +348,13 @@ class A2SFTrainer:
         if len(all_data) <= eval_samples:
             raise ValueError(f"Not enough data: {len(all_data)} total samples, but {eval_samples} evaluation samples requested")
         
-        # Task type mapping from dataset names (same as make_training_dataset.py)
-        task_type_mapping = {
-            "gov_report": "summarization",
-            "summ_screen_fd": "summarization",
-            "qmsum": "summarization",
-            "space_digest": "summarization",
-            "book_sum_sort": "retrieval",
-            "quality": "qa",
-            "qasper": "qa",
-            "narrative_qa": "qa",
-            "musique": "qa",
-            "hotpot_qa": "qa",
-            "codeU": "qa",
-            "coursera": "qa",
-            "financial_qa": "qa",
-            "gov_report_summ": "summarization",
-            "gsm100": "qa",
-            "legal_contract_qa": "qa",
-            "meeting_summ": "summarization",
-            "multidoc_qa": "qa",
-            "natural_question": "qa",
-            "news_summ": "summarization",
-            "paper_assistant": "qa",
-            "patent_summ": "summarization",
-            "review_summ": "summarization",
-            "sci_fi": "qa",
-            "scientific_qa": "qa",
-            "topic_retrieval_longchat": "retrieval",
-            "tpo": "qa",
-            "tv_show_summ": "summarization"
-        }
-        
         def get_task_type(sample: Dict[str, Any]) -> str:
-            """Extract task type from dataset name"""
-            dataset = sample.get("dataset", "unknown")
-            # Extract subset from dataset name (zeroscrolls_xxx or leval_xxx)
-            if dataset.startswith("zeroscrolls_"):
-                subset = dataset.replace("zeroscrolls_", "")
-            elif dataset.startswith("leval_"):
-                subset = dataset.replace("leval_", "")
-            else:
-                subset = dataset
-            return task_type_mapping.get(subset, "unknown")
+            """Use sample-provided task type directly."""
+            task_type = sample.get("task_type")
+            if not isinstance(task_type, str):
+                return "unknown"
+            task_type = task_type.strip()
+            return task_type if task_type else "unknown"
         
         # Group data by task type
         from collections import defaultdict
@@ -598,7 +562,7 @@ class A2SFTrainer:
                         )
                         state = state.to(self.device)
 
-                        action, ucb_value = self.policy.act(state, beta=current_beta)
+                        action, ucb_value = self.policy.act_with_ucb(state, beta=current_beta)
                         reward, info = self.env.step(action)
                         gt_reward_val = reward.item() if isinstance(reward, torch.Tensor) else float(reward)
 
@@ -644,9 +608,7 @@ class A2SFTrainer:
     
     def _evaluate(self, iteration: int, current_beta: Optional[float] = None, total_iterations: Optional[int] = None):
         print(f"Evaluating at iteration {iteration}")
-        if current_beta is None:
-            effective_total_iterations = max(1, int(total_iterations or self.total_iterations))
-            current_beta = self._get_ucb_beta(iteration, effective_total_iterations)
+        eval_beta = 0.0
         
         # Set to evaluation mode
         self.policy.eval()
@@ -683,7 +645,7 @@ class A2SFTrainer:
                 state = state.to(self.device)
 
                 with torch.no_grad():
-                    action, ucb_value = self.policy.act(state, beta=current_beta)
+                    action, _ = self.policy.act(state)
                     pred_reward = self.policy.predict_reward(state, action)
                     pred_reward_val = float(pred_reward.view(-1)[0].item())
 
@@ -701,13 +663,11 @@ class A2SFTrainer:
         
         print("Evaluation Results:")
         print(f"  Avg Reward:   {avg_eval_reward:.4f}")
-        print(f"  UCB Beta:     {current_beta:.4f}")
         print()
         
         eval_data = {
             "iteration": iteration,
             "eval_avg_reward": avg_eval_reward,
-            "ucb_beta": current_beta,
             "eval_actions_a": eval_actions_a,
             "eval_actions_b": eval_actions_b,
             "eval_reward_pairs": self._format_reward_pairs(eval_reward_pairs, digits=4),
@@ -716,7 +676,6 @@ class A2SFTrainer:
             eval_data,
             digits_map={
                 "eval_avg_reward": 4,
-                "ucb_beta": 6,
                 "eval_actions_a": 4,
             },
         )

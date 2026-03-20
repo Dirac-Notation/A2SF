@@ -122,18 +122,48 @@ class NeuralUCBPolicy(nn.Module):
         
         return {"reward_pred": reward_pred, "feature_vector": h}
 
+    def _select_action_from_scores(self, scores: torch.Tensor) -> Tuple[Tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
+        """Select discrete (a, b) action from per-action scores."""
+        if scores.ndim == 1:
+            scores = scores.unsqueeze(0)
+
+        action_idx = torch.argmax(scores, dim=-1)  # (B,)
+        a_idx = action_idx // self.num_b_values
+        b_idx = action_idx % self.num_b_values
+
+        a_val = self.a_values[a_idx]
+        b_val = self.b_values[b_idx]
+
+        batch_indices = torch.arange(scores.size(0), device=scores.device)
+        selected_score = scores[batch_indices, action_idx]  # (B,)
+        return (a_val, b_val), selected_score
+
     @torch.no_grad()
-    def act(self, state: torch.Tensor, beta: float = 1.0) -> Tuple[Tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
+    def act(self, state: torch.Tensor) -> Tuple[Tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
         """
-        Select action using UCB (Upper Confidence Bound) with covariance-based uncertainty
-        
+        Inference action selection (pure exploitation, beta=0).
+
+        Args:
+            state: (B, state_dim) or (state_dim,)
+        Returns:
+            action: tuple of (a, b) tensors from discrete sets
+            selected_reward_pred: predicted reward score of selected action
+        """
+        out = self.forward(state)
+        reward_pred = out["reward_pred"]  # (B, num_actions)
+        return self._select_action_from_scores(reward_pred)
+
+    @torch.no_grad()
+    def act_with_ucb(self, state: torch.Tensor, beta: float = 1.0) -> Tuple[Tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
+        """
+        Training action selection with UCB exploration.
+
         Args:
             state: (B, state_dim) or (state_dim,)
             beta: exploration parameter (higher = more exploration)
-        
         Returns:
             action: tuple of (a, b) tensors from discrete sets
-            ucb_value: UCB value of selected action
+            selected_ucb: UCB score of selected action
         """
         out = self.forward(state)
         reward_pred = out["reward_pred"]  # (B, num_actions)
@@ -143,31 +173,9 @@ class NeuralUCBPolicy(nn.Module):
             reward_pred = reward_pred.unsqueeze(0)
             feature_vector = feature_vector.unsqueeze(0)
 
-        # Vectorized uncertainty computation using einsum
-        # Compute z^T * Lambda^{-1} * z for all batches and all actions at once
-        # z: (B, feature_dim), inverse_lambdas: (num_actions, feature_dim, feature_dim)
-        # Result: (B, num_actions) where result[b, a] = z[b]^T * Lambda_a^{-1} * z[b]
         uncertainty = torch.einsum("bi,aij,bj->ba", feature_vector, self.inverse_lambdas, feature_vector)  # (B, num_actions)
-
-        # Compute UCB: mean + beta * sqrt(uncertainty)
         ucb = reward_pred + beta * torch.sqrt(uncertainty + EPS)  # (B, num_actions)
-
-        # Select action with highest UCB (flattened index)
-        action_idx = torch.argmax(ucb, dim=-1)  # (B,)
-
-        # Convert flat index to (a_idx, b_idx)
-        a_idx = action_idx // self.num_b_values  # (B,)
-        b_idx = action_idx % self.num_b_values   # (B,)
-
-        # Get actual a and b values
-        a_val = self.a_values[a_idx]  # (B,)
-        b_val = self.b_values[b_idx]  # (B,)
-
-        # Get UCB value of selected action
-        batch_indices = torch.arange(ucb.size(0), device=ucb.device)
-        ucb_value = ucb[batch_indices, action_idx]  # (B,)
-
-        return (a_val, b_val), ucb_value
+        return self._select_action_from_scores(ucb)
 
     def predict_reward(self, state: torch.Tensor, action: Tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
         """

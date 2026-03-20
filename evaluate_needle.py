@@ -80,7 +80,7 @@ def load_rl_policy(checkpoint_path, device, target_model, target_tokenizer):
     return policy, context_encoder, config
 
 
-def get_rl_action(policy, context_encoder, prompt, generation_length, token_budget, device, task_type=None, dataset=None, ucb_beta=1.0):
+def get_rl_action(policy, context_encoder, prompt, generation_length, token_budget, device, task_type=None, dataset=None):
     state = context_encoder.encode_context(
         prompt,
         generation_length,
@@ -89,7 +89,7 @@ def get_rl_action(policy, context_encoder, prompt, generation_length, token_budg
         dataset=dataset,
     ).to(device, dtype=torch.float32)
     with torch.no_grad():
-        (a_tensor, b_tensor), _ = policy.act(state, beta=ucb_beta)
+        (a_tensor, b_tensor), _ = policy.act(state)
     a_val = float(a_tensor.view(-1)[0].item()) if isinstance(a_tensor, torch.Tensor) else float(a_tensor)
     b_val = float(b_tensor.view(-1)[0].item()) if isinstance(b_tensor, torch.Tensor) else float(b_tensor)
     return a_val, b_val
@@ -107,7 +107,6 @@ def evaluate_model(
     budget=None,
     rl_policy=None,
     context_encoder=None,
-    rl_ucb_beta=1.0,
 ):
     """Evaluate the model on the needle-in-haystack task with budget settings."""
     results = defaultdict(list)
@@ -144,7 +143,6 @@ def evaluate_model(
                     device=device,
                     task_type=sample.get("task_type"),
                     dataset=sample.get("dataset"),
-                    ucb_beta=rl_ucb_beta,
                 )
                 run_config = CompressionConfig()
                 for k, v in config.items():
@@ -317,7 +315,6 @@ def main(args):
                             budget=cur_budget,
                             rl_policy=rl_policy,
                             context_encoder=context_encoder,
-                            rl_ucb_beta=(rl_config.ucb_beta if rl_config is not None else 1.0),
                         )
 
                         metrics = calculate_metrics(results)

@@ -7,7 +7,9 @@ from typing import Dict, List, Tuple
 import matplotlib.pyplot as plt
 from matplotlib import rcParams
 
-from longbench_eval import data_group
+TASK2DATASET_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config", "task2dataset.json")
+with open(TASK2DATASET_PATH, "r", encoding="utf-8") as f:
+    data_group = json.load(f)
 
 
 Action = Tuple[float, float]  # (a, b)
