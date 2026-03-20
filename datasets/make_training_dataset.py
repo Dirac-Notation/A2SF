@@ -17,40 +17,21 @@ DEFAULT_SAMPLE_RATIO = 0.10
 DEFAULT_LENGTH_BINS = 10
 DEFAULT_EVAL_RATIO = 0.02
 
-# LongBench group info (from longbench_eval.py)
-DATA_GROUP = {
-    "Code Complete": ["repobench-p", "lcc"],
-    "Few Shot": ["trec", "triviaqa", "samsum", "lsht"],
-    "Single-doc QA": ["narrativeqa", "qasper", "multifieldqa_en", "multifieldqa_zh"],
-    "Multi-doc QA": ["hotpotqa", "2wikimqa", "musique", "dureader"],
-    "Summarization": ["gov_report", "qmsum", "multi_news", "vcsum"],
-    "Passage Retrieval": ["passage_retrieval_en", "passage_retrieval_zh", "passage_count"],
-}
-
-GROUP_TO_TASK = {
-    "Code Complete": "code_complete",
-    "Few Shot": "few_shot",
-    "Single-doc QA": "single_doc_qa",
-    "Multi-doc QA": "multi_doc_qa",
-    "Summarization": "summarization",
-    "Passage Retrieval": "passage_retrieval",
-}
+TASK2DATASET_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "config",
+    "task2dataset.json",
+)
+with open(TASK2DATASET_PATH, "r", encoding="utf-8") as f:
+    DATA_GROUP = json.load(f)
 
 DATASET_TO_TASK = {
-    dataset_name: GROUP_TO_TASK[group_name]
+    dataset_name: group_name
     for group_name, datasets in DATA_GROUP.items()
     for dataset_name in datasets
 }
 
-MAX_LEN = {
-    "code_complete": 32,
-    "few_shot": 32,
-    "single_doc_qa": 32,
-    "multi_doc_qa": 32,
-    "summarization": 32,
-    "passage_retrieval": 32,
-    "unknown": 32,
-}
+MAX_LEN = 4
 
 
 def set_seed(seed: int) -> None:
@@ -321,7 +302,7 @@ def load_longbench_datasets(
     for file_path in dataset_files:
         dataset_name = os.path.splitext(os.path.basename(file_path))[0]
         task_type = DATASET_TO_TASK.get(dataset_name, "unknown")
-        generation_length = MAX_LEN.get(task_type, MAX_LEN["unknown"])
+        generation_length = MAX_LEN
 
         dataset_samples: List[Dict[str, Any]] = []
         with open(file_path, "r", encoding="utf-8") as f:

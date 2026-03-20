@@ -1,50 +1,34 @@
+import json
+import os
 import torch
 import torch.nn as nn
 from typing import Any, Dict, Optional, Tuple
 
 from .main import A2SFRLConfig
 
-TASK_TYPE_ORDER = [
-    "code_complete",
-    "few_shot",
-    "single_doc_qa",
-    "multi_doc_qa",
-    "summarization",
-    "passage_retrieval",
-    "unknown",
-]
+TASK2DATASET_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "config",
+    "task2dataset.json",
+)
+with open(TASK2DATASET_PATH, "r", encoding="utf-8") as f:
+    TASK_TO_DATASETS = json.load(f)
+
+TASK_TYPE_ORDER = list(TASK_TO_DATASETS.keys()) + ["unknown"]
 TASK_TYPE_TO_INDEX = {name: idx for idx, name in enumerate(TASK_TYPE_ORDER)}
 
-# LongBench dataset name -> task type mapping (same taxonomy as dataset builder)
+# LongBench dataset name -> task type mapping (derived from config/task2dataset.json)
 DATASET_TO_TASK_TYPE = {
-    "repobench-p": "code_complete",
-    "lcc": "code_complete",
-    "trec": "few_shot",
-    "triviaqa": "few_shot",
-    "samsum": "few_shot",
-    "lsht": "few_shot",
-    "narrativeqa": "single_doc_qa",
-    "qasper": "single_doc_qa",
-    "multifieldqa_en": "single_doc_qa",
-    "multifieldqa_zh": "single_doc_qa",
-    "hotpotqa": "multi_doc_qa",
-    "2wikimqa": "multi_doc_qa",
-    "musique": "multi_doc_qa",
-    "dureader": "multi_doc_qa",
-    "gov_report": "summarization",
-    "qmsum": "summarization",
-    "multi_news": "summarization",
-    "vcsum": "summarization",
-    "passage_retrieval_en": "passage_retrieval",
-    "passage_retrieval_zh": "passage_retrieval",
-    "passage_count": "passage_retrieval",
+    dataset_name.lower(): task_name
+    for task_name, datasets in TASK_TO_DATASETS.items()
+    for dataset_name in datasets
 }
 
 
 def normalize_task_type(task_type: Optional[str]) -> str:
     if task_type is None:
         return "unknown"
-    key = str(task_type).strip().lower()
+    key = str(task_type).strip()
     return key if key in TASK_TYPE_TO_INDEX else "unknown"
 
 

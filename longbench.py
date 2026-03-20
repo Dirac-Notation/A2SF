@@ -5,20 +5,16 @@ import argparse
 import torch
 
 from utils import load_model, set_seed, CompressionConfig
-from longbench_eval import data_group, evaluate_results
+from longbench_eval import evaluate_results
 
 # ============================================================================
 # Prediction Functions (from longbench_pred.py)
 # ============================================================================
 
-TASK_LIST = [
-    "Code Complete",
-    "Few Shot",
-    "Single-doc QA",
-    "Multi-doc QA",
-    "Passage Retrieval",
-    "Summarization",
-]
+TASK2DATASET_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config", "task2dataset.json")
+with open(TASK2DATASET_PATH, "r", encoding="utf-8") as f:
+    TASK_TO_DATASETS = json.load(f)
+TASK_LIST = list(TASK_TO_DATASETS.keys())
 
 def parse_args(args=None):
     parser = argparse.ArgumentParser(description="LongBench end-to-end evaluation")
@@ -57,7 +53,7 @@ def resolve_selected_datasets(args):
 
     selected_datasets = []
     for task in selected_tasks:
-        selected_datasets.extend(data_group[task])
+        selected_datasets.extend(TASK_TO_DATASETS[task])
     return selected_datasets
 
 def get_pred(data, max_length, max_gen, dataset, model, tokenizer, out_path, model_name, config):

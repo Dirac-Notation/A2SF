@@ -14,20 +14,16 @@ from RL.policy import NeuralUCBPolicy
 from RL.env import AttentionEncoder
 
 # Import evaluation functions from longbench_eval.py
-from longbench_eval import data_group, evaluate_results
+from longbench_eval import evaluate_results
 
 # ============================================================================
 # Prediction Functions (from longbench_pred_RL.py)
 # ============================================================================
 
-TASK_LIST = [
-    "Code Complete",
-    "Few Shot",
-    "Single-doc QA",
-    "Multi-doc QA",
-    "Passage Retrieval",
-    "Summarization",
-]
+TASK2DATASET_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config", "task2dataset.json")
+with open(TASK2DATASET_PATH, "r", encoding="utf-8") as f:
+    TASK_TO_DATASETS = json.load(f)
+TASK_LIST = list(TASK_TO_DATASETS.keys())
 
 def parse_args(args=None):
     parser = argparse.ArgumentParser(description="LongBench end-to-end evaluation with RL-trained A2SF model")
@@ -66,7 +62,7 @@ def resolve_selected_datasets(args):
 
     selected_datasets = []
     for task in selected_tasks:
-        selected_datasets.extend(data_group[task])
+        selected_datasets.extend(TASK_TO_DATASETS[task])
     return selected_datasets
 
 def load_rl_policy(checkpoint_path, device, target_model, target_tokenizer):
@@ -119,7 +115,7 @@ def load_rl_policy(checkpoint_path, device, target_model, target_tokenizer):
     
     return policy, context_encoder, config
 
-def get_rl_action(policy, context_encoder, prompt, generation_length, token_budget, device, task_type=None, dataset=None, ucb_beta=1.0):
+def get_rl_action(policy, context_encoder, prompt, generation_length, token_budget, device, task_type=None, dataset=None):
     """Get RL action (a, b) for sigmoid cache from given prompt"""
     # Encode context with generation_length and token_budget
     context_embedding = context_encoder.encode_context(
@@ -133,9 +129,9 @@ def get_rl_action(policy, context_encoder, prompt, generation_length, token_budg
     # Build state (ensure it's on the correct device and dtype)
     state = context_embedding.to(device, dtype=torch.float32)
     
-    # Get action from policy using UCB
+    # Inference-time action selection (pure exploitation).
     with torch.no_grad():
-        (a_tensor, b_tensor), ucb_value = policy.act(state, beta=ucb_beta)
+        (a_tensor, b_tensor), _ = policy.act(state)
     
     # Extract scalar a, b values
     if isinstance(a_tensor, torch.Tensor):
@@ -176,7 +172,6 @@ def get_pred_rl(data, max_length, max_gen, dataset, model, tokenizer, out_path, 
             device,
             task_type=json_obj.get("task_type"),
             dataset=dataset,
-            ucb_beta=rl_config.ucb_beta,
         )
         
         input = tokenizer(prompt, truncation=False, return_tensors="pt")
