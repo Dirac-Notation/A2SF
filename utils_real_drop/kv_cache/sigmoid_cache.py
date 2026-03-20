@@ -1,9 +1,9 @@
 import torch
 
-from . import FullCache
+from . import BaseCompressor
 
 
-class SigmoidCache(FullCache):
+class SigmoidCompressor(BaseCompressor):
     """Sigmoid: 시그모이드 창 기반 누적 + 선택."""
 
     def __init__(self, num_key_value_heads: int, device: torch.device):
@@ -40,7 +40,7 @@ class SigmoidCache(FullCache):
         else:
             self.exponents = self.exponents.to(device)
         # 기존 구현 수식 보존
-        self.window = 1 / (torch.exp(-self.a * (self.exponents - (seq_len_q - self.b - 1))))
+        self.window = 1 / (torch.exp(-self.a * (self.exponents - (seq_len_q - self.b - 1.0))))
         self.window = self.window.to(dtype=torch.float32)
 
     def accumulate_scores(
@@ -63,3 +63,7 @@ class SigmoidCache(FullCache):
         selected_indices = scores.topk(self.total_budget, dim=-1).indices
         self.selected_indices = selected_indices
         return selected_indices
+
+
+# Backward compatibility alias
+SigmoidCache = SigmoidCompressor

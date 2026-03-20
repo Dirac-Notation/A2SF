@@ -1,291 +1,126 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from typing import Dict, Any, Tuple
-from dataclasses import dataclass
-from typing import List
+from typing import Any, Dict, Optional, Tuple
 
 from .main import A2SFRLConfig
 
-# Import RoPE functions from transformers
-try:
-    from transformers.models.llama.modeling_llama import apply_rotary_pos_emb, repeat_kv
-except ImportError:
-    # Fallback: try to import from utils_real_drop if transformers import fails
-    import sys
-    import os
-    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from utils_real_drop.kv_llama import apply_rotary_pos_emb, repeat_kv
+TASK_TYPE_ORDER = [
+    "code_complete",
+    "few_shot",
+    "single_doc_qa",
+    "multi_doc_qa",
+    "summarization",
+    "passage_retrieval",
+    "unknown",
+]
+TASK_TYPE_TO_INDEX = {name: idx for idx, name in enumerate(TASK_TYPE_ORDER)}
+
+# LongBench dataset name -> task type mapping (same taxonomy as dataset builder)
+DATASET_TO_TASK_TYPE = {
+    "repobench-p": "code_complete",
+    "lcc": "code_complete",
+    "trec": "few_shot",
+    "triviaqa": "few_shot",
+    "samsum": "few_shot",
+    "lsht": "few_shot",
+    "narrativeqa": "single_doc_qa",
+    "qasper": "single_doc_qa",
+    "multifieldqa_en": "single_doc_qa",
+    "multifieldqa_zh": "single_doc_qa",
+    "hotpotqa": "multi_doc_qa",
+    "2wikimqa": "multi_doc_qa",
+    "musique": "multi_doc_qa",
+    "dureader": "multi_doc_qa",
+    "gov_report": "summarization",
+    "qmsum": "summarization",
+    "multi_news": "summarization",
+    "vcsum": "summarization",
+    "passage_retrieval_en": "passage_retrieval",
+    "passage_retrieval_zh": "passage_retrieval",
+    "passage_count": "passage_retrieval",
+}
+
+
+def normalize_task_type(task_type: Optional[str]) -> str:
+    if task_type is None:
+        return "unknown"
+    key = str(task_type).strip().lower()
+    return key if key in TASK_TYPE_TO_INDEX else "unknown"
+
+
+def resolve_task_type(dataset: Optional[str] = None, task_type: Optional[str] = None) -> str:
+    normalized = normalize_task_type(task_type)
+    if normalized != "unknown":
+        return normalized
+    if dataset is None:
+        return "unknown"
+    dataset_key = str(dataset).strip().lower()
+    return DATASET_TO_TASK_TYPE.get(dataset_key, "unknown")
+
+
+def task_type_to_index(task_type: Optional[str] = None, dataset: Optional[str] = None) -> int:
+    resolved = resolve_task_type(dataset=dataset, task_type=task_type)
+    return int(TASK_TYPE_TO_INDEX.get(resolved, TASK_TYPE_TO_INDEX["unknown"]))
+
 
 class AttentionEncoder(nn.Module):
     """
-    Attention-based encoder using cloned parameters from target model's first layer
-    - Clones target model's embedding layer weights
-    - Clones first layer's full Q, K projections from target model
-    - Query: last 16 tokens, Key: all tokens
-    - Creates independent RoPE from first layer's config
-    - Performs attention: softmax(Q*K^T/sqrt(head_dim))
-    - Averages attention across all heads
-    - Sums over query dimension to get (1, seq_len) vector
-    - Pads to 8192 dimensions
-    - All parameters are frozen (no training)
+    Metadata encoder for RL state construction.
+    Returns a 2D feature vector:
+      [ normalized_sequence_length, normalized_task_type_index ].
     """
-    
-    def __init__(self, target_model, target_tokenizer, device: str = "cpu", output_dim: int = 8192, num_query_tokens: int = 16):
+
+    def __init__(
+        self,
+        target_model,
+        target_tokenizer,
+        device: str = "cpu",
+        output_dim: int = 2,
+        num_query_tokens: int = 16,
+    ):
         super().__init__()
+        del num_query_tokens  # kept for backward-compatible constructor
         self.device = device if isinstance(device, torch.device) else torch.device(device)
         self.target_tokenizer = target_tokenizer
         self.output_dim = output_dim
-        self.num_query_tokens = num_query_tokens
-        
-        # Get config from target model
-        if hasattr(target_model, 'config'):
-            config = target_model.config
-        elif hasattr(target_model, 'model') and hasattr(target_model.model, 'config'):
-            config = target_model.model.config
-        else:
-            raise ValueError("Cannot determine config from target model")
-        
-        self.embedding_dim = config.hidden_size
-        self.num_heads = config.num_attention_heads
-        self.head_dim = self.embedding_dim // self.num_heads
-        
-        # Get first layer's attention module to clone parameters
-        first_layer_attn = self._get_first_layer_attention(target_model)
-        
-        # Clone embedding layer weights
-        embed_layer = self._get_embedding_layer(target_model)
-        with torch.no_grad():
-            # Clone embedding weights: (vocab_size, hidden_size)
-            embed_weight = embed_layer.weight.clone().to(dtype=torch.float32)
-        
-        # Register embedding as buffer
-        self.register_buffer('embed_weight', embed_weight)
-        
-        # Extract full Q/K projection parameters from first layer
-        # q_proj.weight shape: (num_heads * head_dim, hidden_size)
-        # k_proj.weight shape: (num_key_value_heads * head_dim, hidden_size)
-        with torch.no_grad():
-            q_proj_weight = first_layer_attn.q_proj.weight.clone().to(dtype=torch.float32)
-            k_proj_weight = first_layer_attn.k_proj.weight.clone().to(dtype=torch.float32)
-            
-            # Extract full bias if exists
-            if first_layer_attn.q_proj.bias is not None:
-                q_proj_bias = first_layer_attn.q_proj.bias.clone().to(dtype=torch.float32)
-            else:
-                q_proj_bias = None
-                
-            if first_layer_attn.k_proj.bias is not None:
-                k_proj_bias = first_layer_attn.k_proj.bias.clone().to(dtype=torch.float32)
-            else:
-                k_proj_bias = None
-        
-        # Register as buffers (not parameters, so they won't be trained)
-        self.register_buffer('q_proj_weight', q_proj_weight)
-        self.register_buffer('k_proj_weight', k_proj_weight)
-        if q_proj_bias is not None:
-            self.register_buffer('q_proj_bias', q_proj_bias)
-        else:
-            self.register_buffer('q_proj_bias', None)
-        if k_proj_bias is not None:
-            self.register_buffer('k_proj_bias', k_proj_bias)
-        else:
-            self.register_buffer('k_proj_bias', None)
-        
-        # Create independent RoPE from first layer's config
-        # Clone rotary embedding parameters
-        from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
-        with torch.no_grad():
-            # Get rotary embedding config from first layer
-            rope_head_dim = first_layer_attn.head_dim
-            rope_max_position_embeddings = first_layer_attn.max_position_embeddings
-            rope_theta = first_layer_attn.rope_theta
-            
-            # Create independent rotary embedding
-            self.rotary_emb = LlamaRotaryEmbedding(
-                rope_head_dim,
-                max_position_embeddings=rope_max_position_embeddings,
-                base=rope_theta,
-            )
-            # Clone inv_freq if it exists
-            if hasattr(first_layer_attn.rotary_emb, 'inv_freq'):
-                self.rotary_emb.inv_freq = first_layer_attn.rotary_emb.inv_freq.clone()
-        
-        # Scale factor for attention (using head_dim instead of query_dim)
-        self.scale = 1.0 / (self.head_dim ** 0.5)
-        
-        # Move all buffers to specified device
+        self.max_seq_length = float(target_model.config.max_position_embeddings)
+        self.max_task_index = float(max(1, len(TASK_TYPE_ORDER) - 1))
         self.to(self.device)
-        
-        # Freeze all parameters (encoder should not be trained)
         self.eval()
-        for param in self.parameters():
-            param.requires_grad = False
-    
-    def _get_first_layer_attention(self, target_model):
-        """Get the first layer's attention module from target model"""
-        # Try different model structures
-        if hasattr(target_model, 'model') and hasattr(target_model.model, 'layers'):
-            # Standard structure: model.model.layers[0].self_attn
-            if len(target_model.model.layers) == 0:
-                raise ValueError("Target model has no layers")
-            return target_model.model.layers[0].self_attn
-        elif hasattr(target_model, 'layers'):
-            # Alternative structure: model.layers[0].self_attn
-            if len(target_model.layers) == 0:
-                raise ValueError("Target model has no layers")
-            return target_model.layers[0].self_attn
-        else:
-            raise ValueError("Cannot find layers in target model")
-    
-    def _get_embedding_layer(self, target_model):
-        """Get the embedding layer from target model"""
-        if hasattr(target_model, 'embed_tokens'):
-            return target_model.embed_tokens
-        elif hasattr(target_model, 'model') and hasattr(target_model.model, 'embed_tokens'):
-            return target_model.model.embed_tokens
-        else:
-            raise ValueError("Cannot find embedding layer in target model")
-    
-    def _init_weights(self):
-        """No initialization needed - using cloned parameters"""
-        pass
-    
-    def trainable_parameters(self):
+
+    def encode_context(
+        self,
+        text: str,
+        generation_length: int,
+        token_budget: int,
+        task_type: Optional[str] = None,
+        dataset: Optional[str] = None,
+    ) -> torch.Tensor:
         """
-        Return empty list - encoder is frozen and not trained.
-        """
-        return []
-    
-    def encode_context(self, text: str, generation_length: int, token_budget: int) -> torch.Tensor:
-        """
-        Encode text using attention mechanism with target model's first layer
-        
         Args:
             text: Input text string
-            generation_length: Generation length
-            token_budget: Token budget for compression
+            generation_length: Unused, kept for backward compatibility
+            token_budget: Unused, kept for backward compatibility
+            task_type: Canonical task type string when available
+            dataset: Dataset name fallback for task type resolution
         Returns:
-            torch.Tensor: Encoded vector of shape (output_dim + 2,)
-        """  
-        # Tokenize text
+            torch.Tensor: Feature vector of shape (2,)
+        """
+        del generation_length, token_budget
         tokenized = self.target_tokenizer(
             text,
             return_tensors="pt",
             padding=False,
-            truncation=False
+            truncation=False,
         )
-        input_ids = tokenized.input_ids.to(self.device)  # (1, seq_len)
-        seq_len = input_ids.size(1)
-        
-        # Get embeddings using cloned embedding weights
-        with torch.no_grad():
-            # Use cloned embedding weights: (1, seq_len, embedding_dim)
-            # F.embedding(input_ids, embed_weight) is equivalent to embed_layer(input_ids)
-            token_embeddings = F.embedding(input_ids, self.embed_weight).to(dtype=torch.float32)  # (1, seq_len, embedding_dim)
-        
-        # Extract query (last num_query_tokens) and key (all tokens)
-        if seq_len <= self.num_query_tokens:
-            # If sequence is shorter than num_query_tokens, use all tokens for query
-            query_embeddings = token_embeddings  # (1, seq_len, embedding_dim)
-            key_embeddings = token_embeddings  # (1, seq_len, embedding_dim)
-            actual_query_len = seq_len
-        else:
-            # Query: last num_query_tokens
-            query_embeddings = token_embeddings[:, -self.num_query_tokens:, :]  # (1, num_query_tokens, embedding_dim)
-            # Key: all tokens
-            key_embeddings = token_embeddings  # (1, seq_len, embedding_dim)
-            actual_query_len = self.num_query_tokens
-        
-        # Use first layer's full Q/K projections directly (already extracted in __init__)
-        with torch.no_grad():
-            # Project using full q_proj and k_proj parameters
-            # query_embeddings: (1, actual_query_len, embedding_dim)
-            # key_embeddings: (1, seq_len, embedding_dim)
-            query_embeddings_f32 = query_embeddings.to(dtype=torch.float32)
-            key_embeddings_f32 = key_embeddings.to(dtype=torch.float32)
-            query_states = torch.matmul(query_embeddings_f32, self.q_proj_weight.t())  # (1, actual_query_len, num_heads * head_dim)
-            key_states = torch.matmul(key_embeddings_f32, self.k_proj_weight.t())  # (1, seq_len, num_kv_heads * head_dim)
-            
-            # Add bias if exists
-            if self.q_proj_bias is not None:
-                query_states = query_states + self.q_proj_bias.unsqueeze(0)
-            if self.k_proj_bias is not None:
-                key_states = key_states + self.k_proj_bias.unsqueeze(0)
-            
-            # Reshape for multi-head attention
-            query_states = query_states.view(1, actual_query_len, self.num_heads, self.head_dim).transpose(1, 2)
-            key_states = key_states.view(1, seq_len, -1, self.head_dim).transpose(1, 2)
-            
-            # Apply RoPE from first layer
-            # Create position_ids for query and key
-            if actual_query_len == seq_len:
-                # Same sequence, use same position_ids
-                position_ids = torch.arange(seq_len, dtype=torch.long, device=self.device).unsqueeze(0)  # (1, seq_len)
-                query_position_ids = position_ids
-                key_position_ids = position_ids
-            else:
-                # Query is last num_query_tokens, key is all tokens
-                query_position_ids = torch.arange(seq_len - actual_query_len, seq_len, dtype=torch.long, device=self.device).unsqueeze(0)  # (1, actual_query_len)
-                key_position_ids = torch.arange(seq_len, dtype=torch.long, device=self.device).unsqueeze(0)  # (1, seq_len)
-            
-            # Get RoPE embeddings using cloned rotary_emb
-            # rotary_emb expects (tensor, position_ids) and returns (cos, sin)
-            cos_query, sin_query = self.rotary_emb(query_states, query_position_ids)
-            cos_key, sin_key = self.rotary_emb(key_states, key_position_ids)
-            
-            # Since query/key use different position_ids, apply RoPE separately
-            query_states, _ = apply_rotary_pos_emb(query_states, query_states, cos_query, sin_query)
-            _, key_states = apply_rotary_pos_emb(key_states, key_states, cos_key, sin_key)
-            
-            # Expand KV heads to query heads for GQA-compatible attention
-            num_kv_groups = self.num_heads // key_states.size(1)
-            key_states = repeat_kv(key_states, num_kv_groups)
-        
-        # Compute attention scores: Q * K^T
-        # Q: (1, num_heads, actual_query_len, head_dim)
-        # K: (1, num_heads, seq_len, head_dim)
-        # Q * K^T: (1, num_heads, actual_query_len, seq_len)
-        attention_scores = torch.matmul(query_states, key_states.transpose(2, 3))
-        
-        # Scale by sqrt(head_dim)
-        attention_scores = attention_scores * self.scale
-        
-        # Apply softmax
-        attention_weights = torch.softmax(attention_scores, dim=-1)  # (1, num_heads, actual_query_len, seq_len)
-        
-        # Use average attention across all heads
-        attention_weights = attention_weights.mean(dim=1)  # (1, actual_query_len, seq_len)
-        
-        # Sum over query dimension (axis 1) to get (1, seq_len)
-        attention_output = attention_weights.sum(dim=1)  # (1, seq_len)
-        
-        # Squeeze batch dimension
-        attention_output = attention_output.squeeze(0)  # (seq_len,)
-        
-        # Pad to output_dim (8192) from the left with zeros
-        if seq_len < self.output_dim:
-            padding = torch.zeros(self.output_dim - seq_len, device=self.device)
-            attention_output = torch.cat([padding, attention_output], dim=0)  # (output_dim,)
-        elif seq_len > self.output_dim:
-            # If longer, truncate from the left (keep rightmost output_dim tokens)
-            attention_output = attention_output[-self.output_dim:]  # (output_dim,)
-        
-        # Add generation_length and token_budget features
-        # generation_feature = torch.zeros(1, device=self.device) + (generation_length/512)
-        token_budget_feature = torch.zeros(1, device=self.device) + (token_budget/2048)
-        # attention_output = torch.cat([attention_output, generation_feature, token_budget_feature], dim=0)  # (output_dim + 2,)
-        attention_output = torch.cat([attention_output, token_budget_feature], dim=0)  # (output_dim + 1,)
-        
-        return attention_output
+        seq_len = int(tokenized.input_ids.size(1))
+        seq_len_feature = min(float(seq_len), self.max_seq_length) / self.max_seq_length
 
-@dataclass
-class EpisodeResult:
-    """Result of an episode"""
-    accuracy_score: float
-    forgetting_factor: float
-    total_reward: float
-    metrics: Dict[str, Any]
+        task_index = float(task_type_to_index(task_type=task_type, dataset=dataset))
+        task_feature = task_index / self.max_task_index
+
+        features = torch.tensor([seq_len_feature, task_feature], device=self.device, dtype=torch.float32)
+        return features
 
 class A2SFEnv:
     """RL Environment for A2SF model (single-step / bandit)"""
@@ -295,12 +130,12 @@ class A2SFEnv:
         self.config = config
         self.device = torch.device(config.device)
         
-        # Attention encoder using target model's first layer, first head parameters
+        # Metadata encoder used to build compact RL state features
         self.context_encoder = AttentionEncoder(
             target_model=runner.model,
             target_tokenizer=runner.tokenizer,
             device=config.device,
-            output_dim=8192,
+            output_dim=2,
             num_query_tokens=16
         )
         
@@ -318,6 +153,7 @@ class A2SFEnv:
         target_prob_data: Dict[str, torch.Tensor],
         token_budget: int,
         dataset: str = None,
+        task_type: Optional[str] = None,
     ) -> torch.Tensor:
         self.current_prompt = prompt
         self.current_dataset = dataset
@@ -325,7 +161,13 @@ class A2SFEnv:
         self.current_generation_length = generation_length
         self.current_token_budget = token_budget
         
-        return self.context_encoder.encode_context(prompt, generation_length, token_budget).to(self.device, dtype=torch.float32)
+        return self.context_encoder.encode_context(
+            prompt,
+            generation_length,
+            token_budget,
+            task_type=task_type,
+            dataset=dataset,
+        ).to(self.device, dtype=torch.float32)
     
     def step(self, action: Tuple[torch.Tensor, torch.Tensor]) -> Tuple[torch.Tensor, Dict[str, Any]]:
         """

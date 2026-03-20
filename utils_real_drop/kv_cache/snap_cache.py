@@ -1,9 +1,9 @@
 import torch
 
-from . import FullCache
+from . import BaseCompressor
 
 
-class SnapCache(FullCache):
+class SnapCompressor(BaseCompressor):
     """Snap: observation window 이후 query만 누적."""
 
     def __init__(self, num_key_value_heads: int, device: torch.device):
@@ -53,3 +53,7 @@ class SnapCache(FullCache):
         selected_indices = scores.topk(self.total_budget, dim=-1).indices
         self.selected_indices = selected_indices
         return selected_indices
+
+
+# Backward compatibility alias
+SnapCache = SnapCompressor

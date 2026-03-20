@@ -35,21 +35,21 @@ class A2SFRLConfig:
     )
     
     # ----- NeuralUCB Hyperparameters -----
-    lr: float = 1e-2
+    lr: float = 1e-1
     ucb_beta_max: float = 1.0  # Initial exploration parameter for UCB
     ucb_beta_min: float = 0.1   # Final exploration parameter for UCB
     l2_coef: float = 1e-5  # L2 regularization coefficient for weight decay
     
-    # ----- Learning Rate Scheduler -----
-    scheduler_T_max: int = 3000  # For CosineAnnealingLR: maximum iterations
-    
     # ----- Training Configuration -----
-    iterations: int = 3000  # Number of training iterations
-    episodes_per_update: int = 16  # Number of episodes per update
+    epochs: int = 40  # Number of full passes over training dataset
+    episodes_per_update: int = 4  # Number of episodes per update
     
     # ----- Evaluation Configuration -----
-    eval_frequency: int = 100
     eval_samples: int = 100
+
+    # ----- Dataset Paths (pre-split) -----
+    train_data_path: str = "datasets/training_data.jsonl"
+    eval_data_path: str = "datasets/eval_data.jsonl"
     
     # ----- Misc -----
     seed: int = 42
@@ -85,6 +85,9 @@ class A2SFRLConfig:
         parser.add_argument('--model', type=str, default=default_config.model, choices=["llama", "llama2", "llama3", "opt"], help="Model name")
         parser.add_argument('--save_dir', type=str, default=default_config.save_dir, help="Directory to save checkpoints and logs")
         parser.add_argument('--resume', type=str, default=default_config.resume, help="Path to checkpoint to resume from (e.g., runs/a2sf_rl/policy_300.pt)")
+        parser.add_argument('--train_data_path', type=str, default=default_config.train_data_path, help="Path to fixed training split jsonl")
+        parser.add_argument('--eval_data_path', type=str, default=default_config.eval_data_path, help="Path to fixed evaluation split jsonl")
+        parser.add_argument('--epochs', type=int, default=default_config.epochs, help="Number of training epochs")
 
         args = parser.parse_args()
         
@@ -102,10 +105,11 @@ class A2SFRLConfig:
             ucb_beta_max=default_config.ucb_beta_max,
             ucb_beta_min=default_config.ucb_beta_min,
             l2_coef=default_config.l2_coef,
-            iterations=default_config.iterations,
+            epochs=args.epochs,
             episodes_per_update=default_config.episodes_per_update,
-            eval_frequency=default_config.eval_frequency,
             eval_samples=default_config.eval_samples,
+            train_data_path=args.train_data_path,
+            eval_data_path=args.eval_data_path,
             resume=args.resume,
         )
 
@@ -126,8 +130,10 @@ def main():
     print(f"  b_values: {config.b_values.tolist()}")
     print(f"  Episodes per update: {config.episodes_per_update}")
     print(f"  Learning rate: {config.lr}")
-    print(f"  LR Scheduler: cosine (T_max: {config.scheduler_T_max})")
+    print(f"  Epochs: {config.epochs}")
     print(f"  UCB beta (max -> min): {config.ucb_beta_max} -> {config.ucb_beta_min}")
+    print(f"  Train data: {config.train_data_path}")
+    print(f"  Eval data:  {config.eval_data_path}")
     print(f"  Save directory: {config.save_dir}")
     print()
     
@@ -139,15 +145,19 @@ def main():
     if config.resume:
         start_iteration = trainer.load_checkpoint(config.resume)
         print(f"Resuming training from iteration {start_iteration}")
+
+    print(f"  Iterations per epoch: {trainer.iterations_per_epoch}")
+    print(f"  Total iterations: {trainer.total_iterations}")
+    print(f"  LR Scheduler: cosine (T_max: {trainer.scheduler_t_max})")
     
     # Train
-    trainer.train(num_iterations=config.iterations)
+    final_iteration = trainer.train(num_epochs=config.epochs)
     
     # Save final model with the same structure as periodic checkpoints
     final_checkpoint_path = os.path.join(config.save_dir, "policy_final.pt")
     torch.save(
         {
-            "iteration": config.iterations,
+            "iteration": final_iteration,
             "policy_state_dict": trainer.policy.state_dict(),
             "attention_encoder_state_dict": {},  # Keep identical to trainer checkpoints
             "optimizer_state_dict": trainer.optimizer.state_dict(),

@@ -7,6 +7,8 @@ import torch
 import torch.optim as optim
 import torch.optim.lr_scheduler as lr_scheduler
 import torch.nn.functional as F
+import numpy as np
+import matplotlib.pyplot as plt
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -19,6 +21,7 @@ from .policy import NeuralUCBPolicy
 from .env import A2SFEnv
 from .runner import A2SFModelRunner
 
+TOKEN_BUDGET_CANDIDATES = [128]
 
 class RLDataset(Dataset):
     """Dataset for RL training episodes"""
@@ -52,8 +55,8 @@ class A2SFTrainer:
         self.env = A2SFEnv(self.model_runner, config)
         self._target_prob_cache: Dict[str, Dict[str, torch.Tensor]] = {}
         
-        # State dimension is fixed to 8192 (attention output) + 1 (token_budget feature)
-        state_dim = 8192 + 1
+        # State dimension: [sequence_length_feature, task_type_feature]
+        state_dim = 2
         
         self.policy = NeuralUCBPolicy(
             state_dim=state_dim,
@@ -62,16 +65,12 @@ class A2SFTrainer:
         ).to(self.device)
         
         # Optimizer only includes policy parameters
-        # AttentionEncoder is frozen and uses target model's first layer, first head parameters
+        # Context encoder is metadata-based and frozen
         all_params = list(self.policy.parameters())
         self.optimizer = optim.SGD(all_params, lr=config.lr)
         
-        # Initialize learning rate scheduler
-        self.scheduler = self._create_scheduler(config)
-        
-        # Load and split data into training and evaluation sets
-        all_data = self.load_training_data()
-        training_data_list, eval_data_list = self._split_data(all_data, config.eval_samples, config.seed)
+        # Load pre-split data produced by datasets/make_training_dataset.py
+        training_data_list, eval_data_list = self.load_training_data()
         
         # Create datasets
         self.training_dataset = RLDataset(training_data_list)
@@ -102,6 +101,14 @@ class A2SFTrainer:
         print(f"Loaded {len(self.eval_dataset)} evaluation samples")
         print(f"Training batches per epoch: {len(self.train_loader)}")
         os.makedirs(config.save_dir, exist_ok=True)
+
+        self.iterations_per_epoch = len(self.train_loader)
+        self.total_epochs = max(1, int(config.epochs))
+        self.total_iterations = max(1, self.total_epochs * max(1, self.iterations_per_epoch))
+        self.scheduler_t_max = self.total_epochs
+
+        # Initialize learning rate scheduler after total_iterations is known
+        self.scheduler = self._create_scheduler()
         
     @staticmethod
     def _format_fixed(value: float, digits: int) -> str:
@@ -126,38 +133,194 @@ class A2SFTrainer:
             else:
                 serialized[key] = value
         return serialized
-    
-    
-    def load_training_data(self) -> List[Dict[str, Any]]:
-        training_data_path = "datasets/training_data.jsonl"
-        
-        training_data = open(training_data_path, 'r', encoding='utf-8')
-        training_data = [json.loads(line) for line in training_data]
 
-        base_dir = os.path.dirname(training_data_path)
-        for idx, sample in enumerate(training_data):
-            prob_file = sample.get("target_prob_file")
-            if not prob_file:
-                raise ValueError(
-                    f"Sample #{idx} does not contain 'target_prob_file'. "
-                    "Regenerate dataset with updated make_training_dataset.py."
-                )
-            resolved_prob_file = prob_file
-            if not os.path.isabs(resolved_prob_file):
+    def _format_reward_pairs(self, pairs: List[Tuple[float, float]], digits: int = 4) -> List[List[str]]:
+        return [
+            [self._format_fixed(gt_reward, digits), self._format_fixed(pred_reward, digits)]
+            for gt_reward, pred_reward in pairs
+        ]
+
+    def _plot_training_progress(self) -> None:
+        """Overwrite training progress plot from training/eval jsonl files."""
+        train_file = os.path.join(self.config.save_dir, "training_progress.jsonl")
+        eval_file = os.path.join(self.config.save_dir, "evaluation_progress.jsonl")
+        if not os.path.exists(train_file):
+            return
+
+        iterations: List[int] = []
+        avg_rewards: List[float] = []
+        total_losses: List[float] = []
+
+        with open(train_file, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                iterations.append(int(row["iteration"]))
+                avg_rewards.append(float(row["avg_reward"]))
+                total_losses.append(float(row["total_loss"]))
+
+        if len(iterations) == 0:
+            return
+
+        train_iters = np.array(iterations, dtype=np.int64)
+        y_reward = np.array(avg_rewards, dtype=np.float64)
+        y_loss = np.array(total_losses, dtype=np.float64)
+
+        # Original plot style from runs/plot_training_progress.py
+        plt.rcParams.update({
+            "font.family": "serif",
+            "figure.figsize": (14, 14),
+            "figure.dpi": 150,
+            "font.size": 22,
+            "axes.labelsize": 26,
+            "axes.titlesize": 28,
+            "xtick.labelsize": 22,
+            "ytick.labelsize": 22,
+            "legend.fontsize": 22,
+            "axes.spines.top": False,
+            "axes.spines.right": False,
+            "axes.linewidth": 1.5,
+        })
+
+        # Chunk-average smoothing (same style as original script)
+        window_size = max(1, self.iterations_per_epoch)
+
+        def _smooth_chunk(vals: np.ndarray, w: int) -> Tuple[np.ndarray, np.ndarray]:
+            smoothed_vals = []
+            epoch_idx = []
+            for chunk_id, i in enumerate(range(0, len(vals), w), start=1):
+                chunk_vals = vals[i:i + w]
+                smoothed_vals.append(float(np.mean(chunk_vals)))
+                epoch_idx.append(chunk_id)
+            return np.array(epoch_idx, dtype=np.int64), np.array(smoothed_vals, dtype=np.float64)
+
+        x_epoch, y_reward_s = _smooth_chunk(y_reward, window_size)
+        _, y_loss_s = _smooth_chunk(y_loss, window_size)
+
+        # Eval reward is already logged once per epoch-end.
+        eval_epochs: List[int] = []
+        eval_rewards: List[float] = []
+        if os.path.exists(eval_file):
+            with open(eval_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    row = json.loads(line)
+                    iter_idx = int(row["iteration"])
+                    eval_epochs.append(iter_idx // window_size + 1)
+                    eval_rewards.append(float(row["eval_avg_reward"]))
+
+        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, constrained_layout=True, figsize=(14, 14))
+
+        ax1.plot(
+            x_epoch,
+            y_reward_s,
+            marker="o",
+            linewidth=4,
+            markersize=8,
+            color="#4C72B0",
+            label="Average Reward (epoch average)",
+            zorder=5,
+        )
+        ax1.set_title("Average Reward Over Training", pad=20)
+        ax1.set_xlabel("Epoch")
+        ax1.set_ylabel("Average Reward")
+        ax1.grid(axis="y", linestyle="--", linewidth=1.0, alpha=0.5)
+        ax1.legend(frameon=False, loc="best")
+        ax1.margins(x=0.02)
+
+        ax2.plot(
+            x_epoch,
+            y_loss_s,
+            marker="o",
+            linewidth=4,
+            markersize=8,
+            color="#C44E52",
+            label="Total Loss (epoch average)",
+            zorder=5,
+        )
+        ax2.set_title("Total Loss Over Training", pad=20)
+        ax2.set_xlabel("Epoch")
+        ax2.set_ylabel("Total Loss")
+        ax2.grid(axis="y", linestyle="--", linewidth=1.0, alpha=0.5)
+        ax2.legend(frameon=False, loc="best")
+        ax2.margins(x=0.02)
+
+        if len(eval_epochs) > 0:
+            ax3.plot(
+                np.array(eval_epochs, dtype=np.int64),
+                np.array(eval_rewards, dtype=np.float64),
+                marker="o",
+                linewidth=4,
+                markersize=8,
+                color="#55A868",
+                label="Evaluation Reward",
+                zorder=5,
+            )
+        ax3.set_title("Evaluation Reward Over Training", pad=20)
+        ax3.set_xlabel("Epoch")
+        ax3.set_ylabel("Eval Reward")
+        ax3.grid(axis="y", linestyle="--", linewidth=1.0, alpha=0.5)
+        ax3.legend(frameon=False, loc="best")
+        ax3.margins(x=0.02)
+
+        output_path = os.path.join(self.config.save_dir, "training_progress.png")
+        fig.savefig(output_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+    
+    
+    def load_training_data(self) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        train_path = self.config.train_data_path
+        eval_path = self.config.eval_data_path
+
+        if not os.path.exists(train_path):
+            raise FileNotFoundError(f"Training split not found: {train_path}")
+        if not os.path.exists(eval_path):
+            raise FileNotFoundError(
+                f"Evaluation split not found: {eval_path}. "
+                "Run datasets/make_training_dataset.py to generate fixed split files."
+            )
+
+        with open(train_path, "r", encoding="utf-8") as f:
+            training_data = [json.loads(line) for line in f if line.strip()]
+        with open(eval_path, "r", encoding="utf-8") as f:
+            eval_data = [json.loads(line) for line in f if line.strip()]
+
+        def resolve_prob_paths(samples: List[Dict[str, Any]], split_name: str):
+            for idx, sample in enumerate(samples):
+                prob_file = sample.get("target_prob_file")
+                if not prob_file:
+                    raise ValueError(
+                        f"{split_name} sample #{idx} does not contain 'target_prob_file'. "
+                        "Regenerate dataset with updated make_training_dataset.py."
+                    )
+                resolved_prob_file = prob_file
+                if not os.path.isabs(resolved_prob_file):
+                    resolved_prob_file = os.path.normpath(resolved_prob_file)
+                    if not os.path.exists(resolved_prob_file):
+                        candidate_train = os.path.normpath(os.path.join(os.path.dirname(train_path), prob_file))
+                        candidate_eval = os.path.normpath(os.path.join(os.path.dirname(eval_path), prob_file))
+                        if os.path.exists(candidate_train):
+                            resolved_prob_file = candidate_train
+                        elif os.path.exists(candidate_eval):
+                            resolved_prob_file = candidate_eval
+                sample["target_prob_file"] = resolved_prob_file
                 if not os.path.exists(resolved_prob_file):
-                    candidate = os.path.normpath(os.path.join(base_dir, resolved_prob_file))
-                    if os.path.exists(candidate):
-                        resolved_prob_file = candidate
-                resolved_prob_file = os.path.normpath(resolved_prob_file)
-            sample["target_prob_file"] = resolved_prob_file
-            if not os.path.exists(resolved_prob_file):
-                raise FileNotFoundError(f"Target probability file not found: {resolved_prob_file}")
-        
-        # for data in training_data:
-        #     data["input_prompt"] = self.model_runner.prepare_prompt(data["input_prompt"], data["dataset"])
-        
-        print(f"Loaded {len(training_data)} total samples from {training_data_path}")
-        return training_data
+                    raise FileNotFoundError(f"Target probability file not found: {resolved_prob_file}")
+
+        resolve_prob_paths(training_data, "train")
+        resolve_prob_paths(eval_data, "eval")
+
+        if self.config.eval_samples > 0 and len(eval_data) > self.config.eval_samples:
+            rng = random.Random(self.config.seed)
+            rng.shuffle(eval_data)
+            eval_data = eval_data[: self.config.eval_samples]
+            print(f"Subsampled eval split to {len(eval_data)} samples (eval_samples={self.config.eval_samples})")
+
+        print(f"Loaded {len(training_data)} training samples from {train_path}")
+        print(f"Loaded {len(eval_data)} evaluation samples from {eval_path}")
+        return training_data, eval_data
 
     def _load_target_prob_data(self, path: str) -> Dict[str, torch.Tensor]:
         if path not in self._target_prob_cache:
@@ -298,88 +461,94 @@ class A2SFTrainer:
         
         return training_data, eval_data
     
-    def _neural_ucb_update(
+    def _neural_ucb_update_batch(
         self,
-        state: torch.Tensor,
-        action: Tuple[torch.Tensor, torch.Tensor],
-        reward: torch.Tensor,
+        samples: List[Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor], torch.Tensor]],
         config,
         optimizer: torch.optim.Optimizer,
-    ) -> Dict[str, float]:
+    ) -> Dict[str, Any]:
         """
-        NeuralUCB update: minimize prediction error (MSE only)
-        Uncertainty is computed from covariance matrices, not learned
-        Online update: each sample is updated immediately.
-        
-        Args:
-            state: Encoded state tensor (already on device)
-            action: Tuple of (a, b) action values for sigmoid cache
-            reward: Observed reward (scalar tensor)
-            config: Configuration object
-            optimizer: Optimizer for training
-        
-        Returns:
-            dict with loss statistics
+        Batch update: accumulate MAE losses over (state, action, reward) samples
+        and run a single optimizer step. Also returns (gt, pred) pairs for logging.
         """
-        self.policy.train()
-        # Encoder is frozen, keep it in eval mode
-        self.env.context_encoder.eval()
-        
-        # Ensure state has batch dimension
-        if state.ndim == 1:
-            state = state.unsqueeze(0)  # (1, state_dim) for batch dimension
-        
-        # Forward pass to get predictions and feature vectors (with gradient)
-        out = self.policy.forward(state)
-        reward_pred = out["reward_pred"]  # (1, num_actions)
-        feature_vector = out["feature_vector"]  # (1, feature_dim)
-        
-        # Get flat action index from (a, b) tuple
-        action_idx = self.policy._get_action_indices(action)
-        if action_idx.ndim > 0:
-            action_idx = action_idx[0]
-        
-        # Get predicted reward for selected action (single sample, batch_idx=0)
-        selected_predict = reward_pred[0, action_idx].unsqueeze(0)  # (1,)
-        actual_reward = reward.unsqueeze(0) if reward.ndim == 0 else reward  # (1,)
+        if len(samples) == 0:
+            return {
+                "prediction_loss": 0.0,
+                "l2_loss": 0.0,
+                "total_loss": 0.0,
+                "grad_norm": 0.0,
+                "reward_pairs": [],
+            }
 
-        # NeuralUCB: Update neural network (backbone) to minimize prediction error
-        # The loss is computed using current theta_a predictions
-        prediction_loss = F.mse_loss(selected_predict, actual_reward)
-        
-        # L2 regularization: penalize large weights for stability
-        # Only include policy parameters (encoder is frozen)
+        self.policy.train()
+        self.env.context_encoder.eval()
+
+        prediction_mse_losses = []
+        reward_pairs: List[Tuple[float, float]] = []
+        feature_action_pairs = []
+
+        for state, action, reward in samples:
+            if state.ndim == 1:
+                state = state.unsqueeze(0)
+
+            out = self.policy.forward(state)
+            reward_pred = out["reward_pred"]
+            feature_vector = out["feature_vector"]
+
+            action_idx = self.policy._get_action_indices(action)
+            if action_idx.ndim > 0:
+                action_idx = action_idx[0]
+
+            selected_predict = reward_pred[0, action_idx].unsqueeze(0)
+            actual_reward = reward.unsqueeze(0) if reward.ndim == 0 else reward
+            prediction_mse_losses.append(F.mse_loss(selected_predict, actual_reward))
+            reward_pairs.append(
+                (
+                    float(actual_reward.view(-1)[0].detach().item()),
+                    float(selected_predict.view(-1)[0].detach().item()),
+                )
+            )
+            feature_action_pairs.append((feature_vector.detach(), action_idx))
+
+        mean_mse = torch.stack(prediction_mse_losses).mean()
+        prediction_loss = torch.sqrt(mean_mse + 1e-8)
+
         l2_loss = 0.0
         for param in self.policy.parameters():
             if param.requires_grad:
                 l2_loss += torch.sum(param ** 2)
         l2_loss = config.l2_coef * l2_loss
-        
-        # Total loss: prediction loss + L2 regularization
+
         total_loss = prediction_loss + l2_loss
-        
-        # Optimize backbone network (feature extractor) and encoder
+
         optimizer.zero_grad()
         total_loss.backward()
+        grad_norm_sq = 0.0
+        for param in self.policy.parameters():
+            if param.grad is not None:
+                g = param.grad.detach()
+                grad_norm_sq += float(torch.sum(g * g).item())
+        grad_norm = grad_norm_sq ** 0.5
         optimizer.step()
 
-        # Update inverse covariance matrices (no gradient)
-        # These are updated using closed-form solutions, not gradient descent
         with torch.no_grad():
-            self.policy._update_inverse_covariances(feature_vector, action_idx)
+            for feature_vector, action_idx in feature_action_pairs:
+                self.policy._update_inverse_covariances(feature_vector, action_idx)
 
         return {
             "prediction_loss": float(prediction_loss.item()),
             "l2_loss": float(l2_loss.item()),
             "total_loss": float(total_loss.item()),
+            "grad_norm": float(grad_norm),
+            "reward_pairs": reward_pairs,
         }
     
-    def _create_scheduler(self, config) -> torch.optim.lr_scheduler._LRScheduler:
+    def _create_scheduler(self) -> torch.optim.lr_scheduler._LRScheduler:
         """Create cosine learning rate scheduler"""
         return lr_scheduler.CosineAnnealingLR(
             self.optimizer,
-            T_max=config.scheduler_T_max,
-            eta_min=config.lr * 0.01  # Minimum learning rate (1% of initial)
+            T_max=self.scheduler_t_max,
+            eta_min=self.config.lr * 0.01  # Minimum learning rate (1% of initial)
         )
     
     def _get_ucb_beta(self, iteration: int, total_iterations: int) -> float:
@@ -393,116 +562,90 @@ class A2SFTrainer:
         beta = self.config.ucb_beta_max + (self.config.ucb_beta_min - self.config.ucb_beta_max) * progress
         return float(beta)
 
-    def train(self, num_iterations: int = 1000):
-        print(f"Starting training for {num_iterations} iterations")
-        
-        # Create an iterator that cycles through the data loader
-        train_iter = iter(self.train_loader)
-        total_iterations = max(1, int(num_iterations))
-        
-        for iteration in range(num_iterations):
-            # Initialize stats for this iteration
-            iteration_rewards = []
-            iteration_actions_a = []
-            iteration_actions_b = []
-            iteration_losses = []
-            current_beta = self._get_ucb_beta(iteration, total_iterations)
-            
-            # Get a batch from the data loader
-            # If we've exhausted the loader, create a new iterator (with new shuffle)
-            # DataLoader with shuffle=True will automatically shuffle when creating a new iterator
-            try:
-                batch = next(train_iter)
-            except StopIteration:
-                # Create a new iterator from the existing DataLoader
-                # DataLoader automatically shuffles when shuffle=True
-                train_iter = iter(self.train_loader)
-                batch = next(train_iter)
-            
-            start_time = time.time()
-            
-            # Process each episode in the batch
-            for episode_data in batch:
-                # Select random token budget from candidates that are less than prompt length
-                prompt = episode_data["input_prompt"]
-                tokenized_prompt = self.model_runner.tokenizer(prompt, truncation=False, return_tensors="pt")
-                prompt_length = tokenized_prompt.input_ids.size(1)
-                
-                # Token budget candidates: [64, 128, 256, 512, 1024, 2048]
-                token_budget_candidates = [64, 128, 512]
-                # Filter candidates that are less than prompt length
-                valid_budgets = [budget for budget in token_budget_candidates if budget < prompt_length]
-                
-                # If no valid budget (prompt is too short), use the smallest candidate
-                if len(valid_budgets) == 0:
-                    token_budget = min(token_budget_candidates)
-                else:
-                    token_budget = random.choice(valid_budgets)
-                
-                # Encode state (only once)
-                target_prob_data = self._load_target_prob_data(episode_data["target_prob_file"])
-                state = self.env.encode_to_state(
-                    prompt=prompt,
-                    generation_length=episode_data["generation_length"],
-                    target_prob_data=target_prob_data,
-                    token_budget=token_budget,
-                    dataset=episode_data["dataset"],
-                )
-                state = state.to(self.device)
+    def train(self, num_epochs: int = 1) -> int:
+        print(f"Starting training for {num_epochs} epochs")
 
-                # Get action (forward pass happens inside act, but we'll reuse state for update)
-                # action is now a tuple of (a, b)
-                action, ucb_value = self.policy.act(state, beta=current_beta)
-                
-                # Get reward
-                reward, info = self.env.step(action)
+        global_iteration = 0
+        total_epochs = max(1, int(num_epochs))
 
-                # Online update: update immediately with this sample
-                # Reuse the same state (no need to re-encode)
-                loss_stats = self._neural_ucb_update(
-                    state=state,
-                    action=action,
-                    reward=reward,
+        for epoch in range(num_epochs):
+            print(f"\nEpoch {epoch + 1}/{num_epochs}")
+            # Epoch-based UCB beta scheduling: fixed within an epoch.
+            current_beta = self._get_ucb_beta(epoch, total_epochs)
+
+            for batch in self.train_loader:
+                iteration_rewards = []
+                iteration_actions_a = []
+                iteration_actions_b = []
+                iteration_reward_pairs = []
+                update_samples = []
+
+                start_time = time.time()
+
+                # Process each episode in the batch
+                for episode_data in batch:
+                    prompt = episode_data["input_prompt"]
+                    token_budget_candidates = TOKEN_BUDGET_CANDIDATES
+                    target_prob_data = self._load_target_prob_data(episode_data["target_prob_file"])
+                    for token_budget in token_budget_candidates:
+                        state = self.env.encode_to_state(
+                            prompt=prompt,
+                            generation_length=episode_data["generation_length"],
+                            target_prob_data=target_prob_data,
+                            token_budget=token_budget,
+                            dataset=episode_data["dataset"],
+                            task_type=episode_data.get("task_type"),
+                        )
+                        state = state.to(self.device)
+
+                        action, ucb_value = self.policy.act(state, beta=current_beta)
+                        reward, info = self.env.step(action)
+                        gt_reward_val = reward.item() if isinstance(reward, torch.Tensor) else float(reward)
+
+                        update_samples.append((state, action, reward))
+
+                        iteration_rewards.append(gt_reward_val)
+                        a_val, b_val = action
+                        iteration_actions_a.append(round(a_val.item(), 2) if isinstance(a_val, torch.Tensor) else a_val)
+                        iteration_actions_b.append(int(b_val.item()) if isinstance(b_val, torch.Tensor) else int(b_val))
+
+                end_time = time.time()
+                print(f"Time taken for one iteration: {end_time - start_time} seconds")
+
+                # Single update after evaluating all budgets for selected episodes.
+                avg_loss_stats = self._neural_ucb_update_batch(
+                    samples=update_samples,
                     config=self.config,
-                    optimizer=self.optimizer
+                    optimizer=self.optimizer,
                 )
-                iteration_losses.append(loss_stats)
-                
-                iteration_rewards.append(reward.item() if isinstance(reward, torch.Tensor) else reward)
-                a_val, b_val = action
-                iteration_actions_a.append(round(a_val.item(), 2) if isinstance(a_val, torch.Tensor) else a_val)
-                iteration_actions_b.append(int(b_val.item()) if isinstance(b_val, torch.Tensor) else int(b_val))
-            
-            end_time = time.time()
-            print(f"Time taken for one iteration: {end_time - start_time} seconds")
-            
-            # Average loss stats across episodes in this iteration
-            avg_loss_stats = {
-                "prediction_loss": sum(l["prediction_loss"] for l in iteration_losses) / len(iteration_losses),
-                "l2_loss": sum(l["l2_loss"] for l in iteration_losses) / len(iteration_losses),
-                "total_loss": sum(l["total_loss"] for l in iteration_losses) / len(iteration_losses),
-            }
-            
-            # Update learning rate scheduler
+                iteration_reward_pairs = avg_loss_stats.get("reward_pairs", [])
+
+                self._log_progress(
+                    iteration=global_iteration,
+                    loss_stats=avg_loss_stats,
+                    iteration_rewards=iteration_rewards,
+                    iteration_actions_a=iteration_actions_a,
+                    iteration_actions_b=iteration_actions_b,
+                    iteration_reward_pairs=iteration_reward_pairs,
+                    current_beta=current_beta,
+                )
+                global_iteration += 1
+
+            # Epoch-based cosine scheduler: step once per epoch.
             self.scheduler.step()
 
-            self._log_progress(
-                iteration=iteration,
-                loss_stats=avg_loss_stats,
-                iteration_rewards=iteration_rewards,
-                iteration_actions_a=iteration_actions_a,
-                iteration_actions_b=iteration_actions_b,
-                current_beta=current_beta,
-            )
-            
-            if iteration % self.config.eval_frequency == 0 and iteration > 0:
-                self._save_checkpoint(iteration)
-                self._evaluate(iteration, current_beta=current_beta, total_iterations=total_iterations)
+            # Run evaluation/checkpoint/plot once per epoch end.
+            last_iter = max(0, global_iteration - 1)
+            self._save_checkpoint(last_iter)
+            self._evaluate(last_iter, current_beta=current_beta, total_iterations=total_epochs)
+            self._plot_training_progress()
+
+        return max(0, global_iteration - 1)
     
     def _evaluate(self, iteration: int, current_beta: Optional[float] = None, total_iterations: Optional[int] = None):
         print(f"Evaluating at iteration {iteration}")
         if current_beta is None:
-            effective_total_iterations = max(1, int(total_iterations or self.config.iterations))
+            effective_total_iterations = max(1, int(total_iterations or self.total_iterations))
             current_beta = self._get_ucb_beta(iteration, effective_total_iterations)
         
         # Set to evaluation mode
@@ -512,6 +655,7 @@ class A2SFTrainer:
         eval_rewards = []
         eval_actions_a = []
         eval_actions_b = []
+        eval_reward_pairs = []
         
         for batch in tqdm(self.eval_loader, desc="Evaluating"):
             # DataLoader with batch_size=1 returns a list with one element
@@ -522,35 +666,35 @@ class A2SFTrainer:
             tokenized_prompt = self.model_runner.tokenizer(prompt, truncation=False, return_tensors="pt")
             prompt_length = tokenized_prompt.input_ids.size(1)
             
-            # Token budget candidates: [64, 128, 256, 512, 1024, 2048]
-            token_budget_candidates = [128]
-            # Filter candidates that are less than prompt length
-            valid_budgets = [budget for budget in token_budget_candidates if budget < prompt_length]
-            
-            # If no valid budget (prompt is too short), use the smallest candidate
-            if len(valid_budgets) == 0:
-                token_budget = min(token_budget_candidates)
-            else:
-                token_budget = random.choice(valid_budgets)
-            
-            state = self.env.encode_to_state(
-                prompt=prompt,
-                generation_length=episode_data["generation_length"],
-                target_prob_data=self._load_target_prob_data(episode_data["target_prob_file"]),
-                token_budget=token_budget,
-                dataset=episode_data["dataset"],
-            )
-            state = state.to(self.device)
+            # Evaluate all budget candidates sequentially (no random sampling).
+            token_budget_candidates = TOKEN_BUDGET_CANDIDATES
+            budgets_to_eval = token_budget_candidates
 
-            with torch.no_grad():
-                action, ucb_value = self.policy.act(state, beta=current_beta)
+            target_prob_data = self._load_target_prob_data(episode_data["target_prob_file"])
+            for token_budget in budgets_to_eval:
+                state = self.env.encode_to_state(
+                    prompt=prompt,
+                    generation_length=episode_data["generation_length"],
+                    target_prob_data=target_prob_data,
+                    token_budget=token_budget,
+                    dataset=episode_data["dataset"],
+                    task_type=episode_data.get("task_type"),
+                )
+                state = state.to(self.device)
 
-            reward, info = self.env.step(action)
+                with torch.no_grad():
+                    action, ucb_value = self.policy.act(state, beta=current_beta)
+                    pred_reward = self.policy.predict_reward(state, action)
+                    pred_reward_val = float(pred_reward.view(-1)[0].item())
 
-            eval_rewards.append(reward.item())
-            a_val, b_val = action
-            eval_actions_a.append(round(a_val.item(), 2) if isinstance(a_val, torch.Tensor) else a_val)
-            eval_actions_b.append(int(b_val.item()) if isinstance(b_val, torch.Tensor) else int(b_val))
+                reward, info = self.env.step(action)
+
+                gt_reward_val = float(reward.item())
+                eval_rewards.append(gt_reward_val)
+                a_val, b_val = action
+                eval_actions_a.append(round(a_val.item(), 2) if isinstance(a_val, torch.Tensor) else a_val)
+                eval_actions_b.append(int(b_val.item()) if isinstance(b_val, torch.Tensor) else int(b_val))
+                eval_reward_pairs.append((gt_reward_val, pred_reward_val))
         
         avg_eval_reward = sum(eval_rewards) / len(eval_rewards) if eval_rewards else 0.0
         avg_eval_reward = round(avg_eval_reward, 4)
@@ -566,6 +710,7 @@ class A2SFTrainer:
             "ucb_beta": current_beta,
             "eval_actions_a": eval_actions_a,
             "eval_actions_b": eval_actions_b,
+            "eval_reward_pairs": self._format_reward_pairs(eval_reward_pairs, digits=4),
         }
         eval_data = self._serialize_with_fixed_precision(
             eval_data,
@@ -586,6 +731,7 @@ class A2SFTrainer:
         iteration_rewards: List,
         iteration_actions_a: List,
         iteration_actions_b: List,
+        iteration_reward_pairs: List[Tuple[float, float]],
         current_beta: float,
     ):
         avg_reward = sum(iteration_rewards) / len(iteration_rewards) if iteration_rewards else 0.0
@@ -593,12 +739,14 @@ class A2SFTrainer:
         prediction_loss = round(loss_stats.get("prediction_loss", 0.0), 4)
         total_loss = round(loss_stats.get("total_loss", 0.0), 4)
         l2_loss = round(loss_stats.get("l2_loss", 0.0), 4)
+        grad_norm = round(loss_stats.get("grad_norm", 0.0), 4)
         
         print(f"Iteration {iteration}:")
         print(f"  Avg Reward:        {avg_reward:.4f}")
         print(f"  Prediction Loss:   {prediction_loss:.4f}")
         print(f"  L2 Loss:           {l2_loss:.4f}")
         print(f"  Total Loss:        {total_loss:.4f}")
+        print(f"  Grad Norm:         {grad_norm:.4f}")
         print(f"  UCB Beta:          {current_beta:.4f}")
         print()
         
@@ -611,10 +759,12 @@ class A2SFTrainer:
             "prediction_loss": prediction_loss,
             "l2_loss": l2_loss,
             "total_loss": total_loss,
+            "grad_norm": grad_norm,
             "learning_rate": current_lr,
             "ucb_beta": current_beta,
             "actions_a": iteration_actions_a,
             "actions_b": iteration_actions_b,
+            "reward_pairs": self._format_reward_pairs(iteration_reward_pairs, digits=4),
         }
         progress_data = self._serialize_with_fixed_precision(
             progress_data,
@@ -623,8 +773,9 @@ class A2SFTrainer:
                 "prediction_loss": 4,
                 "l2_loss": 4,
                 "total_loss": 4,
-                "learning_rate": 6,
-                "ucb_beta": 6,
+                "grad_norm": 4,
+                "learning_rate": 4,
+                "ucb_beta": 4,
                 "actions_a": 4,
             },
         )
@@ -660,9 +811,9 @@ class A2SFTrainer:
         
         self.policy.load_state_dict(checkpoint["policy_state_dict"])
         
-        # Encoder is frozen and uses target model's parameters, no need to load state
+        # Encoder is frozen and metadata-based, no need to load state
         if "attention_encoder_state_dict" in checkpoint and checkpoint["attention_encoder_state_dict"]:
-            print("Note: Attention encoder uses target model's first layer parameters (frozen)")
+            print("Note: Context encoder is metadata-based and frozen")
         
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         

@@ -87,18 +87,18 @@ def load_rl_policy(checkpoint_path, device, target_model, target_tokenizer):
         config = A2SFRLConfig()
         print("Warning: Config not found in checkpoint, using default config")
     
-    # Initialize attention encoder using target model's first layer, first head parameters
+    # Initialize metadata encoder used for RL state construction
     # AttentionEncoder is frozen and uses target model's parameters, so no need to load from checkpoint
     context_encoder = AttentionEncoder(
         target_model=target_model,
         target_tokenizer=target_tokenizer,
         device=device,
-        output_dim=8192,
+        output_dim=2,
         num_query_tokens=16
     ).to(device)
     
-    # State dimension is fixed to 8192 (attention output) + 1 (token_budget feature)
-    state_dim = 8193
+    # State dimension: [sequence_length_feature, task_type_feature]
+    state_dim = 2
     
     # Initialize policy with config values (discrete sigmoid cache a, b candidates)
     policy = NeuralUCBPolicy(
@@ -119,10 +119,16 @@ def load_rl_policy(checkpoint_path, device, target_model, target_tokenizer):
     
     return policy, context_encoder, config
 
-def get_rl_action(policy, context_encoder, prompt, generation_length, token_budget, device, ucb_beta=1.0):
+def get_rl_action(policy, context_encoder, prompt, generation_length, token_budget, device, task_type=None, dataset=None, ucb_beta=1.0):
     """Get RL action (a, b) for sigmoid cache from given prompt"""
     # Encode context with generation_length and token_budget
-    context_embedding = context_encoder.encode_context(prompt, generation_length, token_budget)
+    context_embedding = context_encoder.encode_context(
+        prompt,
+        generation_length,
+        token_budget,
+        task_type=task_type,
+        dataset=dataset,
+    )
     
     # Build state (ensure it's on the correct device and dtype)
     state = context_embedding.to(device, dtype=torch.float32)
@@ -168,6 +174,8 @@ def get_pred_rl(data, max_length, max_gen, dataset, model, tokenizer, out_path, 
             max_gen,
             budget,
             device,
+            task_type=json_obj.get("task_type"),
+            dataset=dataset,
             ucb_beta=rl_config.ucb_beta,
         )
         

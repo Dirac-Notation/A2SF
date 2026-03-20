@@ -1,9 +1,9 @@
 import torch
 
-from . import FullCache
+from . import BaseCompressor
 
 
-class A2SFCache(FullCache):
+class A2SFCompressor(BaseCompressor):
     """A2SF: forgetting window 기반 누적 + 선택."""
 
     def __init__(self, num_key_value_heads: int, device: torch.device):
@@ -59,3 +59,7 @@ class A2SFCache(FullCache):
         selected_indices = scores.topk(self.total_budget, dim=-1).indices.sort().values
         self.selected_indices = selected_indices
         return selected_indices
+
+
+# Backward compatibility alias
+A2SFCache = A2SFCompressor
