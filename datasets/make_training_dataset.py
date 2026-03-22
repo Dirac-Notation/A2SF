@@ -31,8 +31,17 @@ DATASET_TO_TASK = {
     for dataset_name in datasets
 }
 
-MAX_LEN = 4
-
+# Teacher generation length (max new tokens) per LongBench task group.
+# Values follow the same scale as config/dataset2maxlen.json for each category.
+TASK_MAX_LEN: Dict[str, int] = {
+    "Code Complete": 64,
+    "Few Shot": 128,
+    "Single-doc QA": 128,
+    "Multi-doc QA": 128,
+    "Summarization": 512,
+    "Passage Retrieval": 32,
+    "unknown": 32,
+}
 
 def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
@@ -302,7 +311,7 @@ def load_longbench_datasets(
     for file_path in dataset_files:
         dataset_name = os.path.splitext(os.path.basename(file_path))[0]
         task_type = DATASET_TO_TASK.get(dataset_name, "unknown")
-        generation_length = MAX_LEN
+        generation_length = TASK_MAX_LEN.get(task_type, TASK_MAX_LEN["unknown"])
 
         dataset_samples: List[Dict[str, Any]] = []
         with open(file_path, "r", encoding="utf-8") as f:

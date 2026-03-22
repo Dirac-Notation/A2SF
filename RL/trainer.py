@@ -312,12 +312,6 @@ class A2SFTrainer:
         resolve_prob_paths(training_data, "train")
         resolve_prob_paths(eval_data, "eval")
 
-        if self.config.eval_samples > 0 and len(eval_data) > self.config.eval_samples:
-            rng = random.Random(self.config.seed)
-            rng.shuffle(eval_data)
-            eval_data = eval_data[: self.config.eval_samples]
-            print(f"Subsampled eval split to {len(eval_data)} samples (eval_samples={self.config.eval_samples})")
-
         print(f"Loaded {len(training_data)} training samples from {train_path}")
         print(f"Loaded {len(eval_data)} evaluation samples from {eval_path}")
         return training_data, eval_data
@@ -331,100 +325,7 @@ class A2SFTrainer:
                 raise KeyError(f"Missing keys {missing} in target probability file: {path}")
             self._target_prob_cache[path] = data
         return self._target_prob_cache[path]
-    
-    def _split_data(self, all_data: List[Dict[str, Any]], eval_samples: int, seed: int) -> tuple:
-        """
-        Split data into training and evaluation sets with balanced task distribution.
-        Uses fixed seed to ensure reproducibility.
-        
-        Args:
-            all_data: All loaded data samples
-            eval_samples: Number of samples to use for evaluation
-            seed: Random seed for splitting
-        
-        Returns:
-            tuple: (training_data, eval_data)
-        """
-        if len(all_data) <= eval_samples:
-            raise ValueError(f"Not enough data: {len(all_data)} total samples, but {eval_samples} evaluation samples requested")
-        
-        def get_task_type(sample: Dict[str, Any]) -> str:
-            """Use sample-provided task type directly."""
-            task_type = sample.get("task_type")
-            if not isinstance(task_type, str):
-                return "unknown"
-            task_type = task_type.strip()
-            return task_type if task_type else "unknown"
-        
-        # Group data by task type
-        from collections import defaultdict
-        task_groups = defaultdict(list)
-        for sample in all_data:
-            task_type = get_task_type(sample)
-            task_groups[task_type].append(sample)
-        
-        # Use fixed seed for reproducible split
-        rng = random.Random(seed)
-        
-        # Shuffle each task group separately
-        for task_type in task_groups:
-            rng.shuffle(task_groups[task_type])
-        
-        # Calculate samples per task for evaluation
-        num_tasks = len([g for g in task_groups.values() if len(g) > 0])
-        if num_tasks == 0:
-            raise ValueError("No valid task types found in data")
-        
-        eval_samples_per_task = eval_samples // num_tasks
-        remaining_eval_samples = eval_samples % num_tasks
-        
-        # Collect evaluation samples from each task
-        eval_data = []
-        task_eval_counts = {}
-        
-        for task_type, samples in task_groups.items():
-            if len(samples) == 0:
-                continue
-            
-            # Calculate how many samples to take from this task
-            samples_to_take = eval_samples_per_task
-            if remaining_eval_samples > 0:
-                samples_to_take += 1
-                remaining_eval_samples -= 1
-            
-            # Take samples from this task (up to available samples)
-            actual_take = min(samples_to_take, len(samples))
-            task_eval = samples[:actual_take]
-            eval_data.extend(task_eval)
-            task_eval_counts[task_type] = actual_take
-        
-        # Collect training samples (remaining samples from each task)
-        training_data = []
-        for task_type, samples in task_groups.items():
-            if len(samples) == 0:
-                continue
-            eval_count = task_eval_counts.get(task_type, 0)
-            training_data.extend(samples[eval_count:])
-        
-        # Shuffle both sets
-        rng.shuffle(eval_data)
-        rng.shuffle(training_data)
-        
-        # Verify no overlap
-        eval_set = {id(d) for d in eval_data}
-        train_set = {id(d) for d in training_data}
-        assert len(eval_set & train_set) == 0, "Training and evaluation data must be completely separate!"
-        
-        # Print task distribution
-        print(f"\nTask distribution in evaluation set:")
-        for task_type, count in sorted(task_eval_counts.items()):
-            total_in_task = len(task_groups[task_type])
-            print(f"  {task_type:20s}: {count:3d} / {total_in_task:5d} ({count/total_in_task*100:.1f}%)")
-        print(f"Total evaluation samples: {len(eval_data)}")
-        print(f"Total training samples: {len(training_data)}")
-        
-        return training_data, eval_data
-    
+
     def _neural_ucb_update_batch(
         self,
         samples: List[Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor], torch.Tensor]],
@@ -542,6 +443,8 @@ class A2SFTrainer:
                 iteration_actions_a = []
                 iteration_actions_b = []
                 iteration_reward_pairs = []
+                iteration_input_seq_lengths: List[int] = []
+                iteration_task_types: List[str] = []
                 update_samples = []
 
                 start_time = time.time()
@@ -549,6 +452,11 @@ class A2SFTrainer:
                 # Process each episode in the batch
                 for episode_data in batch:
                     prompt = episode_data["input_prompt"]
+                    tokenized_prompt = self.model_runner.tokenizer(
+                        prompt, truncation=False, return_tensors="pt"
+                    )
+                    input_seq_len = int(tokenized_prompt.input_ids.size(1))
+                    task_type_str = str(episode_data.get("task_type") or "unknown")
                     token_budget_candidates = TOKEN_BUDGET_CANDIDATES
                     target_prob_data = self._load_target_prob_data(episode_data["target_prob_file"])
                     for token_budget in token_budget_candidates:
@@ -572,6 +480,8 @@ class A2SFTrainer:
                         a_val, b_val = action
                         iteration_actions_a.append(round(a_val.item(), 2) if isinstance(a_val, torch.Tensor) else a_val)
                         iteration_actions_b.append(int(b_val.item()) if isinstance(b_val, torch.Tensor) else int(b_val))
+                        iteration_input_seq_lengths.append(input_seq_len)
+                        iteration_task_types.append(task_type_str)
 
                 end_time = time.time()
                 print(f"Time taken for one iteration: {end_time - start_time} seconds")
@@ -591,6 +501,8 @@ class A2SFTrainer:
                     iteration_actions_a=iteration_actions_a,
                     iteration_actions_b=iteration_actions_b,
                     iteration_reward_pairs=iteration_reward_pairs,
+                    iteration_input_seq_lengths=iteration_input_seq_lengths,
+                    iteration_task_types=iteration_task_types,
                     current_beta=current_beta,
                 )
                 global_iteration += 1
@@ -618,6 +530,8 @@ class A2SFTrainer:
         eval_actions_a = []
         eval_actions_b = []
         eval_reward_pairs = []
+        eval_input_seq_lengths: List[int] = []
+        eval_task_types: List[str] = []
         
         for batch in tqdm(self.eval_loader, desc="Evaluating"):
             # DataLoader with batch_size=1 returns a list with one element
@@ -657,6 +571,8 @@ class A2SFTrainer:
                 eval_actions_a.append(round(a_val.item(), 2) if isinstance(a_val, torch.Tensor) else a_val)
                 eval_actions_b.append(int(b_val.item()) if isinstance(b_val, torch.Tensor) else int(b_val))
                 eval_reward_pairs.append((gt_reward_val, pred_reward_val))
+                eval_input_seq_lengths.append(int(prompt_length))
+                eval_task_types.append(str(episode_data.get("task_type") or "unknown"))
         
         avg_eval_reward = sum(eval_rewards) / len(eval_rewards) if eval_rewards else 0.0
         avg_eval_reward = round(avg_eval_reward, 4)
@@ -670,6 +586,8 @@ class A2SFTrainer:
             "eval_avg_reward": avg_eval_reward,
             "eval_actions_a": eval_actions_a,
             "eval_actions_b": eval_actions_b,
+            "eval_input_seq_lengths": eval_input_seq_lengths,
+            "eval_task_types": eval_task_types,
             "eval_reward_pairs": self._format_reward_pairs(eval_reward_pairs, digits=4),
         }
         eval_data = self._serialize_with_fixed_precision(
@@ -691,6 +609,8 @@ class A2SFTrainer:
         iteration_actions_a: List,
         iteration_actions_b: List,
         iteration_reward_pairs: List[Tuple[float, float]],
+        iteration_input_seq_lengths: List[int],
+        iteration_task_types: List[str],
         current_beta: float,
     ):
         avg_reward = sum(iteration_rewards) / len(iteration_rewards) if iteration_rewards else 0.0
@@ -721,6 +641,8 @@ class A2SFTrainer:
             "grad_norm": grad_norm,
             "learning_rate": current_lr,
             "ucb_beta": current_beta,
+            "input_seq_lengths": iteration_input_seq_lengths,
+            "task_types": iteration_task_types,
             "actions_a": iteration_actions_a,
             "actions_b": iteration_actions_b,
             "reward_pairs": self._format_reward_pairs(iteration_reward_pairs, digits=4),

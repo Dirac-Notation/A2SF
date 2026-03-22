@@ -116,9 +116,8 @@ class NeuralUCBPolicy(nn.Module):
         x = self.input_proj(state.to(dtype=torch.float32))
         h = self.backbone(x)
         
-        # Predict rewards for all (a, b) pairs using reward head
-        # Apply sigmoid to ensure rewards are in [0, 1] range for NeuralUCB stability
-        reward_pred = -nn.functional.sigmoid(self.reward_head(h))  # (B, num_actions) in [0, 1]
+        # Predict rewards: -5 * sigmoid(logits) in approximately (-5, 0)
+        reward_pred = -1.0 * torch.sigmoid(self.reward_head(h))
         
         return {"reward_pred": reward_pred, "feature_vector": h}
 

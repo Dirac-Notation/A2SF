@@ -174,12 +174,13 @@ class A2SFEnv:
                 dataset=self.current_dataset,
             )
         
-        reward = torch.tensor(float(result.reward), device=self.device)
-        
+        reward_val = max(float(result.reward), -1.0)
+        reward = torch.tensor(reward_val, device=self.device)
+
         info = {
             "a": a_val,
             "b": b_val,
-            "reward": result.reward,
+            "reward": reward_val,
         }
         
         return reward, info
