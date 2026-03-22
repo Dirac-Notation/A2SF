@@ -40,7 +40,7 @@ class SigmoidCompressor(BaseCompressor):
         else:
             self.exponents = self.exponents.to(device)
         # 기존 구현 수식 보존
-        self.window = 1 / (torch.exp(-self.a * (self.exponents - (seq_len_q - self.b - 1.0))))
+        self.window = 1 / (1 + torch.exp(-self.a * (self.exponents - (seq_len_q - self.b - 0.5))))
         self.window = self.window.to(dtype=torch.float32)
 
     def accumulate_scores(

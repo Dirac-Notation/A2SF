@@ -20,16 +20,16 @@ class A2SFRLConfig:
     # a: sigmoid steepness parameter
     a_values: torch.Tensor = field(
         default_factory=lambda: torch.tensor(
-            # [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
-            [0.0, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0],
+            [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+            # [0.0, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0],
             dtype=torch.float32,
         )
     )
     # b: sigmoid shift parameter
     b_values: torch.Tensor = field(
         default_factory=lambda: torch.tensor(
-            # [1, 8, 16, 32, 64, 128],
-            [0],
+            [1, 16, 128, 1024],
+            # [0],
             dtype=torch.float32,
         )
     )
@@ -43,9 +43,6 @@ class A2SFRLConfig:
     # ----- Training Configuration -----
     epochs: int = 40  # Number of full passes over training dataset
     episodes_per_update: int = 4  # Number of episodes per update
-    
-    # ----- Evaluation Configuration -----
-    eval_samples: int = 100
 
     # ----- Dataset Paths (pre-split) -----
     train_data_path: str = "datasets/training_data.jsonl"
@@ -107,7 +104,6 @@ class A2SFRLConfig:
             l2_coef=default_config.l2_coef,
             epochs=args.epochs,
             episodes_per_update=default_config.episodes_per_update,
-            eval_samples=default_config.eval_samples,
             train_data_path=args.train_data_path,
             eval_data_path=args.eval_data_path,
             resume=args.resume,
