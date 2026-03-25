@@ -17,6 +17,7 @@ from utils import load_model, set_seed, CompressionConfig
 from RL.main import A2SFRLConfig
 from RL.policy import NeuralUCBPolicy
 from RL.env import AttentionEncoder
+from longbench_eval import dataset2metric
 
 def check_exact_match(expected, predicted):
     """Check if the expected answer appears exactly in the predicted text."""
@@ -50,37 +51,58 @@ def load_dataset(file_path):
             data.append(json.loads(line))
     return data
 
+
 def load_rl_policy(checkpoint_path, device, target_model, target_tokenizer):
-    """Load RL policy and frozen metadata encoder for inference."""
+    """학습(A2SFTrainer)과 동일한 구조로 policy·encoder를 만들고 체크포인트를 로드한다."""
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
 
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     config = checkpoint.get("config", A2SFRLConfig())
+    if not isinstance(config, A2SFRLConfig):
+        config = A2SFRLConfig()
+
+    dev = device if isinstance(device, torch.device) else torch.device(device)
 
     context_encoder = AttentionEncoder(
         target_model=target_model,
         target_tokenizer=target_tokenizer,
-        device=device,
-        output_dim=2,
+        device=str(dev),
+        output_dim=-1,
         num_query_tokens=16,
-    ).to(device)
+    ).to(dev)
+
+    state_dim = int(context_encoder.output_dim)
+    metric_heads = sorted({fn.__name__ for fn in dataset2metric.values()})
 
     policy = NeuralUCBPolicy(
-        state_dim=2,  # [sequence_length_feature, task_type_feature]
+        state_dim=state_dim,
         a_values=config.a_values,
         b_values=config.b_values,
-    ).to(device)
+        metric_heads=metric_heads,
+    ).to(dev)
 
     if "policy_state_dict" not in checkpoint:
         raise ValueError("Policy state dict not found in checkpoint")
     policy.load_state_dict(checkpoint["policy_state_dict"])
+    print(f"Loaded RL policy from iteration {checkpoint.get('iteration', 'unknown')}")
+
     policy.eval()
     context_encoder.eval()
     return policy, context_encoder, config
 
 
-def get_rl_action(policy, context_encoder, prompt, generation_length, token_budget, device, task_type=None, dataset=None):
+def get_rl_action(
+    policy,
+    context_encoder,
+    prompt,
+    generation_length,
+    token_budget,
+    device,
+    task_type=None,
+    dataset=None,
+    metric_type: str = "qa_f1_score",
+):
     state = context_encoder.encode_context(
         prompt,
         generation_length,
@@ -89,7 +111,7 @@ def get_rl_action(policy, context_encoder, prompt, generation_length, token_budg
         dataset=dataset,
     ).to(device, dtype=torch.float32)
     with torch.no_grad():
-        (a_tensor, b_tensor), _ = policy.act(state)
+        (a_tensor, b_tensor), _ = policy.act(state, metric_type=metric_type)
     a_val = float(a_tensor.view(-1)[0].item()) if isinstance(a_tensor, torch.Tensor) else float(a_tensor)
     b_val = float(b_tensor.view(-1)[0].item()) if isinstance(b_tensor, torch.Tensor) else float(b_tensor)
     return a_val, b_val
@@ -143,6 +165,7 @@ def evaluate_model(
                     device=device,
                     task_type=sample.get("task_type"),
                     dataset=sample.get("dataset"),
+                    metric_type="qa_f1_score",
                 )
                 run_config = CompressionConfig()
                 for k, v in config.items():
