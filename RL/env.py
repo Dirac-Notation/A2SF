@@ -55,6 +55,13 @@ class AttentionEncoder(nn.Module):
     Returns a feature vector:
       [ normalized_sequence_length, per-head entropy, per-head max-position ].
     where per-head max-position is normalized by sequence length.
+
+    Important: Do NOT register ``target_model`` or any of its submodules as children of this
+    module. Assigning ``self.target_model = ...`` would register them and then ``.to(device)``
+    would move the *entire* loaded model (or duplicate/move shards), breaking ``device_map``
+    and custom Llama wrappers (e.g. kv_llama). We keep plain references via ``object.__setattr__``.
+    Encoding runs on whatever device the first layer's weights already live on; outputs are
+    returned on CPU float32 unless overridden.
     """
 
     def __init__(
@@ -66,36 +73,43 @@ class AttentionEncoder(nn.Module):
         num_query_tokens: int = 16,
     ):
         super().__init__()
+        # Logical device for downstream (policy); encoder forward uses model-local devices.
         self.device = device if isinstance(device, torch.device) else torch.device(device)
         self.target_tokenizer = target_tokenizer
         self.output_dim = output_dim
         self.max_seq_length = float(target_model.config.max_position_embeddings)
         self.num_query_tokens = int(max(1, num_query_tokens))
         self.max_task_index = float(max(1, len(TASK_TYPE_ORDER) - 1))
-        self.target_model = target_model
+        # Avoid registering target_model / its layers as submodules (see class docstring).
+        object.__setattr__(self, "target_model", target_model)
         first_layer = self.target_model.model.layers[0]
-        self.input_layernorm = first_layer.input_layernorm
-        self.self_attn = first_layer.self_attn
+        object.__setattr__(self, "input_layernorm", first_layer.input_layernorm)
+        object.__setattr__(self, "self_attn", first_layer.self_attn)
         self.num_heads = int(self.target_model.config.num_attention_heads)
         self.num_key_value_heads = int(self.target_model.config.num_key_value_heads)
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.hidden_size = int(self.target_model.config.hidden_size)
         self.head_dim = self.hidden_size // self.num_heads
-        self.q_proj = self.self_attn.q_proj
-        self.k_proj = self.self_attn.k_proj
-        self.embed_tokens = self.target_model.model.embed_tokens
+        object.__setattr__(self, "q_proj", self.self_attn.q_proj)
+        object.__setattr__(self, "k_proj", self.self_attn.k_proj)
+        object.__setattr__(self, "embed_tokens", self.target_model.model.embed_tokens)
         if self.output_dim <= 0:
             # seq_len scalar + [entropy,max_pos] per head
             self.output_dim = 1 + (2 * self.num_heads)
-        self.to(self.device)
-        self.eval()
+        # No self.to(...): would move registered submodules; we intentionally hold no registered
+        # weights from target_model.
+
+    @property
+    def _encode_device(self) -> torch.device:
+        """Device where first-layer embedding lives; run encoder math here without moving shards."""
+        return self.embed_tokens.weight.device
 
     @staticmethod
     def _entropy(prob: torch.Tensor) -> torch.Tensor:
         return -torch.sum(prob * torch.log(prob.clamp_min(1e-12)), dim=-1)
 
     def _build_first_layer_attention_features(self, input_ids: torch.Tensor) -> torch.Tensor:
-        input_ids = input_ids.to(self.embed_tokens.weight.device)
+        input_ids = input_ids.to(self._encode_device)
         hidden_states = self.embed_tokens(input_ids)
         hidden_states = self.input_layernorm(hidden_states)
         hidden_states = hidden_states.to(dtype=self.q_proj.weight.dtype)
@@ -162,18 +176,20 @@ class AttentionEncoder(nn.Module):
             padding=False,
             truncation=False,
         )
-        input_ids = tokenized.input_ids.to(self.device)
+        enc_dev = self._encode_device
+        input_ids = tokenized.input_ids.to(enc_dev)
         seq_len = int(input_ids.size(1))
         seq_len_feature = min(float(seq_len), self.max_seq_length) / self.max_seq_length
         attention_features = self._build_first_layer_attention_features(input_ids)
         features = torch.cat(
             [
-                torch.tensor([seq_len_feature], device=self.device, dtype=torch.float32),
-                attention_features.to(self.device, dtype=torch.float32),
+                torch.tensor([seq_len_feature], device=enc_dev, dtype=torch.float32),
+                attention_features.to(dtype=torch.float32),
             ],
             dim=-1,
         )
-        return features
+        # Decouple state vector from model shard placement; trainer/env will .to(policy device).
+        return features.detach().cpu()
 
 class A2SFEnv:
     """RL Environment for A2SF model (single-step / bandit)"""
