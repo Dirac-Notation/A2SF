@@ -2,7 +2,7 @@
 import torch
 import torch.nn as nn
 
-from typing import Dict, Tuple
+from typing import Dict, List, Tuple, Union
 
 EPS = 1e-6
 
@@ -37,6 +37,7 @@ class NeuralUCBPolicy(nn.Module):
         a_values: torch.Tensor,
         b_values: torch.Tensor,
         lambda_reg: float = 0.1,
+        metric_heads: List[str] = None,
     ):
         super().__init__()
         # Discrete action space: (a, b) pairs for sigmoid cache
@@ -66,9 +67,13 @@ class NeuralUCBPolicy(nn.Module):
         )
         self.feature_dim = 512
 
-        # Reward prediction head: predicts reward for each (a, b) pair
-        # Output shape: (batch_size, num_a_values * num_b_values)
-        self.reward_head = nn.Linear(512, self.num_actions)
+        if metric_heads is None:
+            metric_heads = ["qa_f1_score"]
+        self.metric_heads = list(metric_heads)
+        self.default_metric_head = self.metric_heads[0]
+        self.reward_heads = nn.ModuleDict(
+            {metric_name: nn.Linear(512, self.num_actions) for metric_name in self.metric_heads}
+        )
         
         # Initialize inverse covariance matrices for each action
         # Lambda^{-1} for each action: (num_actions, feature_dim, feature_dim)
@@ -94,7 +99,31 @@ class NeuralUCBPolicy(nn.Module):
                 nn.init.xavier_uniform_(m.weight, gain=1.0)
                 nn.init.constant_(m.bias, 0.0)
 
-    def forward(self, state: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def _resolve_metric_type_for_batch(
+        self,
+        metric_type: Union[str, List[str], Tuple[str, ...], None],
+        batch_size: int,
+    ) -> List[str]:
+        if metric_type is None:
+            return [self.default_metric_head for _ in range(batch_size)]
+        if isinstance(metric_type, str):
+            return [metric_type for _ in range(batch_size)]
+        if isinstance(metric_type, (list, tuple)):
+            if len(metric_type) != batch_size:
+                raise ValueError(f"metric_type length must equal batch size ({batch_size}), got {len(metric_type)}")
+            return [str(m) for m in metric_type]
+        raise TypeError(f"Unsupported metric_type type: {type(metric_type)}")
+
+    def _compute_reward_pred(self, features: torch.Tensor, metric_types: List[str]) -> torch.Tensor:
+        out = []
+        for row_idx, metric_name in enumerate(metric_types):
+            head_name = metric_name if metric_name in self.reward_heads else self.default_metric_head
+            logits = self.reward_heads[head_name](features[row_idx : row_idx + 1])
+            pred_row = torch.sigmoid(logits)
+            out.append(pred_row)
+        return torch.cat(out, dim=0)
+
+    def forward(self, state: torch.Tensor, metric_type: Union[str, List[str], Tuple[str, ...], None] = None) -> Dict[str, torch.Tensor]:
         """
         Args:
             state: (B, state_dim) or (state_dim,)
@@ -116,8 +145,8 @@ class NeuralUCBPolicy(nn.Module):
         x = self.input_proj(state.to(dtype=torch.float32))
         h = self.backbone(x)
         
-        # Predict rewards: -5 * sigmoid(logits) in approximately (-5, 0)
-        reward_pred = -1.0 * torch.sigmoid(self.reward_head(h))
+        metric_types = self._resolve_metric_type_for_batch(metric_type, h.size(0))
+        reward_pred = self._compute_reward_pred(h, metric_types)
         
         return {"reward_pred": reward_pred, "feature_vector": h}
 
@@ -138,7 +167,7 @@ class NeuralUCBPolicy(nn.Module):
         return (a_val, b_val), selected_score
 
     @torch.no_grad()
-    def act(self, state: torch.Tensor) -> Tuple[Tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
+    def act(self, state: torch.Tensor, metric_type: Union[str, List[str], Tuple[str, ...], None] = None) -> Tuple[Tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
         """
         Inference action selection (pure exploitation, beta=0).
 
@@ -148,12 +177,17 @@ class NeuralUCBPolicy(nn.Module):
             action: tuple of (a, b) tensors from discrete sets
             selected_reward_pred: predicted reward score of selected action
         """
-        out = self.forward(state)
+        out = self.forward(state, metric_type=metric_type)
         reward_pred = out["reward_pred"]  # (B, num_actions)
         return self._select_action_from_scores(reward_pred)
 
     @torch.no_grad()
-    def act_with_ucb(self, state: torch.Tensor, beta: float = 1.0) -> Tuple[Tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
+    def act_with_ucb(
+        self,
+        state: torch.Tensor,
+        beta: float = 1.0,
+        metric_type: Union[str, List[str], Tuple[str, ...], None] = None,
+    ) -> Tuple[Tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
         """
         Training action selection with UCB exploration.
 
@@ -164,7 +198,7 @@ class NeuralUCBPolicy(nn.Module):
             action: tuple of (a, b) tensors from discrete sets
             selected_ucb: UCB score of selected action
         """
-        out = self.forward(state)
+        out = self.forward(state, metric_type=metric_type)
         reward_pred = out["reward_pred"]  # (B, num_actions)
         feature_vector = out["feature_vector"]  # (B, feature_dim)
 
@@ -176,7 +210,12 @@ class NeuralUCBPolicy(nn.Module):
         ucb = reward_pred + beta * torch.sqrt(uncertainty + EPS)  # (B, num_actions)
         return self._select_action_from_scores(ucb)
 
-    def predict_reward(self, state: torch.Tensor, action: Tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
+    def predict_reward(
+        self,
+        state: torch.Tensor,
+        action: Tuple[torch.Tensor, torch.Tensor],
+        metric_type: Union[str, List[str], Tuple[str, ...], None] = None,
+    ) -> torch.Tensor:
         """
         Predict reward for given state and action
         
@@ -187,7 +226,7 @@ class NeuralUCBPolicy(nn.Module):
         Returns:
             predicted_reward: (B,) - predicted reward
         """
-        out = self.forward(state)
+        out = self.forward(state, metric_type=metric_type)
         reward_pred = out["reward_pred"]  # (B, num_actions)
 
         # Find closest action indices (flattened)

@@ -9,6 +9,29 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils import load_model, CompressionConfig
 from .main import A2SFRLConfig
+from longbench_eval import (
+    qa_f1_score,
+    qa_f1_zh_score,
+    rouge_score,
+    rouge_zh_score,
+    classification_score,
+    retrieval_score,
+    retrieval_zh_score,
+    count_score,
+    code_sim_score,
+)
+
+METRIC_FN_REGISTRY = {
+    "qa_f1_score": qa_f1_score,
+    "qa_f1_zh_score": qa_f1_zh_score,
+    "rouge_score": rouge_score,
+    "rouge_zh_score": rouge_zh_score,
+    "classification_score": classification_score,
+    "retrieval_score": retrieval_score,
+    "retrieval_zh_score": retrieval_zh_score,
+    "count_score": count_score,
+    "code_sim_score": code_sim_score,
+}
 
 @dataclass
 class ModelResult:
@@ -31,7 +54,10 @@ class A2SFModelRunner:
         a: float,
         b: float,
         token_budget: int,
-        target_prob_data: Dict[str, torch.Tensor],
+        generation_length: int,
+        answers: list,
+        all_classes: list,
+        metric_type: str,
         dataset: str = None,
     ) -> ModelResult:
         start_time = time.time()
@@ -43,98 +69,31 @@ class A2SFModelRunner:
         compression_config = self._create_compression_config(a, b, token_budget)
         self.model.init_cache(compression_config)
 
-        answer_token_ids = target_prob_data["answer_token_ids"].to(self.model.device)
-        teacher_topk_indices = target_prob_data["teacher_topk_indices"].to(self.model.device)
-        teacher_topk_probs = target_prob_data["teacher_topk_probs"].to(self.model.device)
-        
         with torch.no_grad():
-            prefill_outputs = self.model(
+            output_ids = self.model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                use_cache=True,
-                output_attentions=False,
-            )
-            prefill_logits = prefill_outputs.logits[:, -1, :]  # (1, vocab)
-            past_key_values = prefill_outputs.past_key_values
-
-            answer_len = int(answer_token_ids.size(0))
-            if answer_len == 0:
-                kl_value = 0.0
-            else:
-                # 첫 번째 정답 토큰 확률은 prefill 마지막 logits에서 계산
-                logits_steps = [prefill_logits.unsqueeze(1)]  # (1, 1, vocab)
-
-                # 나머지 정답 토큰은 teacher forcing으로 한 번에 계산
-                if answer_len > 1:
-                    decode_input_ids = answer_token_ids[:-1].unsqueeze(0)
-                    decode_attention_mask = torch.cat(
-                        [
-                            attention_mask,
-                            attention_mask.new_ones((attention_mask.size(0), answer_len - 1)),
-                        ],
-                        dim=-1,
+                max_new_tokens=int(generation_length),
+                num_beams=1,
+                do_sample=False,
+                pad_token_id=self.tokenizer.eos_token_id,
+            )[0]
+            pred = self.tokenizer.decode(output_ids[input_ids.size(-1):], skip_special_tokens=True)
+            metric_fn = METRIC_FN_REGISTRY.get(metric_type, qa_f1_score)
+            reward = 0.0
+            if answers:
+                for gt in answers:
+                    reward = max(
+                        reward,
+                        float(metric_fn(pred, gt, all_classes=all_classes or [])),
                     )
-                    decode_outputs = self.model(
-                        input_ids=decode_input_ids,
-                        attention_mask=decode_attention_mask,
-                        past_key_values=past_key_values,
-                        use_cache=True,
-                        output_attentions=False,
-                    )
-                    logits_steps.append(decode_outputs.logits)  # (1, answer_len-1, vocab)
-
-                if self.debug_shapes:
-                    print("[A2SF_DEBUG] answer_len:", answer_len)
-                    print("[A2SF_DEBUG] prefill_logits.shape:", tuple(prefill_logits.shape))
-                    if answer_len > 1:
-                        print("[A2SF_DEBUG] decode_input_ids.shape:", tuple(decode_input_ids.shape))
-                        print("[A2SF_DEBUG] decode_outputs.logits.shape:", tuple(decode_outputs.logits.shape))
-                    for idx, t in enumerate(logits_steps):
-                        print(f"[A2SF_DEBUG] logits_steps[{idx}].shape:", tuple(t.shape))
-
-                student_logits = torch.cat(logits_steps, dim=1)  # (1, answer_len, vocab)
-                kl_value = self._compute_sparse_kl_divergence(
-                    student_logits=student_logits,
-                    teacher_topk_indices=teacher_topk_indices,
-                    teacher_topk_probs=teacher_topk_probs,
-                )
-        
+            if self.debug_shapes:
+                print("[A2SF_DEBUG] dataset:", dataset)
+                print("[A2SF_DEBUG] metric:", metric_type)
+                print("[A2SF_DEBUG] reward:", reward)
         inference_time = time.time() - start_time
-        reward = -kl_value
-        
+
         return ModelResult(reward=reward, inference_time=inference_time)
-
-    def _compute_sparse_kl_divergence(
-        self,
-        student_logits: torch.Tensor,
-        teacher_topk_indices: torch.Tensor,
-        teacher_topk_probs: torch.Tensor,
-    ) -> float:
-        """
-        Compute KL(P_teacher || P_student) on teacher top-k support only.
-        """
-        if teacher_topk_indices.numel() == 0 or teacher_topk_probs.numel() == 0:
-            return 0.0
-
-        # Align by shortest available sequence length for stability
-        seq_len = min(student_logits.size(1), teacher_topk_indices.size(0), teacher_topk_probs.size(0))
-        if seq_len == 0:
-            return 0.0
-
-        student_log_probs = torch.log_softmax(student_logits[:, :seq_len, :], dim=-1)
-        support_idx = teacher_topk_indices[:seq_len].unsqueeze(0).long()
-        support_teacher_probs = teacher_topk_probs[:seq_len].to(student_log_probs.dtype)
-
-        # Normalize sparse teacher probs so KL is well-defined on support
-        support_teacher_probs = support_teacher_probs / support_teacher_probs.sum(dim=-1, keepdim=True).clamp_min(1e-12)
-        support_teacher_log_probs = torch.log(support_teacher_probs.clamp_min(1e-12))
-
-        support_student_log_probs = torch.gather(student_log_probs, dim=-1, index=support_idx).squeeze(0)
-        token_kl = torch.sum(
-            support_teacher_probs * (support_teacher_log_probs - support_student_log_probs),
-            dim=-1,
-        )
-        return float(token_kl.mean().item())
     
     def _create_compression_config(self, a: float, b: float, token_budget: int) -> Dict[str, Any]:
         base_config = CompressionConfig()

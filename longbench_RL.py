@@ -12,6 +12,7 @@ from utils import load_model, set_seed
 from RL.main import A2SFRLConfig
 from RL.policy import NeuralUCBPolicy
 from RL.env import AttentionEncoder
+from longbench_eval import dataset2metric
 
 # Import evaluation functions from longbench_eval.py
 from longbench_eval import evaluate_results
@@ -93,8 +94,8 @@ def load_rl_policy(checkpoint_path, device, target_model, target_tokenizer):
         num_query_tokens=16
     ).to(device)
     
-    # State dimension: [sequence_length_feature, task_type_feature]
-    state_dim = 2
+    # State dimension follows current encoder output definition.
+    state_dim = int(context_encoder.output_dim)
     
     # Initialize policy with config values (discrete sigmoid cache a, b candidates)
     policy = NeuralUCBPolicy(
@@ -115,7 +116,16 @@ def load_rl_policy(checkpoint_path, device, target_model, target_tokenizer):
     
     return policy, context_encoder, config
 
-def get_rl_action(policy, context_encoder, prompt, generation_length, token_budget, device, task_type=None, dataset=None):
+def get_rl_action(
+    policy,
+    context_encoder,
+    prompt,
+    generation_length,
+    token_budget,
+    device,
+    task_type=None,
+    dataset=None,
+):
     """Get RL action (a, b) for sigmoid cache from given prompt"""
     # Encode context with generation_length and token_budget
     context_embedding = context_encoder.encode_context(
@@ -129,9 +139,14 @@ def get_rl_action(policy, context_encoder, prompt, generation_length, token_budg
     # Build state (ensure it's on the correct device and dtype)
     state = context_embedding.to(device, dtype=torch.float32)
     
+    metric_type = "qa_f1_score"
+    metric_fn = dataset2metric.get(str(dataset or "").lower())
+    if metric_fn is not None:
+        metric_type = metric_fn.__name__
+
     # Inference-time action selection (pure exploitation).
     with torch.no_grad():
-        (a_tensor, b_tensor), _ = policy.act(state)
+        (a_tensor, b_tensor), _ = policy.act(state, metric_type=metric_type)
     
     # Extract scalar a, b values
     if isinstance(a_tensor, torch.Tensor):
