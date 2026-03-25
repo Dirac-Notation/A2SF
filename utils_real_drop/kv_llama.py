@@ -390,7 +390,7 @@ class LlamaModel(LlamaPreTrainedModel):
         if input_ids is not None and past_key_values is not None:
             self.set_forget(input_ids, past_key_values)
         
-        # Create position embeddings to be shared across decoder layers (transformers 4.46.2)
+        # Create position embeddings to be shared across decoder layers (transformers 4.46.2 style)
         position_embeddings = self.rotary_emb(inputs_embeds, position_ids)
         
         # attention_mask = attention_mask.to(inputs_embeds.dtype)

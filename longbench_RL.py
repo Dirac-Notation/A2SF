@@ -8,7 +8,7 @@ import sys
 # Add the current directory to the path for imports
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from utils import load_model, set_seed
+from utils import load_model, set_seed, get_llm_input_device
 from RL.main import A2SFRLConfig
 from RL.policy import NeuralUCBPolicy
 from RL.env import AttentionEncoder
@@ -181,9 +181,10 @@ def get_pred_rl(data, max_length, max_gen, dataset, model, tokenizer, out_path, 
         )
         
         input = tokenizer(prompt, truncation=False, return_tensors="pt")
-        
-        input_ids = input.input_ids.to(model.device)
-        attention_mask = input.attention_mask.to(torch.bfloat16).to(model.device)
+        input_dev = get_llm_input_device(model)
+        input_ids = input.input_ids.to(input_dev)
+        # 2D 마스크는 long 유지 (bfloat16 캐스팅은 generation 경고/마스크 경로와 충돌 가능)
+        attention_mask = input.attention_mask.to(input_dev)
         
         context_length = input_ids.shape[-1]
         
@@ -247,10 +248,11 @@ if __name__ == '__main__':
     model_name = model_name.split("_")[0].lower()
     max_length = json.load(open("config/model2maxlen.json", "r"))[model_name]
     
-    model, tokenizer = load_model(model_name)
-    
-    first_layer_device = next(model.model.layers[0].parameters()).device
-    device = first_layer_device
+    # RL 추론: 기본 단일 GPU 로드(샤딩 시 embed/rope 디바이스 불일치 방지). 멀티 GPU는 A2SF_RL_MODEL_DEVICE_MAP=auto
+    _dm = os.environ.get("A2SF_RL_MODEL_DEVICE_MAP", "single")
+    model, tokenizer = load_model(model_name, device_map=_dm)
+    # 멀티 GPU(device_map=auto)에서 policy/encoder는 입력 임베딩과 같은 디바이스에 둠
+    device = get_llm_input_device(model)
     print(f"Loading RL policy from: {args.rl_checkpoint}")
     rl_policy, context_encoder, rl_config = load_rl_policy(
         args.rl_checkpoint, device, model, tokenizer
