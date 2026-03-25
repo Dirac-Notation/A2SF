@@ -20,6 +20,7 @@ from .main import A2SFRLConfig
 from .policy import NeuralUCBPolicy
 from .env import A2SFEnv
 from .runner import A2SFModelRunner
+from longbench_eval import dataset2metric
 
 TOKEN_BUDGET_CANDIDATES = [128]
 
@@ -53,15 +54,16 @@ class A2SFTrainer:
         
         self.model_runner = A2SFModelRunner(config)
         self.env = A2SFEnv(self.model_runner, config)
-        self._target_prob_cache: Dict[str, Dict[str, torch.Tensor]] = {}
         
-        # State dimension: [sequence_length_feature, task_type_feature]
-        state_dim = 2
+        # State dimension: [seq_length] + [head entropy, head max_pos] per attention head
+        state_dim = int(self.env.context_encoder.output_dim)
+        metric_heads = sorted({fn.__name__ for fn in dataset2metric.values()})
         
         self.policy = NeuralUCBPolicy(
             state_dim=state_dim,
             a_values=config.a_values,
             b_values=config.b_values,
+            metric_heads=metric_heads,
         ).to(self.device)
         
         # Optimizer only includes policy parameters
@@ -287,48 +289,28 @@ class A2SFTrainer:
         with open(eval_path, "r", encoding="utf-8") as f:
             eval_data = [json.loads(line) for line in f if line.strip()]
 
-        def resolve_prob_paths(samples: List[Dict[str, Any]], split_name: str):
-            for idx, sample in enumerate(samples):
-                prob_file = sample.get("target_prob_file")
-                if not prob_file:
-                    raise ValueError(
-                        f"{split_name} sample #{idx} does not contain 'target_prob_file'. "
-                        "Regenerate dataset with updated make_training_dataset.py."
-                    )
-                resolved_prob_file = prob_file
-                if not os.path.isabs(resolved_prob_file):
-                    resolved_prob_file = os.path.normpath(resolved_prob_file)
-                    if not os.path.exists(resolved_prob_file):
-                        candidate_train = os.path.normpath(os.path.join(os.path.dirname(train_path), prob_file))
-                        candidate_eval = os.path.normpath(os.path.join(os.path.dirname(eval_path), prob_file))
-                        if os.path.exists(candidate_train):
-                            resolved_prob_file = candidate_train
-                        elif os.path.exists(candidate_eval):
-                            resolved_prob_file = candidate_eval
-                sample["target_prob_file"] = resolved_prob_file
-                if not os.path.exists(resolved_prob_file):
-                    raise FileNotFoundError(f"Target probability file not found: {resolved_prob_file}")
-
-        resolve_prob_paths(training_data, "train")
-        resolve_prob_paths(eval_data, "eval")
+        for sample in training_data + eval_data:
+            sample["metric_type"] = self._resolve_metric_type(sample.get("dataset"))
+            if "answers" not in sample:
+                sample["answers"] = []
+            if "all_classes" not in sample:
+                sample["all_classes"] = []
 
         print(f"Loaded {len(training_data)} training samples from {train_path}")
         print(f"Loaded {len(eval_data)} evaluation samples from {eval_path}")
         return training_data, eval_data
 
-    def _load_target_prob_data(self, path: str) -> Dict[str, torch.Tensor]:
-        if path not in self._target_prob_cache:
-            data = torch.load(path, map_location="cpu")
-            required_keys = {"answer_token_ids", "teacher_topk_indices", "teacher_topk_probs"}
-            missing = required_keys - set(data.keys())
-            if missing:
-                raise KeyError(f"Missing keys {missing} in target probability file: {path}")
-            self._target_prob_cache[path] = data
-        return self._target_prob_cache[path]
+    @staticmethod
+    def _resolve_metric_type(dataset_name: str) -> str:
+        dataset_key = str(dataset_name or "").strip().lower()
+        fn = dataset2metric.get(dataset_key)
+        if fn is None:
+            return "qa_f1_score"
+        return fn.__name__
 
     def _neural_ucb_update_batch(
         self,
-        samples: List[Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor], torch.Tensor]],
+        samples: List[Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor], torch.Tensor, str]],
         config,
         optimizer: torch.optim.Optimizer,
     ) -> Dict[str, Any]:
@@ -352,11 +334,11 @@ class A2SFTrainer:
         reward_pairs: List[Tuple[float, float]] = []
         feature_action_pairs = []
 
-        for state, action, reward in samples:
+        for state, action, reward, metric_type in samples:
             if state.ndim == 1:
                 state = state.unsqueeze(0)
 
-            out = self.policy.forward(state)
+            out = self.policy.forward(state, metric_type=metric_type)
             reward_pred = out["reward_pred"]
             feature_vector = out["feature_vector"]
 
@@ -457,24 +439,30 @@ class A2SFTrainer:
                     )
                     input_seq_len = int(tokenized_prompt.input_ids.size(1))
                     task_type_str = str(episode_data.get("task_type") or "unknown")
+                    metric_type = str(episode_data.get("metric_type") or "qa_f1_score")
                     token_budget_candidates = TOKEN_BUDGET_CANDIDATES
-                    target_prob_data = self._load_target_prob_data(episode_data["target_prob_file"])
                     for token_budget in token_budget_candidates:
                         state = self.env.encode_to_state(
                             prompt=prompt,
                             generation_length=episode_data["generation_length"],
-                            target_prob_data=target_prob_data,
+                            answers=episode_data.get("answers", []),
+                            all_classes=episode_data.get("all_classes", []),
+                            metric_type=metric_type,
                             token_budget=token_budget,
                             dataset=episode_data["dataset"],
                             task_type=episode_data.get("task_type"),
                         )
                         state = state.to(self.device)
 
-                        action, ucb_value = self.policy.act_with_ucb(state, beta=current_beta)
+                        action, ucb_value = self.policy.act_with_ucb(
+                            state,
+                            beta=current_beta,
+                            metric_type=metric_type,
+                        )
                         reward, info = self.env.step(action)
                         gt_reward_val = reward.item() if isinstance(reward, torch.Tensor) else float(reward)
 
-                        update_samples.append((state, action, reward))
+                        update_samples.append((state, action, reward, metric_type))
 
                         iteration_rewards.append(gt_reward_val)
                         a_val, b_val = action
@@ -546,12 +534,14 @@ class A2SFTrainer:
             token_budget_candidates = TOKEN_BUDGET_CANDIDATES
             budgets_to_eval = token_budget_candidates
 
-            target_prob_data = self._load_target_prob_data(episode_data["target_prob_file"])
             for token_budget in budgets_to_eval:
+                metric_type = str(episode_data.get("metric_type") or "qa_f1_score")
                 state = self.env.encode_to_state(
                     prompt=prompt,
                     generation_length=episode_data["generation_length"],
-                    target_prob_data=target_prob_data,
+                    answers=episode_data.get("answers", []),
+                    all_classes=episode_data.get("all_classes", []),
+                    metric_type=metric_type,
                     token_budget=token_budget,
                     dataset=episode_data["dataset"],
                     task_type=episode_data.get("task_type"),
@@ -559,8 +549,8 @@ class A2SFTrainer:
                 state = state.to(self.device)
 
                 with torch.no_grad():
-                    action, _ = self.policy.act(state)
-                    pred_reward = self.policy.predict_reward(state, action)
+                    action, _ = self.policy.act(state, metric_type=metric_type)
+                    pred_reward = self.policy.predict_reward(state, action, metric_type=metric_type)
                     pred_reward_val = float(pred_reward.view(-1)[0].item())
 
                 reward, info = self.env.step(action)
