@@ -61,13 +61,12 @@ class AttentionEncoder(nn.Module):
         self,
         target_model,
         target_tokenizer,
-        device=None,
+        device: str = "cpu",
         output_dim: int = -1,
         num_query_tokens: int = 16,
     ):
         super().__init__()
-        # device 인자는 하위 호환용(무시). 실제 연산 디바이스는 target_model.embed_tokens 기준.
-        _ = device
+        self.device = device if isinstance(device, torch.device) else torch.device(device)
         self.target_tokenizer = target_tokenizer
         self.output_dim = output_dim
         self.max_seq_length = float(target_model.config.max_position_embeddings)
@@ -88,8 +87,7 @@ class AttentionEncoder(nn.Module):
         if self.output_dim <= 0:
             # seq_len scalar + [entropy,max_pos] per head
             self.output_dim = 1 + (2 * self.num_heads)
-        # 공유 Llama 가중치를 .to()로 옮기지 않음. RL 특징은 임베딩 디바이스에 맞춤.
-        self.device = self.embed_tokens.weight.device
+        self.to(self.device)
         self.eval()
 
     @staticmethod
@@ -164,15 +162,14 @@ class AttentionEncoder(nn.Module):
             padding=False,
             truncation=False,
         )
-        input_ids = tokenized.input_ids.to(self.embed_tokens.weight.device)
+        input_ids = tokenized.input_ids.to(self.device)
         seq_len = int(input_ids.size(1))
         seq_len_feature = min(float(seq_len), self.max_seq_length) / self.max_seq_length
         attention_features = self._build_first_layer_attention_features(input_ids)
-        feat_dev = attention_features.device
         features = torch.cat(
             [
-                torch.tensor([seq_len_feature], device=feat_dev, dtype=torch.float32),
-                attention_features.to(dtype=torch.float32),
+                torch.tensor([seq_len_feature], device=self.device, dtype=torch.float32),
+                attention_features.to(self.device, dtype=torch.float32),
             ],
             dim=-1,
         )

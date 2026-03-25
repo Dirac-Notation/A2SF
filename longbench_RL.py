@@ -8,14 +8,14 @@ import sys
 # Add the current directory to the path for imports
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from utils import load_model, set_seed, get_llm_input_device
+from utils import load_model, set_seed
 from RL.main import A2SFRLConfig
 from RL.policy import NeuralUCBPolicy
 from RL.env import AttentionEncoder
-from longbench_eval import dataset2metric
+from longbench_eval import dataset2metric, evaluate_results
 
-# Import evaluation functions from longbench_eval.py
-from longbench_eval import evaluate_results
+# Metric head names must match RL training (NeuralUCBPolicy.reward_heads keys).
+METRIC_HEADS = sorted({fn.__name__ for fn in dataset2metric.values()})
 
 # ============================================================================
 # Prediction Functions (from longbench_pred_RL.py)
@@ -66,46 +66,53 @@ def resolve_selected_datasets(args):
         selected_datasets.extend(TASK_TO_DATASETS[task])
     return selected_datasets
 
-
 def load_rl_policy(checkpoint_path, device, target_model, target_tokenizer):
-    """학습(A2SFTrainer)과 동일한 구조로 policy·encoder를 만들고 체크포인트를 로드한다."""
+    """Load RL policy from checkpoint"""
+    print(f"Loading RL policy from: {checkpoint_path}")
+    
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
-
+    
+    # Load checkpoint with weights_only=False to allow custom classes
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    config = checkpoint.get("config", A2SFRLConfig())
-    if not isinstance(config, A2SFRLConfig):
+    
+    # Extract config from checkpoint
+    if "config" in checkpoint:
+        config = checkpoint["config"]
+    else:
+        # Create default config if not found in checkpoint
         config = A2SFRLConfig()
-
-    dev = device if isinstance(device, torch.device) else torch.device(device)
-
+        print("Warning: Config not found in checkpoint, using default config")
+    
+    # AttentionEncoder: seq_len norm + per-head entropy / max-pos (see RL/env.py AttentionEncoder).
     context_encoder = AttentionEncoder(
         target_model=target_model,
         target_tokenizer=target_tokenizer,
-        device=str(dev),
+        device=device,
         output_dim=-1,
         num_query_tokens=16,
-    ).to(dev)
+    ).to(device)
 
     state_dim = int(context_encoder.output_dim)
-    metric_heads = sorted({fn.__name__ for fn in dataset2metric.values()})
 
     policy = NeuralUCBPolicy(
         state_dim=state_dim,
         a_values=config.a_values,
         b_values=config.b_values,
-        metric_heads=metric_heads,
-    ).to(dev)
-
-    if "policy_state_dict" not in checkpoint:
+        metric_heads=METRIC_HEADS,
+    ).to(device)
+    
+    # Load policy weights
+    if "policy_state_dict" in checkpoint:
+        policy.load_state_dict(checkpoint["policy_state_dict"])
+        print(f"Loaded policy from iteration {checkpoint.get('iteration', 'unknown')}")
+    else:
         raise ValueError("Policy state dict not found in checkpoint")
-    policy.load_state_dict(checkpoint["policy_state_dict"])
-    print(f"Loaded RL policy from iteration {checkpoint.get('iteration', 'unknown')}")
-
-    policy.eval()
-    context_encoder.eval()
+    
+    policy.eval()  # Set to evaluation mode
+    context_encoder.eval()  # Set to evaluation mode
+    
     return policy, context_encoder, config
-
 
 def get_rl_action(
     policy,
@@ -181,10 +188,9 @@ def get_pred_rl(data, max_length, max_gen, dataset, model, tokenizer, out_path, 
         )
         
         input = tokenizer(prompt, truncation=False, return_tensors="pt")
-        input_dev = get_llm_input_device(model)
-        input_ids = input.input_ids.to(input_dev)
-        # 2D 마스크는 long 유지 (bfloat16 캐스팅은 generation 경고/마스크 경로와 충돌 가능)
-        attention_mask = input.attention_mask.to(input_dev)
+        
+        input_ids = input.input_ids.to(model.device)
+        attention_mask = input.attention_mask.to(torch.bfloat16).to(model.device)
         
         context_length = input_ids.shape[-1]
         
@@ -248,15 +254,11 @@ if __name__ == '__main__':
     model_name = model_name.split("_")[0].lower()
     max_length = json.load(open("config/model2maxlen.json", "r"))[model_name]
     
-    # RL 추론: 기본 단일 GPU 로드(샤딩 시 embed/rope 디바이스 불일치 방지). 멀티 GPU는 A2SF_RL_MODEL_DEVICE_MAP=auto
-    _dm = os.environ.get("A2SF_RL_MODEL_DEVICE_MAP", "single")
-    model, tokenizer = load_model(model_name, device_map=_dm)
-    # 멀티 GPU(device_map=auto)에서 policy/encoder는 입력 임베딩과 같은 디바이스에 둠
-    device = get_llm_input_device(model)
-    print(f"Loading RL policy from: {args.rl_checkpoint}")
-    rl_policy, context_encoder, rl_config = load_rl_policy(
-        args.rl_checkpoint, device, model, tokenizer
-    )
+    model, tokenizer = load_model(model_name)
+    
+    first_layer_device = next(model.model.layers[0].parameters()).device
+    device = first_layer_device
+    rl_policy, context_encoder, rl_config = load_rl_policy(args.rl_checkpoint, device, model, tokenizer)
     
     print(f"RL Policy loaded successfully")
     print(f"Config: {rl_config}")
