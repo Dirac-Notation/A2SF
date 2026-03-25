@@ -66,55 +66,46 @@ def resolve_selected_datasets(args):
         selected_datasets.extend(TASK_TO_DATASETS[task])
     return selected_datasets
 
+
 def load_rl_policy(checkpoint_path, device, target_model, target_tokenizer):
-    """Load RL policy from checkpoint"""
-    print(f"Loading RL policy from: {checkpoint_path}")
-    
+    """학습(A2SFTrainer)과 동일한 구조로 policy·encoder를 만들고 체크포인트를 로드한다."""
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
-    
-    # Load checkpoint with weights_only=False to allow custom classes
+
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    
-    # Extract config from checkpoint
-    if "config" in checkpoint:
-        config = checkpoint["config"]
-    else:
-        # Create default config if not found in checkpoint
+    config = checkpoint.get("config", A2SFRLConfig())
+    if not isinstance(config, A2SFRLConfig):
         config = A2SFRLConfig()
-        print("Warning: Config not found in checkpoint, using default config")
-    
-    # Initialize metadata encoder used for RL state construction
-    # AttentionEncoder is frozen and uses target model's parameters, so no need to load from checkpoint
+
+    dev = device if isinstance(device, torch.device) else torch.device(device)
+
     context_encoder = AttentionEncoder(
         target_model=target_model,
         target_tokenizer=target_tokenizer,
-        device=device,
-        output_dim=2,
-        num_query_tokens=16
-    ).to(device)
-    
-    # State dimension follows current encoder output definition.
+        device=str(dev),
+        output_dim=-1,
+        num_query_tokens=16,
+    ).to(dev)
+
     state_dim = int(context_encoder.output_dim)
-    
-    # Initialize policy with config values (discrete sigmoid cache a, b candidates)
+    metric_heads = sorted({fn.__name__ for fn in dataset2metric.values()})
+
     policy = NeuralUCBPolicy(
         state_dim=state_dim,
         a_values=config.a_values,
         b_values=config.b_values,
-    ).to(device)
-    
-    # Load policy weights
-    if "policy_state_dict" in checkpoint:
-        policy.load_state_dict(checkpoint["policy_state_dict"])
-        print(f"Loaded policy from iteration {checkpoint.get('iteration', 'unknown')}")
-    else:
+        metric_heads=metric_heads,
+    ).to(dev)
+
+    if "policy_state_dict" not in checkpoint:
         raise ValueError("Policy state dict not found in checkpoint")
-    
-    policy.eval()  # Set to evaluation mode
-    context_encoder.eval()  # Set to evaluation mode
-    
+    policy.load_state_dict(checkpoint["policy_state_dict"])
+    print(f"Loaded RL policy from iteration {checkpoint.get('iteration', 'unknown')}")
+
+    policy.eval()
+    context_encoder.eval()
     return policy, context_encoder, config
+
 
 def get_rl_action(
     policy,
@@ -260,7 +251,10 @@ if __name__ == '__main__':
     
     first_layer_device = next(model.model.layers[0].parameters()).device
     device = first_layer_device
-    rl_policy, context_encoder, rl_config = load_rl_policy(args.rl_checkpoint, device, model, tokenizer)
+    print(f"Loading RL policy from: {args.rl_checkpoint}")
+    rl_policy, context_encoder, rl_config = load_rl_policy(
+        args.rl_checkpoint, device, model, tokenizer
+    )
     
     print(f"RL Policy loaded successfully")
     print(f"Config: {rl_config}")
