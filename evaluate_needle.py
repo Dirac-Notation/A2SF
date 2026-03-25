@@ -13,7 +13,7 @@ import re
 # Add the current directory to the path for imports
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from utils import load_model, set_seed, CompressionConfig
+from utils import load_model, set_seed, CompressionConfig, get_llm_input_device
 from RL.main import A2SFRLConfig
 from RL.policy import NeuralUCBPolicy
 from RL.env import AttentionEncoder
@@ -297,16 +297,17 @@ def main(args):
         device = "cuda" if torch.cuda.is_available() else "cpu"
         
         print(f"Loading model: {model_name}")
-        model, tokenizer = load_model(model_name)
+        _dm = os.environ.get("A2SF_RL_MODEL_DEVICE_MAP", "single")
+        model, tokenizer = load_model(model_name, device_map=_dm)
         print("Model loaded successfully!")
 
         rl_policy = None
         context_encoder = None
         rl_config = None
         if args.rl_checkpoint:
-            first_layer_device = next(model.model.layers[0].parameters()).device
+            rl_dev = get_llm_input_device(model)
             rl_policy, context_encoder, rl_config = load_rl_policy(
-                args.rl_checkpoint, first_layer_device, model, tokenizer
+                args.rl_checkpoint, rl_dev, model, tokenizer
             )
             print(f"Loaded RL policy from: {args.rl_checkpoint}")
 

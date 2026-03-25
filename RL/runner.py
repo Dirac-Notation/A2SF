@@ -7,7 +7,7 @@ import time
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from utils import load_model, CompressionConfig
+from utils import load_model, CompressionConfig, get_llm_input_device
 from .main import A2SFRLConfig
 from longbench_eval import (
     qa_f1_score,
@@ -43,7 +43,9 @@ class A2SFModelRunner:
         self.config = config
         self.device = torch.device(config.device)
         
-        self.model, self.tokenizer = load_model(config.model_name)
+        # RL: 기본 전체 모델을 첫 번째 가속기 한 장에 올림. OOM 시 A2SF_RL_MODEL_DEVICE_MAP=auto
+        _dm = os.environ.get("A2SF_RL_MODEL_DEVICE_MAP", "single")
+        self.model, self.tokenizer = load_model(config.model_name, device_map=_dm)
         
         self.num_layers = self.model.config.num_hidden_layers
         self.debug_shapes = os.environ.get("A2SF_DEBUG_SHAPES", "0") == "1"
@@ -63,8 +65,9 @@ class A2SFModelRunner:
         start_time = time.time()
         
         input_tensor = self.tokenizer(prompt, truncation=False, return_tensors="pt")
-        input_ids = input_tensor.input_ids.to(self.model.device)
-        attention_mask = input_tensor.attention_mask.to(self.model.device)
+        input_dev = get_llm_input_device(self.model)
+        input_ids = input_tensor.input_ids.to(input_dev)
+        attention_mask = input_tensor.attention_mask.to(input_dev)
         
         compression_config = self._create_compression_config(a, b, token_budget)
         self.model.init_cache(compression_config)

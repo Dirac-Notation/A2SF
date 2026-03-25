@@ -4,7 +4,7 @@ from tqdm import tqdm
 import argparse
 import torch
 
-from utils import load_model, set_seed, CompressionConfig
+from utils import load_model, set_seed, CompressionConfig, get_llm_input_device
 from longbench_eval import evaluate_results
 
 # ============================================================================
@@ -70,9 +70,9 @@ def get_pred(data, max_length, max_gen, dataset, model, tokenizer, out_path, mod
                 prompt = f"[INST]{prompt}[/INST]"
         
         input = tokenizer(prompt, truncation=False, return_tensors="pt")
-        
-        input_ids = input.input_ids.to(model.device)
-        attention_mask = input.attention_mask.to(torch.bfloat16).to(model.device)
+        input_dev = get_llm_input_device(model)
+        input_ids = input.input_ids.to(input_dev)
+        attention_mask = input.attention_mask.to(input_dev)
         
         context_length = input_ids.shape[-1]
         

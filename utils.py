@@ -21,13 +21,24 @@ def set_seed(seed):
     torch.backends.cudnn.deterministic = True
     torch.cuda.manual_seed_all(seed)
 
-def load_model(model_name):
+def get_llm_input_device(model):
+    """
+    device_map=\"auto\" 등으로 모델이 여러 GPU에 쪼개질 때 ``model.device``와
+    ``embed_tokens``/첫 레이어 디바이스가 어긋날 수 있음. 입력 토큰은 항상
+    임베딩 가중치와 같은 디바이스에 두는 것이 안전함.
+    """
+    return model.get_input_embeddings().weight.device
+
+
+def load_model(model_name, device_map="auto"):
     """
     Load model and tokenizer based on model name.
-    
+
     Args:
         model_name (str): Name of the model (e.g., 'llama2', 'llama3', 'opt', 'qwen2')
-    
+        device_map: ``\"auto\"`` (기본, 멀티 GPU 샤딩) 또는 ``\"single\"`` / ``{\"\": 0}`` —
+            RL 파이프라인에서는 임베딩·RoPE 분리 이슈를 피하려면 ``\"single\"`` 권장.
+
     Returns:
         tuple: (model, tokenizer)
     """
@@ -36,11 +47,16 @@ def load_model(model_name):
     
     tokenizer = AutoTokenizer.from_pretrained(model_path)
 
+    if device_map == "single":
+        dm = {"": 0}
+    else:
+        dm = device_map
+
     if "llama" in model_name.lower():
         model = KVLlamaForCausalLM.from_pretrained(
             model_path,
             torch_dtype=torch.bfloat16,
-            device_map="auto",
+            device_map=dm,
         )
     else:
         raise ValueError(f"Unsupported model: {model_name}. Only Llama and OPT models are supported.")
