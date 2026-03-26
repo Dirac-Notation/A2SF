@@ -22,7 +22,7 @@ class A2SFCompressor(BaseCompressor):
         self.seq_length = 0
         self.selected_indices = None
         self.prompt = False
-        self.total_budget = max(round(compression_config.total_budget * compression_config.layerwise_ratios[layer_idx]), 2)
+        self.total_budget = max(round(float(compression_config.total_budget), 2), 2)
         self.recent_budget = round(self.total_budget * compression_config.local_ratios)
         self.select_budget = self.total_budget - self.recent_budget
         self.forgetting_factor = compression_config.forgetting_factor

@@ -149,7 +149,6 @@ def build_compression_config(method, total_budget, num_layers):
     if method == "a2sf":
         config["total_budget"] = total_budget
         config["forgetting_factor"] = 0.75
-        config["layerwise_ratios"] = [1.0] * num_layers
         config["local_ratios"] = 0.125
     elif method == "snap":
         config["total_budget"] = total_budget

@@ -14,8 +14,8 @@ import re
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from utils import load_model, set_seed, CompressionConfig
-from RL.main import A2SFRLConfig
-from RL.policy import NeuralUCBPolicy
+from RL.a2sf_model import ModelConfig
+from RL.agent.neural_ucb_agent import NeuralUCBAgent
 from RL.env import AttentionEncoder
 from longbench_eval import dataset2metric
 
@@ -54,13 +54,25 @@ def load_dataset(file_path):
             data.append(json.loads(line))
     return data
 
-def load_rl_policy(checkpoint_path, device, target_model, target_tokenizer):
-    """Load RL policy and frozen metadata encoder for inference."""
+def load_rl_agent(checkpoint_path, device, target_model, target_tokenizer):
+    """Load RL agent and frozen metadata encoder for inference."""
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
 
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    config = checkpoint.get("config", A2SFRLConfig())
+    model_cfg_any = checkpoint.get("model_config", None) or checkpoint.get("config", None)
+    config = ModelConfig(model="llama3")
+    if model_cfg_any is not None:
+        if isinstance(model_cfg_any, dict):
+            if "a_values" in model_cfg_any:
+                config.a_values = model_cfg_any["a_values"]
+            if "b_values" in model_cfg_any:
+                config.b_values = model_cfg_any["b_values"]
+        else:
+            if hasattr(model_cfg_any, "a_values"):
+                config.a_values = model_cfg_any.a_values
+            if hasattr(model_cfg_any, "b_values"):
+                config.b_values = model_cfg_any.b_values
 
     context_encoder = AttentionEncoder(
         target_model=target_model,
@@ -71,23 +83,28 @@ def load_rl_policy(checkpoint_path, device, target_model, target_tokenizer):
     ).to(device)
 
     state_dim = int(context_encoder.output_dim)
-    policy = NeuralUCBPolicy(
+    agent = NeuralUCBAgent(
         state_dim=state_dim,
         a_values=config.a_values,
         b_values=config.b_values,
         metric_heads=METRIC_HEADS,
     ).to(device)
 
-    if "policy_state_dict" not in checkpoint:
-        raise ValueError("Policy state dict not found in checkpoint")
-    policy.load_state_dict(checkpoint["policy_state_dict"])
-    policy.eval()
+    # Load agent weights (supports legacy policy_state_dict checkpoints)
+    if "agent_state_dict" in checkpoint:
+        agent.load_state_dict(checkpoint["agent_state_dict"])
+    elif "policy_state_dict" in checkpoint:
+        agent.load_state_dict(checkpoint["policy_state_dict"])
+    else:
+        raise ValueError("Checkpoint missing agent_state_dict (and legacy policy_state_dict).")
+
+    agent.eval()
     context_encoder.eval()
-    return policy, context_encoder, config
+    return agent, context_encoder, config
 
 
 def get_rl_action(
-    policy,
+    agent,
     context_encoder,
     prompt,
     generation_length,
@@ -105,7 +122,7 @@ def get_rl_action(
         dataset=dataset,
     ).to(device, dtype=torch.float32)
     with torch.no_grad():
-        (a_tensor, b_tensor), _ = policy.act(state, metric_type=metric_type)
+        (a_tensor, b_tensor), _ = agent.act(state, metric_type=metric_type)
     a_val = float(a_tensor.view(-1)[0].item()) if isinstance(a_tensor, torch.Tensor) else float(a_tensor)
     b_val = float(b_tensor.view(-1)[0].item()) if isinstance(b_tensor, torch.Tensor) else float(b_tensor)
     return a_val, b_val
@@ -121,7 +138,7 @@ def evaluate_model(
     model_name=None,
     window=None,
     budget=None,
-    rl_policy=None,
+    rl_agent=None,
     context_encoder=None,
 ):
     """Evaluate the model on the needle-in-haystack task with budget settings."""
@@ -148,10 +165,10 @@ def evaluate_model(
                 prompt = f"[INST]{prompt}[/INST]"
 
             run_config = config
-            if run_config and method == "sigmoid" and rl_policy is not None and context_encoder is not None:
+            if run_config and method == "sigmoid" and rl_agent is not None and context_encoder is not None:
                 token_budget = int(run_config.total_budget) if run_config.total_budget is not None else int(budget)
                 a_val, b_val = get_rl_action(
-                    rl_policy,
+                    rl_agent,
                     context_encoder,
                     prompt,
                     generation_length=64,
@@ -294,15 +311,15 @@ def main(args):
         model, tokenizer = load_model(model_name)
         print("Model loaded successfully!")
 
-        rl_policy = None
+        rl_agent = None
         context_encoder = None
         rl_config = None
         if args.rl_checkpoint:
             first_layer_device = next(model.model.layers[0].parameters()).device
-            rl_policy, context_encoder, rl_config = load_rl_policy(
+            rl_agent, context_encoder, rl_config = load_rl_agent(
                 args.rl_checkpoint, first_layer_device, model, tokenizer
             )
-            print(f"Loaded RL policy from: {args.rl_checkpoint}")
+            print(f"Loaded RL agent from: {args.rl_checkpoint}")
 
         for dataset_path in datasets:
             dataset_name = os.path.basename(dataset_path).split('.')[0]
@@ -330,7 +347,7 @@ def main(args):
                             model_name=model_name,
                             window=cur_window,
                             budget=cur_budget,
-                            rl_policy=rl_policy,
+                            rl_agent=rl_agent,
                             context_encoder=context_encoder,
                         )
 

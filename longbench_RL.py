@@ -8,14 +8,9 @@ import sys
 # Add the current directory to the path for imports
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from utils import load_model, set_seed
-from RL.main import A2SFRLConfig
-from RL.policy import NeuralUCBPolicy
-from RL.env import AttentionEncoder
+from utils import set_seed
+from RL.a2sf_model import A2SFModel, ModelConfig
 from longbench_eval import dataset2metric, evaluate_results
-
-# Metric head names must match RL training (NeuralUCBPolicy.reward_heads keys).
-METRIC_HEADS = sorted({fn.__name__ for fn in dataset2metric.values()})
 
 # ============================================================================
 # Prediction Functions (from longbench_pred_RL.py)
@@ -66,185 +61,63 @@ def resolve_selected_datasets(args):
         selected_datasets.extend(TASK_TO_DATASETS[task])
     return selected_datasets
 
-def load_rl_policy(checkpoint_path, device, target_model, target_tokenizer):
-    """Load RL policy from checkpoint"""
-    print(f"Loading RL policy from: {checkpoint_path}")
-    
-    if not os.path.exists(checkpoint_path):
-        raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
-    
-    # Load checkpoint with weights_only=False to allow custom classes
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    
-    # Extract config from checkpoint
-    if "config" in checkpoint:
-        config = checkpoint["config"]
-    else:
-        # Create default config if not found in checkpoint
-        config = A2SFRLConfig()
-        print("Warning: Config not found in checkpoint, using default config")
-    
-    # AttentionEncoder: seq_len norm + per-head entropy / max-pos (see RL/env.py AttentionEncoder).
-    context_encoder = AttentionEncoder(
-        target_model=target_model,
-        target_tokenizer=target_tokenizer,
-        device=device,
-        output_dim=-1,
-        num_query_tokens=16,
-    ).to(device)
-
-    state_dim = int(context_encoder.output_dim)
-
-    policy = NeuralUCBPolicy(
-        state_dim=state_dim,
-        a_values=config.a_values,
-        b_values=config.b_values,
-        metric_heads=METRIC_HEADS,
-    ).to(device)
-    
-    # Load policy weights
-    if "policy_state_dict" in checkpoint:
-        policy.load_state_dict(checkpoint["policy_state_dict"])
-        print(f"Loaded policy from iteration {checkpoint.get('iteration', 'unknown')}")
-    else:
-        raise ValueError("Policy state dict not found in checkpoint")
-    
-    policy.eval()  # Set to evaluation mode
-    context_encoder.eval()  # Set to evaluation mode
-    
-    return policy, context_encoder, config
-
-def get_rl_action(
-    policy,
-    context_encoder,
-    prompt,
-    generation_length,
-    token_budget,
-    device,
-    task_type=None,
-    dataset=None,
+def get_pred_rl(
+    data,
+    max_length,
+    max_gen,
+    dataset,
+    out_path,
+    model_name,
+    a2sf_model: A2SFModel,
+    budget: int,
 ):
-    """Get RL action (a, b) for sigmoid cache from given prompt"""
-    # Encode context with generation_length and token_budget
-    context_embedding = context_encoder.encode_context(
-        prompt,
-        generation_length,
-        token_budget,
-        task_type=task_type,
-        dataset=dataset,
-    )
-    
-    # Build state (ensure it's on the correct device and dtype)
-    state = context_embedding.to(device, dtype=torch.float32)
-    
-    metric_type = "qa_f1_score"
-    metric_fn = dataset2metric.get(str(dataset or "").lower())
-    if metric_fn is not None:
-        metric_type = metric_fn.__name__
+    """Generate predictions using A2SFModel.generate() (RL action + KV compression)."""
+    tokenizer = a2sf_model.model_runner.tokenizer
 
-    # Inference-time action selection (pure exploitation).
-    with torch.no_grad():
-        (a_tensor, b_tensor), _ = policy.act(state, metric_type=metric_type)
-    
-    # Extract scalar a, b values
-    if isinstance(a_tensor, torch.Tensor):
-        a_val = float(a_tensor.view(-1)[0].item())
-    else:
-        a_val = float(a_tensor)
-    if isinstance(b_tensor, torch.Tensor):
-        b_val = float(b_tensor.view(-1)[0].item())
-    else:
-        b_val = float(b_tensor)
-    
-    return a_val, b_val
-
-def get_pred_rl(data, max_length, max_gen, dataset, model, tokenizer, out_path, model_name, 
-                rl_policy, context_encoder, rl_config, device, budget):
-    """Generate predictions using RL-determined sigmoid cache parameters (a, b)"""
     for json_obj in tqdm(data):
         prompt = json_obj["input_prompt"]
 
         tokenized_prompt = tokenizer(prompt, truncation=False, return_tensors="pt").input_ids[0]
-        
         if len(tokenized_prompt) > max_length:
-            half = int(max_length/2)
-            prompt = tokenizer.decode(tokenized_prompt[:half], skip_special_tokens=True) + \
-                    tokenizer.decode(tokenized_prompt[-half:], skip_special_tokens=True)
-        
+            half = int(max_length / 2)
+            prompt = tokenizer.decode(tokenized_prompt[:half], skip_special_tokens=True) + tokenizer.decode(
+                tokenized_prompt[-half:],
+                skip_special_tokens=True,
+            )
+
         if dataset not in ["trec", "triviaqa", "samsum", "lsht", "lcc", "repobench-p"]:
             if "llama" in model_name:
                 prompt = f"[INST]{prompt}[/INST]"
 
-        # RL action은 실제 모델 입력 prompt와 동일한 텍스트로 추론
-        a_val, b_val = get_rl_action(
-            rl_policy,
-            context_encoder,
-            prompt,
-            max_gen,
-            budget,
-            device,
+        out = a2sf_model.generate(
+            prompt=prompt,
+            task=dataset,
+            max_new_tokens=max_gen,
+            token_budget=budget,
+            answers=json_obj.get("answers", []),
+            all_classes=json_obj.get("all_classes", []),
             task_type=json_obj.get("task_type"),
-            dataset=dataset,
         )
-        
-        input = tokenizer(prompt, truncation=False, return_tensors="pt")
-        
-        input_ids = input.input_ids.to(model.device)
-        attention_mask = input.attention_mask.to(torch.bfloat16).to(model.device)
-        
-        context_length = input_ids.shape[-1]
-        
-        # Get number of layers from model config
-        num_layers = model.config.num_hidden_layers
-        
-        # Create compression config with RL-determined sigmoid cache parameters (a, b)
-        from utils import CompressionConfig
-        config = CompressionConfig()
-        config.compression_method = "sigmoid"
-        config.total_budget = budget
-        config.layerwise_ratios = [1.0 for _ in range(num_layers)]
-        config.local_ratios = 0.125
-        # Sigmoid cache parameters
-        config.a = float(a_val)
-        config.b = float(b_val)
-        
-        model.init_cache(config)
-        
-        with torch.inference_mode():
-            if dataset == "samsum":
-                output = model.generate(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    max_new_tokens=max_gen,
-                    num_beams=1,
-                    do_sample=False,
-                    min_length=context_length+1,
-                    eos_token_id=[tokenizer.eos_token_id, tokenizer.encode("\n", add_special_tokens=False)[-1]],
-                    pad_token_id=tokenizer.eos_token_id,
-                )[0]
-            else:
-                output = model.generate(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    max_new_tokens=max_gen,
-                    num_beams=1,
-                    do_sample=False,
-                    pad_token_id=tokenizer.eos_token_id,
-                )[0]
-        
-        pred = tokenizer.decode(output[context_length:], skip_special_tokens=True)
-        
-        # Save prediction with RL sigmoid parameters
+
+        a_val = out.info.get("a")
+        b_val = out.info.get("b")
+        # Historically we wrote `b` as an int.
+        b_write = int(round(b_val)) if isinstance(b_val, (float, int)) else b_val
+
         with open(out_path, "a", encoding="utf-8") as f:
-            json.dump({
-                "pred": pred, 
-                "answers": json_obj["answers"], 
-                "all_classes": json_obj["all_classes"], 
-                "length": json_obj["length"],
-                "a": a_val,  # Sigmoid cache steepness parameter
-                "b": b_val,  # Sigmoid cache shift parameter
-            }, f, ensure_ascii=False)
-            f.write('\n')
+            json.dump(
+                {
+                    "pred": out.pred_text,
+                    "answers": json_obj["answers"],
+                    "all_classes": json_obj["all_classes"],
+                    "length": json_obj["length"],
+                    "a": a_val,
+                    "b": b_write,
+                },
+                f,
+                ensure_ascii=False,
+            )
+            f.write("\n")
 
 if __name__ == '__main__':
     set_seed(42)
@@ -253,15 +126,22 @@ if __name__ == '__main__':
     model_name = args.model
     model_name = model_name.split("_")[0].lower()
     max_length = json.load(open("config/model2maxlen.json", "r"))[model_name]
-    
-    model, tokenizer = load_model(model_name)
-    
-    first_layer_device = next(model.model.layers[0].parameters()).device
-    device = first_layer_device
-    rl_policy, context_encoder, rl_config = load_rl_policy(args.rl_checkpoint, device, model, tokenizer)
-    
-    print(f"RL Policy loaded successfully")
-    print(f"Config: {rl_config}")
+
+    checkpoint = torch.load(args.rl_checkpoint, map_location="cpu", weights_only=False)
+    state_dict = checkpoint.get("agent_state_dict")
+    if state_dict is None:
+        # Backward compatibility for older checkpoints.
+        state_dict = checkpoint.get("policy_state_dict")
+    if state_dict is None:
+        raise ValueError("Checkpoint missing 'agent_state_dict' (and legacy 'policy_state_dict').")
+
+    # Model config (KV 모델 로딩 정보)는 `config`에서 가져오고,
+    # agent 생성/weight 로딩은 checkpoint에서 추출합니다.
+    model_cfg = ModelConfig(model=model_name)
+    a2sf_model = A2SFModel(
+        config=model_cfg,
+        state_dict=state_dict,
+    )
 
     dataset2maxlen = json.load(open("config/dataset2maxlen.json", "r"))
     
@@ -293,11 +173,19 @@ if __name__ == '__main__':
             os.remove(out_path)
         
         max_gen = dataset2maxlen[dataset]
+
+        get_pred_rl(
+            data,
+            max_length,
+            max_gen,
+            dataset,
+            out_path,
+            model_name,
+            a2sf_model,
+            args.budget,
+        )
         
-        get_pred_rl(data, max_length, max_gen, dataset, model, tokenizer, out_path, 
-                   model_name, rl_policy, context_encoder, rl_config, device, args.budget)
-        
-        print(f"Completed {dataset} with RL policy")
+        print(f"Completed {dataset} with RL agent")
     
     # Evaluate results if not skipped
     if not args.skip_eval and output_dir and os.path.exists(output_dir):
