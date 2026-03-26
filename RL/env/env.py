@@ -47,32 +47,28 @@ class A2SFEnv:
 
         # Current episode cache
         self.current_prompt = None
-        self.current_dataset = None
+        self.current_metric_type: str = "qa_f1_score"
+        self.current_token_budget = None
         self.current_answers: List[str] = []
         self.current_all_classes: List[str] = []
-        self.current_metric_type: str = "qa_f1_score"
-        self.current_generation_length = None
-        self.current_token_budget = None
 
     def get_state(
         self,
         prompt: str,
-        generation_length: int,
-        answers: List[str],
-        all_classes: List[str],
         metric_type: str,
         token_budget: int,
+        answers: Optional[List[str]] = None,
+        all_classes: Optional[List[str]] = None,
+        generation_length: int = 64,
         dataset: str = None,
         task_type: Optional[str] = None,
     ) -> torch.Tensor:
         # Cache episode metadata used by `run_with_action()`.
         self.current_prompt = prompt
-        self.current_dataset = dataset
+        self.current_metric_type = str(metric_type or "qa_f1_score")
+        self.current_token_budget = token_budget
         self.current_answers = answers or []
         self.current_all_classes = all_classes or []
-        self.current_metric_type = str(metric_type or "qa_f1_score")
-        self.current_generation_length = generation_length
-        self.current_token_budget = token_budget
 
         return self.context_encoder.encode_context(
             prompt,
@@ -85,6 +81,7 @@ class A2SFEnv:
     def run_with_action(
         self,
         action: Tuple[torch.Tensor, torch.Tensor],
+        **kwargs: Any,
     ) -> Tuple[torch.Tensor, Dict[str, Any]]:
         """
         Runs model generation for the given action (a, b), then computes reward in-env.
@@ -99,7 +96,7 @@ class A2SFEnv:
                 a=a_val,
                 b=b_val,
                 token_budget=self.current_token_budget,
-                generation_length=self.current_generation_length,
+                **kwargs,
             )
 
         pred_text = result.pred_text
@@ -110,7 +107,7 @@ class A2SFEnv:
             for gt in self.current_answers:
                 reward_val = max(
                     reward_val,
-                    float(metric_fn(pred_text, gt, all_classes=self.current_all_classes or [])),
+                    float(metric_fn(pred_text, gt, all_classes=self.current_all_classes)),
                 )
 
         reward = torch.tensor(reward_val, device=self.device)

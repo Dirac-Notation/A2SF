@@ -3,36 +3,24 @@ import json
 from tqdm import tqdm
 import argparse
 import torch
-import sys
-
-# Add the current directory to the path for imports
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from utils import set_seed
 from RL.a2sf_model import A2SFModel, ModelConfig
-from longbench_eval import dataset2metric, evaluate_results
+from longbench_eval import dataset2metric
 
 # ============================================================================
 # Prediction Functions (from longbench_pred_RL.py)
 # ============================================================================
 
-TASK2DATASET_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config", "task2dataset.json")
-with open(TASK2DATASET_PATH, "r", encoding="utf-8") as f:
-    TASK_TO_DATASETS = json.load(f)
-TASK_LIST = list(TASK_TO_DATASETS.keys())
-
 def parse_args(args=None):
     parser = argparse.ArgumentParser(description="LongBench end-to-end evaluation with RL-trained A2SF model")
     parser.add_argument('--model', type=str, required=True, choices=["llama", "llama2", "llama3", "opt"])
     parser.add_argument('--budget', type=int, default=100)
-    parser.add_argument('--task', type=int, nargs='*', default=None, help="List of task numbers (0-5). If not specified, all tasks will be executed.")
-    parser.add_argument('--datasets', type=str, nargs='*', default=None, help="List of specific dataset names to process. If specified, only these datasets will be processed (ignoring --task).")
+    parser.add_argument('--datasets', type=str, nargs='*', default=None, help="List of specific dataset names to process. If not specified, all datasets will be processed.")
     parser.add_argument('--rl_checkpoint', type=str, required=True, help="Path to RL model checkpoint (.pt file)")
-    parser.add_argument('--skip_eval', action='store_true', help="Skip evaluation after prediction")
     return parser.parse_args(args)
 
 def load_jsonl_file(file_path):
-    """Load JSONL file"""
     data = []
     with open(file_path, 'r', encoding='utf-8') as f:
         for line in f:
@@ -41,63 +29,69 @@ def load_jsonl_file(file_path):
     return data
 
 
-def resolve_selected_datasets(args):
+def resolve_selected_datasets(args, dataset2maxlen):
     if args.datasets is not None:
         print(f"Processing specified datasets: {args.datasets}")
         return args.datasets
 
-    if args.task is None:
-        selected_tasks = TASK_LIST
-    else:
-        selected_tasks = []
-        for task_num in args.task:
-            if 0 <= task_num < len(TASK_LIST):
-                selected_tasks.append(TASK_LIST[task_num])
-            else:
-                print(f"Warning: Task number {task_num} is out of range (0-{len(TASK_LIST)-1}), skipping")
+    return list(dataset2maxlen.keys())
 
-    selected_datasets = []
-    for task in selected_tasks:
-        selected_datasets.extend(TASK_TO_DATASETS[task])
-    return selected_datasets
-
-def get_pred_rl(
-    data,
-    max_length,
-    max_gen,
-    dataset,
-    out_path,
-    model_name,
-    a2sf_model: A2SFModel,
-    budget: int,
-):
-    """Generate predictions using A2SFModel.generate() (RL action + KV compression)."""
-    tokenizer = a2sf_model.model_runner.tokenizer
-
+def get_pred(data, max_length, max_gen, dataset, model, tokenizer, out_path, model_name, budget):
     for json_obj in tqdm(data):
         prompt = json_obj["input_prompt"]
-
         tokenized_prompt = tokenizer(prompt, truncation=False, return_tensors="pt").input_ids[0]
+        
         if len(tokenized_prompt) > max_length:
             half = int(max_length / 2)
             prompt = tokenizer.decode(tokenized_prompt[:half], skip_special_tokens=True) + tokenizer.decode(
                 tokenized_prompt[-half:],
                 skip_special_tokens=True,
             )
-
+        
         if dataset not in ["trec", "triviaqa", "samsum", "lsht", "lcc", "repobench-p"]:
             if "llama" in model_name:
                 prompt = f"[INST]{prompt}[/INST]"
 
-        out = a2sf_model.generate(
-            prompt=prompt,
-            task=dataset,
-            max_new_tokens=max_gen,
-            token_budget=budget,
-            answers=json_obj.get("answers", []),
-            all_classes=json_obj.get("all_classes", []),
-            task_type=json_obj.get("task_type"),
-        )
+        input = tokenizer(prompt, truncation=False, return_tensors="pt")
+        input_ids = input.input_ids
+        context_length = input_ids.shape[-1]
+        metric_fn = dataset2metric.get(dataset)
+        metric_type = metric_fn.__name__ if metric_fn is not None else "qa_f1_score"
+
+        if dataset == "samsum":
+            out = model.generate(
+                prompt=prompt,
+                metric_type=metric_type,
+                token_budget=budget,
+                answers=json_obj.get("answers", []),
+                all_classes=json_obj.get("all_classes", []),
+                dataset=dataset,
+                task_type=json_obj.get("task_type"),
+                tokenizer=tokenizer,
+                stop_strings="[/INST]",
+                max_new_tokens=max_gen,
+                num_beams=1,
+                do_sample=False,
+                pad_token_id=tokenizer.eos_token_id,
+                min_length=context_length + 1,
+                eos_token_id=[tokenizer.eos_token_id, tokenizer.encode("\n", add_special_tokens=False)[-1]],
+            )
+        else:
+            out = model.generate(
+                prompt=prompt,
+                metric_type=metric_type,
+                token_budget=budget,
+                answers=json_obj.get("answers", []),
+                all_classes=json_obj.get("all_classes", []),
+                dataset=dataset,
+                task_type=json_obj.get("task_type"),
+                tokenizer=tokenizer,
+                stop_strings="[/INST]",
+                max_new_tokens=max_gen,
+                num_beams=1,
+                do_sample=False,
+                pad_token_id=tokenizer.eos_token_id,
+            )
 
         a_val = out.info.get("a")
         b_val = out.info.get("b")
@@ -138,10 +132,11 @@ if __name__ == '__main__':
     # Model config (KV 모델 로딩 정보)는 `config`에서 가져오고,
     # agent 생성/weight 로딩은 checkpoint에서 추출합니다.
     model_cfg = ModelConfig(model=model_name)
-    a2sf_model = A2SFModel(
+    model = A2SFModel(
         config=model_cfg,
         state_dict=state_dict,
     )
+    tokenizer = model.model_runner.tokenizer
 
     dataset2maxlen = json.load(open("config/dataset2maxlen.json", "r"))
     
@@ -150,7 +145,7 @@ if __name__ == '__main__':
     
     output_dir = None
     
-    selected_datasets = resolve_selected_datasets(args)
+    selected_datasets = resolve_selected_datasets(args, dataset2maxlen)
     
     # Process each dataset
     for dataset in selected_datasets:
@@ -162,34 +157,29 @@ if __name__ == '__main__':
             continue
         data = load_jsonl_file(jsonl_path)
         
-        # Create output directory with RL indicator
         output_dir = f"result_txt/pred/{args.model}_sigmoid_{args.budget}_RL"
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
         out_path = f"{output_dir}/{dataset}.jsonl"
         
-        # Clear existing file
         if os.path.exists(out_path):
             os.remove(out_path)
         
         max_gen = dataset2maxlen[dataset]
 
-        get_pred_rl(
+        get_pred(
             data,
             max_length,
             max_gen,
             dataset,
+            model,
+            tokenizer,
             out_path,
             model_name,
-            a2sf_model,
             args.budget,
         )
         
         print(f"Completed {dataset} with RL agent")
-    
-    # Evaluate results if not skipped
-    if not args.skip_eval and output_dir and os.path.exists(output_dir):
-        evaluate_results(output_dir)
     
     print("\nRL LongBench evaluation completed!")
 
