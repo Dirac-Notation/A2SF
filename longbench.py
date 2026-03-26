@@ -5,16 +5,10 @@ import argparse
 import torch
 
 from utils import load_model, set_seed, CompressionConfig
-from longbench_eval import evaluate_results
 
 # ============================================================================
 # Prediction Functions (from longbench_pred.py)
 # ============================================================================
-
-TASK2DATASET_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config", "task2dataset.json")
-with open(TASK2DATASET_PATH, "r", encoding="utf-8") as f:
-    TASK_TO_DATASETS = json.load(f)
-TASK_LIST = list(TASK_TO_DATASETS.keys())
 
 def parse_args(args=None):
     parser = argparse.ArgumentParser(description="LongBench end-to-end evaluation")
@@ -22,9 +16,7 @@ def parse_args(args=None):
     parser.add_argument('--method', type=str, default="full")
     parser.add_argument('--window', type=int, default=16)
     parser.add_argument('--budget', type=int, default=128)
-    parser.add_argument('--task', type=int, nargs='*', default=None, help="List of task numbers (0-5). If not specified, all tasks will be executed.")
-    parser.add_argument('--datasets', type=str, nargs='*', default=None, help="List of specific dataset names to process. If specified, only these datasets will be processed (ignoring --task).")
-    parser.add_argument('--skip_eval', action='store_true', help="Skip evaluation after prediction")
+    parser.add_argument('--datasets', type=str, nargs='*', default=None, help="List of specific dataset names to process. If not specified, all datasets will be processed.")
     return parser.parse_args(args)
 
 def load_jsonl_file(file_path):
@@ -36,25 +28,12 @@ def load_jsonl_file(file_path):
     return data
 
 
-def resolve_selected_datasets(args):
+def resolve_selected_datasets(args, dataset2maxlen):
     if args.datasets is not None:
         print(f"Processing specified datasets: {args.datasets}")
         return args.datasets
 
-    if args.task is None:
-        selected_tasks = TASK_LIST
-    else:
-        selected_tasks = []
-        for task_num in args.task:
-            if 0 <= task_num < len(TASK_LIST):
-                selected_tasks.append(TASK_LIST[task_num])
-            else:
-                print(f"Warning: Task number {task_num} is out of range (0-{len(TASK_LIST)-1}), skipping")
-
-    selected_datasets = []
-    for task in selected_tasks:
-        selected_datasets.extend(TASK_TO_DATASETS[task])
-    return selected_datasets
+    return list(dataset2maxlen.keys())
 
 def get_pred(data, max_length, max_gen, dataset, model, tokenizer, out_path, model_name, config):
     for json_obj in tqdm(data):
@@ -89,6 +68,8 @@ def get_pred(data, max_length, max_gen, dataset, model, tokenizer, out_path, mod
                     min_length=context_length+1,
                     eos_token_id=[tokenizer.eos_token_id, tokenizer.encode("\n", add_special_tokens=False)[-1]],
                     pad_token_id=tokenizer.eos_token_id,
+                    tokenizer=tokenizer,
+                    stop_strings="[/INST]"
                 )[0]
             else:
                 output = model.generate(
@@ -98,6 +79,8 @@ def get_pred(data, max_length, max_gen, dataset, model, tokenizer, out_path, mod
                     num_beams=1,
                     do_sample=False,
                     pad_token_id=tokenizer.eos_token_id,
+                    tokenizer=tokenizer,
+                    stop_strings="[/INST]"
                 )[0]
         pred = tokenizer.decode(output[context_length:], skip_special_tokens=True)
         with open(out_path, "a", encoding="utf-8") as f:
@@ -121,7 +104,7 @@ if __name__ == '__main__':
     
     output_dir = None
 
-    selected_datasets = resolve_selected_datasets(args)
+    selected_datasets = resolve_selected_datasets(args, dataset2maxlen)
 
     # Process each dataset
     for dataset in selected_datasets:
@@ -150,9 +133,6 @@ if __name__ == '__main__':
         max_gen = dataset2maxlen[dataset]
         
         get_pred(data, max_length, max_gen, dataset, model, tokenizer, out_path, model_name, config)
-    
-    if not args.skip_eval and output_dir and os.path.exists(output_dir):
-        evaluate_results(output_dir)
     
     print("\nLongBench evaluation completed!")
 

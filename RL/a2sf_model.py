@@ -42,7 +42,7 @@ class A2SFModel:
 
     Usage (inference):
       model = A2SFModel(config=..., state_dict=checkpoint["agent_state_dict"])
-      out = model.generate(prompt, task="hotpotqa", max_new_tokens=64, token_budget=128)
+      out = model.generate(prompt, metric_type="qa_f1_score", token_budget=128, max_new_tokens=64)
     """
 
     def __init__(
@@ -88,41 +88,36 @@ class A2SFModel:
     def generate(
         self,
         prompt: str,
-        task: Optional[str] = None,
-        metric_type: Optional[str] = None,
-        answers: Optional[List[str]] = None,
-        all_classes: Optional[List[str]] = None,
-        task_type: Optional[str] = None,
+        metric_type: str,
         token_budget: int = 128,
-        max_new_tokens: int = 64,
         return_dict: bool = True,
         **kwargs: Any,
     ) -> Union[A2SFGenerateOutput, torch.Tensor, str]:
         """
         Transformers-like generate() with RL action selection.
 
-        Note: `kwargs` is currently reserved for future extension; the underlying runner uses:
-          - max_new_tokens (generation_length)
-          - token_budget (compression total_budget)
-        """
-        resolved_metric_type = metric_type
-        if resolved_metric_type is None and task is not None:
-            metric_fn = dataset2metric.get(str(task).lower())
-            resolved_metric_type = metric_fn.__name__ if metric_fn is not None else "qa_f1_score"
-        if resolved_metric_type is None:
-            resolved_metric_type = "qa_f1_score"
+        Required inputs:
+          - prompt
+          - metric_type
+          - token_budget
 
-        answers = answers or []
-        all_classes = all_classes or []
+        Extra generation/runtime options are forwarded via kwargs.
+        """
+        resolved_metric_type = str(metric_type or "qa_f1_score")
+        generation_length = int(kwargs.get("max_new_tokens", 64))
+        answers = kwargs.pop("answers", None)
+        all_classes = kwargs.pop("all_classes", None)
+        dataset = kwargs.pop("dataset", None)
+        task_type = kwargs.pop("task_type", None)
 
         state = self.env.get_state(
             prompt=prompt,
-            generation_length=max_new_tokens,
-            answers=answers,
-            all_classes=all_classes,
             metric_type=resolved_metric_type,
             token_budget=token_budget,
-            dataset=task,
+            answers=answers,
+            all_classes=all_classes,
+            generation_length=generation_length,
+            dataset=dataset,
             task_type=task_type,
         )
 
@@ -130,7 +125,7 @@ class A2SFModel:
             state.to(self._agent_device, dtype=torch.float32),
             metric_type=resolved_metric_type,
         )
-        reward_t, info = self.env.run_with_action(action)
+        reward_t, info = self.env.run_with_action(action, **kwargs)
 
         sequences = info["output_ids"]
         pred_text = info["pred"]

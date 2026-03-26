@@ -10,10 +10,6 @@ import sys
 # outside the repository root.
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from longbench_eval import (
-    qa_f1_score,
-)
-
 from utils import CompressionConfig, load_model
 
 @dataclass
@@ -38,7 +34,7 @@ class A2SFModelRunner:
         a: float,
         b: float,
         token_budget: int,
-        generation_length: int,
+        **kwargs: Any,
     ) -> ModelResult:
         start_time = time.time()
 
@@ -53,10 +49,7 @@ class A2SFModelRunner:
             output_ids = self.model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                max_new_tokens=int(generation_length),
-                num_beams=1,
-                do_sample=False,
-                pad_token_id=self.tokenizer.eos_token_id,
+                **kwargs,
             )[0]
 
             pred = self.tokenizer.decode(

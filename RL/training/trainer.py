@@ -172,6 +172,28 @@ class A2SFTrainer:
             return "qa_f1_score"
         return fn.__name__
 
+    def _build_generation_kwargs(
+        self,
+        dataset_name: str,
+        context_length: int,
+        generation_length: int,
+    ) -> Dict[str, Any]:
+        generation_kwargs: Dict[str, Any] = {
+            "tokenizer": self.model_runner.tokenizer,
+            "stop_strings": "[/INST]",
+            "max_new_tokens": int(generation_length),
+            "num_beams": 1,
+            "do_sample": False,
+            "pad_token_id": self.model_runner.tokenizer.eos_token_id,
+        }
+        if str(dataset_name or "").strip().lower() == "samsum":
+            generation_kwargs["min_length"] = int(context_length) + 1
+            generation_kwargs["eos_token_id"] = [
+                self.model_runner.tokenizer.eos_token_id,
+                self.model_runner.tokenizer.encode("\n", add_special_tokens=False)[-1],
+            ]
+        return generation_kwargs
+
     def _neural_ucb_update_batch(
         self,
         samples: List[Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor], torch.Tensor, str]],
@@ -300,15 +322,20 @@ class A2SFTrainer:
                     input_seq_len = int(tokenized_prompt.input_ids.size(1))
                     task_type_str = str(episode_data.get("task_type") or "unknown")
                     metric_type = str(episode_data.get("metric_type") or "qa_f1_score")
+                    generation_kwargs = self._build_generation_kwargs(
+                        episode_data.get("dataset"),
+                        input_seq_len,
+                        int(episode_data["generation_length"]),
+                    )
 
                     for token_budget in TOKEN_BUDGET_CANDIDATES:
                         state = self.env.get_state(
                             prompt=prompt,
-                            generation_length=episode_data["generation_length"],
-                            answers=episode_data.get("answers", []),
-                            all_classes=episode_data.get("all_classes", []),
                             metric_type=metric_type,
                             token_budget=token_budget,
+                            answers=episode_data.get("answers", []),
+                            all_classes=episode_data.get("all_classes", []),
+                            generation_length=episode_data["generation_length"],
                             dataset=episode_data["dataset"],
                             task_type=episode_data.get("task_type"),
                         )
@@ -325,8 +352,14 @@ class A2SFTrainer:
                             metric_type=metric_type,
                         )
 
-                        best_reward, _best_info = self.env.run_with_action(best_action)
-                        worst_reward, _worst_info = self.env.run_with_action(worst_action)
+                        best_reward, _best_info = self.env.run_with_action(
+                            best_action,
+                            **generation_kwargs,
+                        )
+                        worst_reward, _worst_info = self.env.run_with_action(
+                            worst_action,
+                            **generation_kwargs,
+                        )
 
                         best_gt_reward_val = (
                             best_reward.item() if isinstance(best_reward, torch.Tensor) else float(best_reward)
@@ -451,13 +484,18 @@ class A2SFTrainer:
 
             for token_budget in TOKEN_BUDGET_CANDIDATES:
                 metric_type = str(episode_data.get("metric_type") or "qa_f1_score")
+                generation_kwargs = self._build_generation_kwargs(
+                    episode_data.get("dataset"),
+                    int(prompt_length),
+                    int(episode_data["generation_length"]),
+                )
                 state = self.env.get_state(
                     prompt=prompt,
-                    generation_length=episode_data["generation_length"],
-                    answers=episode_data.get("answers", []),
-                    all_classes=episode_data.get("all_classes", []),
                     metric_type=metric_type,
                     token_budget=token_budget,
+                    answers=episode_data.get("answers", []),
+                    all_classes=episode_data.get("all_classes", []),
+                    generation_length=episode_data["generation_length"],
                     dataset=episode_data["dataset"],
                     task_type=episode_data.get("task_type"),
                 )
@@ -468,7 +506,10 @@ class A2SFTrainer:
                     pred_reward = self.agent.predict_reward(state, action, metric_type=metric_type)
                     pred_reward_val = float(pred_reward.view(-1)[0].item())
 
-                reward, info = self.env.run_with_action(action)
+                reward, info = self.env.run_with_action(
+                    action,
+                    **generation_kwargs,
+                )
 
                 gt_reward_val = float(reward.item())
                 eval_rewards.append(gt_reward_val)
