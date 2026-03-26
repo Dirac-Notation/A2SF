@@ -2,11 +2,16 @@
 """
 LongBench 일부만 샘플링해 RL 학습/평가용 jsonl 생성.
 
+이 코드는 기존 `datasets/make_training_dataset.py`의 내용을 그대로
+`RL/training/data_generation/` 위치로 이식해, 학습 파이프라인이
+datasets 쪽을 호출하지 않도록 구성했습니다.
+
 - 데이터셋별 train: 기본 10% (길이 균형 샘플링)
 - 데이터셋별 eval: 남은 풀에서 기본 2% (길이 균형, train과 겹치지 않음)
 - 샘플이 확정된 뒤, 평가(longbench_RL 등)와 동일하게 max_input_length 기준 중간 절단 적용
 - generation_length: config/dataset2maxlen.json (데이터셋별, 평가와 동일 스케일)
 """
+
 import argparse
 import json
 import math
@@ -16,30 +21,22 @@ from typing import Any, Dict, List, Tuple
 
 from transformers import AutoTokenizer
 
+
 DEFAULT_SPLIT_SEED = 42
 DEFAULT_SAMPLE_RATIO = 0.10
 DEFAULT_LENGTH_BINS = 10
 DEFAULT_EVAL_RATIO = 0.02
 
-TASK2DATASET_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "config",
-    "task2dataset.json",
-)
-DATASET2MAXLEN_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "config",
-    "dataset2maxlen.json",
-)
+# RL/training/data_generation/make_training_dataset.py 기준으로 repo root로 이동
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+TASK2DATASET_PATH = os.path.join(REPO_ROOT, "config", "task2dataset.json")
+DATASET2MAXLEN_PATH = os.path.join(REPO_ROOT, "config", "dataset2maxlen.json")
 
 with open(TASK2DATASET_PATH, "r", encoding="utf-8") as f:
     TASK_TO_DATASETS = json.load(f)
 
-DATASET_TO_TASK = {
-    dataset_name: task_name
-    for task_name, datasets in TASK_TO_DATASETS.items()
-    for dataset_name in datasets
-}
+DATASET_TO_TASK = {dataset_name: task_name for task_name, datasets in TASK_TO_DATASETS.items() for dataset_name in datasets}
 
 with open(DATASET2MAXLEN_PATH, "r", encoding="utf-8") as f:
     DATASET_TO_MAXGEN = json.load(f)
@@ -58,40 +55,18 @@ def count_tokens(tokenizer, text: str) -> int:
 def list_longbench_files(longbench_dir: str) -> List[str]:
     if not os.path.isdir(longbench_dir):
         raise FileNotFoundError(f"LongBench directory not found: {longbench_dir}")
-    return sorted(
-        [
-            os.path.join(longbench_dir, name)
-            for name in os.listdir(longbench_dir)
-            if name.endswith(".jsonl")
-        ]
-    )
+    return sorted([os.path.join(longbench_dir, name) for name in os.listdir(longbench_dir) if name.endswith(".jsonl")])
 
 
 def resolve_max_input_length(model_name: str) -> int:
-    with open(
-        os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "config",
-            "model2maxlen.json",
-        ),
-        "r",
-        encoding="utf-8",
-    ) as f:
+    with open(os.path.join(REPO_ROOT, "config", "model2maxlen.json"), "r", encoding="utf-8") as f:
         model2maxlen = json.load(f)
     model_key = str(model_name).split("_")[0].lower()
     return int(model2maxlen.get(model_key, model2maxlen.get(model_name, 8192)))
 
 
 def load_tokenizer(model_name: str):
-    with open(
-        os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "config",
-            "model2path.json",
-        ),
-        "r",
-        encoding="utf-8",
-    ) as f:
+    with open(os.path.join(REPO_ROOT, "config", "model2path.json"), "r", encoding="utf-8") as f:
         model2path = json.load(f)
     model_path = model2path[model_name]
     return AutoTokenizer.from_pretrained(model_path)
@@ -349,11 +324,8 @@ def load_longbench_sampled_splits(
         all_lengths = [s["length"] for s in dataset_samples]
         train_lengths = [s["length"] for s in train_sampled]
         eval_lengths = [s["length"] for s in eval_sampled] if eval_sampled else []
-        eval_range_str = (
-            f"[{min(eval_lengths)}, {max(eval_lengths)}]"
-            if eval_lengths
-            else "[]"
-        )
+        eval_range_str = f"[{min(eval_lengths)}, {max(eval_lengths)}]" if eval_lengths else "[]"
+
         print(
             f"- {dataset_name:20s}: total={len(dataset_samples):4d}, "
             f"train={len(train_sampled):4d} ({sample_ratio*100:.1f}%), "
@@ -366,19 +338,13 @@ def load_longbench_sampled_splits(
     return train_samples_all, eval_samples_all
 
 
-def apply_eval_style_truncation(
-    samples: List[Dict[str, Any]],
-    tokenizer,
-    max_input_length: int,
-) -> None:
+def apply_eval_style_truncation(samples: List[Dict[str, Any]], tokenizer, max_input_length: int) -> None:
     """평가와 동일: 초과 시 중간 절단 후 length를 토큰 길이로 갱신."""
     for sample in samples:
         prompt = sample["input_prompt"]
         truncated = truncate_middle_by_max_length(prompt, tokenizer, max_input_length)
         sample["input_prompt"] = truncated
-        sample["length"] = int(
-            tokenizer(truncated, truncation=False, return_tensors="pt").input_ids.size(1)
-        )
+        sample["length"] = int(tokenizer(truncated, truncation=False, return_tensors="pt").input_ids.size(1))
 
 
 def write_jsonl(path: str, rows: List[Dict[str, Any]], split_name: str) -> None:
@@ -422,9 +388,17 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="LongBench 부분 샘플링(10%/2%) + 평가 동일 절단, GT 기반 RL 학습용 jsonl"
     )
-    parser.add_argument("--longbench_dir", type=str, default="./datasets/longbench")
-    parser.add_argument("--output_file", type=str, default="./datasets/training_data.jsonl")
-    parser.add_argument("--eval_output_file", type=str, default="./datasets/eval_data.jsonl")
+    parser.add_argument("--longbench_dir", type=str, default=os.path.join(REPO_ROOT, "datasets", "longbench"))
+    parser.add_argument(
+        "--output_file",
+        type=str,
+        default=os.path.join(REPO_ROOT, "RL", "training", "data", "training_data.jsonl"),
+    )
+    parser.add_argument(
+        "--eval_output_file",
+        type=str,
+        default=os.path.join(REPO_ROOT, "RL", "training", "data", "eval_data.jsonl"),
+    )
     parser.add_argument("--sample_ratio", type=float, default=DEFAULT_SAMPLE_RATIO, help="Train 비율 (기본 0.10)")
     parser.add_argument("--eval_ratio", type=float, default=DEFAULT_EVAL_RATIO, help="Eval 비율 (기본 0.02, train 제외 풀에서)")
     parser.add_argument("--num_length_bins", type=int, default=DEFAULT_LENGTH_BINS)
@@ -432,3 +406,4 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, default="llama3", choices=["llama", "llama2", "llama3", "opt"])
     parser.add_argument("--max_input_length", type=int, default=None)
     main(parser.parse_args())
+

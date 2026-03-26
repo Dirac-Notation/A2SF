@@ -5,18 +5,18 @@ This package contains the reinforcement learning components for training
 an A2SF model to dynamically adjust KV cache compression ratios.
 """
 
-from .main import A2SFRLConfig
-from .policy import NeuralUCBPolicy
+from .agent.neural_ucb_agent import NeuralUCBAgent
 from .env import A2SFEnv, AttentionEncoder
-from .runner import A2SFModelRunner
-from .trainer import A2SFTrainer
+from .env import A2SFModelRunner
+from .training.trainer import A2SFTrainer
+from .a2sf_model import ModelConfig
 
 __version__ = "1.0.0"
 __all__ = [
-    "A2SFRLConfig",
-    "NeuralUCBPolicy", 
+    "NeuralUCBAgent",
     "A2SFEnv",
     "A2SFModelRunner",
     "A2SFTrainer",
     "AttentionEncoder",
+    "ModelConfig",
 ]

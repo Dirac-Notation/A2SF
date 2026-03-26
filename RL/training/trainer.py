@@ -3,92 +3,81 @@ import sys
 import json
 import random
 import time
+from typing import Any, Dict, List, Optional, Tuple
+
 import torch
 import torch.optim as optim
 import torch.optim.lr_scheduler as lr_scheduler
 import torch.nn.functional as F
 import numpy as np
-import matplotlib.pyplot as plt
-
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from torch.utils.data import Dataset, DataLoader
-from typing import Dict, List, Any, Optional, Tuple
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from .main import A2SFRLConfig
-from .policy import NeuralUCBPolicy
-from .env import A2SFEnv
-from .runner import A2SFModelRunner
+sys.path.append(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
+
+from ..a2sf_model import ModelConfig
+from .training_config import TrainingConfig
+from ..agent.neural_ucb_agent import NeuralUCBAgent
+from ..env import A2SFEnv, A2SFModelRunner
+from .dataloader import RLDataset, rl_collate_fn
 from longbench_eval import dataset2metric
 
 TOKEN_BUDGET_CANDIDATES = [128]
 
-class RLDataset(Dataset):
-    """Dataset for RL training episodes"""
-    
-    def __init__(self, data: List[Dict[str, Any]]):
-        self.data = data
-    
-    def __len__(self):
-        return len(self.data)
-    
-    def __getitem__(self, idx):
-        return self.data[idx]
-
-
-def rl_collate_fn(batch):
-    """
-    Custom collate function for RL dataset.
-    Returns the batch as a list of dictionaries (no tensor conversion).
-    """
-    return batch
 
 class A2SFTrainer:
-    def __init__(self, config: A2SFRLConfig):
-        self.config = config
-        self.device = torch.device(config.device)
-        
-        torch.manual_seed(config.seed)
-        random.seed(config.seed)        
-        
-        self.model_runner = A2SFModelRunner(config)
-        self.env = A2SFEnv(self.model_runner, config)
-        
+    def __init__(self, model_config: ModelConfig, training_config: TrainingConfig):
+        self.model_config = model_config
+        self.training_config = training_config
+        self.device = None  # will be aligned to the actual model shard device
+
+        torch.manual_seed(training_config.seed)
+        random.seed(training_config.seed)
+
+        self.model_runner = A2SFModelRunner(self.model_config)
+        self.env = A2SFEnv(self.model_runner, self.model_config)
+
+        # KVLlama uses device_map="auto", so config.device may not equal cuda:x.
+        first_layer_device = next(self.model_runner.model.model.layers[0].parameters()).device
+        self.device = first_layer_device
+        self.env.device = first_layer_device
+
         # State dimension: [seq_length] + [head entropy, head max_pos] per attention head
         state_dim = int(self.env.context_encoder.output_dim)
         metric_heads = sorted({fn.__name__ for fn in dataset2metric.values()})
-        
-        self.policy = NeuralUCBPolicy(
+
+        self.agent = NeuralUCBAgent(
             state_dim=state_dim,
-            a_values=config.a_values,
-            b_values=config.b_values,
+            a_values=self.model_config.a_values,
+            b_values=self.model_config.b_values,
             metric_heads=metric_heads,
         ).to(self.device)
-        
-        # Optimizer only includes policy parameters
+
+        # Optimizer only includes agent parameters
         # Context encoder is metadata-based and frozen
-        all_params = list(self.policy.parameters())
-        self.optimizer = optim.SGD(all_params, lr=config.lr)
-        
-        # Load pre-split data produced by datasets/make_training_dataset.py
+        all_params = list(self.agent.parameters())
+        self.optimizer = optim.SGD(all_params, lr=self.training_config.lr)
+
+        # Load pre-split data generated under `RL/training/data/`.
         training_data_list, eval_data_list = self.load_training_data()
-        
+
         # Create datasets
         self.training_dataset = RLDataset(training_data_list)
         self.eval_dataset = RLDataset(eval_data_list)
-        
+
         # Create data loaders
         # For training: shuffle and use episodes_per_update as batch size
         self.train_loader = DataLoader(
             self.training_dataset,
-            batch_size=config.episodes_per_update,
+            batch_size=self.training_config.episodes_per_update,
             shuffle=True,
             num_workers=0,  # Set to 0 to avoid multiprocessing issues with model
             pin_memory=False,
-            collate_fn=rl_collate_fn  # Use custom collate function
+            collate_fn=rl_collate_fn,  # Use custom collate function
         )
-        
+
         # For evaluation: no shuffle, process all at once
         self.eval_loader = DataLoader(
             self.eval_dataset,
@@ -96,22 +85,22 @@ class A2SFTrainer:
             shuffle=False,
             num_workers=0,
             pin_memory=False,
-            collate_fn=rl_collate_fn  # Use custom collate function
+            collate_fn=rl_collate_fn,  # Use custom collate function
         )
-        
+
         print(f"Loaded {len(self.training_dataset)} training samples")
         print(f"Loaded {len(self.eval_dataset)} evaluation samples")
         print(f"Training batches per epoch: {len(self.train_loader)}")
-        os.makedirs(config.save_dir, exist_ok=True)
+        os.makedirs(self.training_config.save_dir, exist_ok=True)
 
         self.iterations_per_epoch = len(self.train_loader)
-        self.total_epochs = max(1, int(config.epochs))
+        self.total_epochs = max(1, int(self.training_config.epochs))
         self.total_iterations = max(1, self.total_epochs * max(1, self.iterations_per_epoch))
         self.scheduler_t_max = self.total_epochs
 
         # Initialize learning rate scheduler after total_iterations is known
         self.scheduler = self._create_scheduler()
-        
+
     @staticmethod
     def _format_fixed(value: float, digits: int) -> str:
         return f"{float(value):.{digits}f}"
@@ -125,7 +114,9 @@ class A2SFTrainer:
                 formatted.append(v)
         return formatted
 
-    def _serialize_with_fixed_precision(self, payload: Dict[str, Any], digits_map: Dict[str, int]) -> Dict[str, Any]:
+    def _serialize_with_fixed_precision(
+        self, payload: Dict[str, Any], digits_map: Dict[str, int]
+    ) -> Dict[str, Any]:
         serialized = {}
         for key, value in payload.items():
             if key in digits_map and isinstance(value, (float, int)):
@@ -136,152 +127,25 @@ class A2SFTrainer:
                 serialized[key] = value
         return serialized
 
-    def _format_reward_pairs(self, pairs: List[Tuple[float, float]], digits: int = 4) -> List[List[str]]:
+    def _format_reward_pairs(
+        self, pairs: List[Tuple[float, float]], digits: int = 4
+    ) -> List[List[str]]:
         return [
             [self._format_fixed(gt_reward, digits), self._format_fixed(pred_reward, digits)]
             for gt_reward, pred_reward in pairs
         ]
 
-    def _plot_training_progress(self) -> None:
-        """Overwrite training progress plot from training/eval jsonl files."""
-        train_file = os.path.join(self.config.save_dir, "training_progress.jsonl")
-        eval_file = os.path.join(self.config.save_dir, "evaluation_progress.jsonl")
-        if not os.path.exists(train_file):
-            return
-
-        iterations: List[int] = []
-        avg_rewards: List[float] = []
-        total_losses: List[float] = []
-
-        with open(train_file, "r", encoding="utf-8") as f:
-            for line in f:
-                if not line.strip():
-                    continue
-                row = json.loads(line)
-                iterations.append(int(row["iteration"]))
-                avg_rewards.append(float(row["avg_reward"]))
-                total_losses.append(float(row["total_loss"]))
-
-        if len(iterations) == 0:
-            return
-
-        train_iters = np.array(iterations, dtype=np.int64)
-        y_reward = np.array(avg_rewards, dtype=np.float64)
-        y_loss = np.array(total_losses, dtype=np.float64)
-
-        # Original plot style from runs/plot_training_progress.py
-        plt.rcParams.update({
-            "font.family": "serif",
-            "figure.figsize": (14, 14),
-            "figure.dpi": 150,
-            "font.size": 22,
-            "axes.labelsize": 26,
-            "axes.titlesize": 28,
-            "xtick.labelsize": 22,
-            "ytick.labelsize": 22,
-            "legend.fontsize": 22,
-            "axes.spines.top": False,
-            "axes.spines.right": False,
-            "axes.linewidth": 1.5,
-        })
-
-        # Chunk-average smoothing (same style as original script)
-        window_size = max(1, self.iterations_per_epoch)
-
-        def _smooth_chunk(vals: np.ndarray, w: int) -> Tuple[np.ndarray, np.ndarray]:
-            smoothed_vals = []
-            epoch_idx = []
-            for chunk_id, i in enumerate(range(0, len(vals), w), start=1):
-                chunk_vals = vals[i:i + w]
-                smoothed_vals.append(float(np.mean(chunk_vals)))
-                epoch_idx.append(chunk_id)
-            return np.array(epoch_idx, dtype=np.int64), np.array(smoothed_vals, dtype=np.float64)
-
-        x_epoch, y_reward_s = _smooth_chunk(y_reward, window_size)
-        _, y_loss_s = _smooth_chunk(y_loss, window_size)
-
-        # Eval reward is already logged once per epoch-end.
-        eval_epochs: List[int] = []
-        eval_rewards: List[float] = []
-        if os.path.exists(eval_file):
-            with open(eval_file, "r", encoding="utf-8") as f:
-                for line in f:
-                    if not line.strip():
-                        continue
-                    row = json.loads(line)
-                    iter_idx = int(row["iteration"])
-                    eval_epochs.append(iter_idx // window_size + 1)
-                    eval_rewards.append(float(row["eval_avg_reward"]))
-
-        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, constrained_layout=True, figsize=(14, 14))
-
-        ax1.plot(
-            x_epoch,
-            y_reward_s,
-            marker="o",
-            linewidth=4,
-            markersize=8,
-            color="#4C72B0",
-            label="Average Reward (epoch average)",
-            zorder=5,
-        )
-        ax1.set_title("Average Reward Over Training", pad=20)
-        ax1.set_xlabel("Epoch")
-        ax1.set_ylabel("Average Reward")
-        ax1.grid(axis="y", linestyle="--", linewidth=1.0, alpha=0.5)
-        ax1.legend(frameon=False, loc="best")
-        ax1.margins(x=0.02)
-
-        ax2.plot(
-            x_epoch,
-            y_loss_s,
-            marker="o",
-            linewidth=4,
-            markersize=8,
-            color="#C44E52",
-            label="Total Loss (epoch average)",
-            zorder=5,
-        )
-        ax2.set_title("Total Loss Over Training", pad=20)
-        ax2.set_xlabel("Epoch")
-        ax2.set_ylabel("Total Loss")
-        ax2.grid(axis="y", linestyle="--", linewidth=1.0, alpha=0.5)
-        ax2.legend(frameon=False, loc="best")
-        ax2.margins(x=0.02)
-
-        if len(eval_epochs) > 0:
-            ax3.plot(
-                np.array(eval_epochs, dtype=np.int64),
-                np.array(eval_rewards, dtype=np.float64),
-                marker="o",
-                linewidth=4,
-                markersize=8,
-                color="#55A868",
-                label="Evaluation Reward",
-                zorder=5,
-            )
-        ax3.set_title("Evaluation Reward Over Training", pad=20)
-        ax3.set_xlabel("Epoch")
-        ax3.set_ylabel("Eval Reward")
-        ax3.grid(axis="y", linestyle="--", linewidth=1.0, alpha=0.5)
-        ax3.legend(frameon=False, loc="best")
-        ax3.margins(x=0.02)
-
-        output_path = os.path.join(self.config.save_dir, "training_progress.png")
-        fig.savefig(output_path, dpi=150, bbox_inches="tight")
-        plt.close(fig)
-    
-    
     def load_training_data(self) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-        train_path = self.config.train_data_path
-        eval_path = self.config.eval_data_path
+        train_path = self.training_config.train_data_path
+        eval_path = self.training_config.eval_data_path
 
         if not os.path.exists(train_path):
             raise FileNotFoundError(f"Training split not found: {train_path}")
         if not os.path.exists(eval_path):
             raise FileNotFoundError(
                 f"Evaluation split not found: {eval_path}. "
-                "Run datasets/make_training_dataset.py to generate fixed split files."
+                "Run `python -m RL.training.data_generation.make_training_dataset` "
+                "to generate fixed split files."
             )
 
         with open(train_path, "r", encoding="utf-8") as f:
@@ -314,10 +178,6 @@ class A2SFTrainer:
         config,
         optimizer: torch.optim.Optimizer,
     ) -> Dict[str, Any]:
-        """
-        Batch update: accumulate MAE losses over (state, action, reward) samples
-        and run a single optimizer step. Also returns (gt, pred) pairs for logging.
-        """
         if len(samples) == 0:
             return {
                 "prediction_loss": 0.0,
@@ -327,7 +187,7 @@ class A2SFTrainer:
                 "reward_pairs": [],
             }
 
-        self.policy.train()
+        self.agent.train()
         self.env.context_encoder.eval()
 
         prediction_mse_losses = []
@@ -338,11 +198,11 @@ class A2SFTrainer:
             if state.ndim == 1:
                 state = state.unsqueeze(0)
 
-            out = self.policy.forward(state, metric_type=metric_type)
+            out = self.agent.forward(state, metric_type=metric_type)
             reward_pred = out["reward_pred"]
             feature_vector = out["feature_vector"]
 
-            action_idx = self.policy._get_action_indices(action)
+            action_idx = self.agent._get_action_indices(action)
             if action_idx.ndim > 0:
                 action_idx = action_idx[0]
 
@@ -361,7 +221,7 @@ class A2SFTrainer:
         prediction_loss = torch.sqrt(mean_mse + 1e-8)
 
         l2_loss = 0.0
-        for param in self.policy.parameters():
+        for param in self.agent.parameters():
             if param.requires_grad:
                 l2_loss += torch.sum(param ** 2)
         l2_loss = config.l2_coef * l2_loss
@@ -371,7 +231,7 @@ class A2SFTrainer:
         optimizer.zero_grad()
         total_loss.backward()
         grad_norm_sq = 0.0
-        for param in self.policy.parameters():
+        for param in self.agent.parameters():
             if param.grad is not None:
                 g = param.grad.detach()
                 grad_norm_sq += float(torch.sum(g * g).item())
@@ -380,7 +240,7 @@ class A2SFTrainer:
 
         with torch.no_grad():
             for feature_vector, action_idx in feature_action_pairs:
-                self.policy._update_inverse_covariances(feature_vector, action_idx)
+                self.agent._update_inverse_covariances(feature_vector, action_idx)
 
         return {
             "prediction_loss": float(prediction_loss.item()),
@@ -389,24 +249,22 @@ class A2SFTrainer:
             "grad_norm": float(grad_norm),
             "reward_pairs": reward_pairs,
         }
-    
+
     def _create_scheduler(self) -> torch.optim.lr_scheduler._LRScheduler:
-        """Create cosine learning rate scheduler"""
         return lr_scheduler.CosineAnnealingLR(
             self.optimizer,
             T_max=self.scheduler_t_max,
-            eta_min=self.config.lr * 0.01  # Minimum learning rate (1% of initial)
+            eta_min=self.training_config.lr * 0.01,
         )
-    
+
     def _get_ucb_beta(self, iteration: int, total_iterations: int) -> float:
-        """
-        Linearly decay UCB beta from config.ucb_beta_max to config.ucb_beta_min.
-        """
         if total_iterations <= 1:
-            return float(self.config.ucb_beta_max)
-        
+            return float(self.training_config.ucb_beta_max)
+
         progress = iteration / float(total_iterations - 1)
-        beta = self.config.ucb_beta_max + (self.config.ucb_beta_min - self.config.ucb_beta_max) * progress
+        beta = self.training_config.ucb_beta_max + (
+            self.training_config.ucb_beta_min - self.training_config.ucb_beta_max
+        ) * progress
         return float(beta)
 
     def train(self, num_epochs: int = 1) -> int:
@@ -417,21 +275,23 @@ class A2SFTrainer:
 
         for epoch in range(num_epochs):
             print(f"\nEpoch {epoch + 1}/{num_epochs}")
-            # Epoch-based UCB beta scheduling: fixed within an epoch.
             current_beta = self._get_ucb_beta(epoch, total_epochs)
 
             for batch in self.train_loader:
-                iteration_rewards = []
-                iteration_actions_a = []
-                iteration_actions_b = []
-                iteration_reward_pairs = []
-                iteration_input_seq_lengths: List[int] = []
-                iteration_task_types: List[str] = []
+                best_rewards: List[float] = []
+                worst_rewards: List[float] = []
+                best_actions_a: List = []
+                best_actions_b: List = []
+                worst_actions_a: List = []
+                worst_actions_b: List = []
+                best_input_seq_lengths: List[int] = []
+                best_task_types: List[str] = []
+                worst_input_seq_lengths: List[int] = []
+                worst_task_types: List[str] = []
                 update_samples = []
 
                 start_time = time.time()
 
-                # Process each episode in the batch
                 for episode_data in batch:
                     prompt = episode_data["input_prompt"]
                     tokenized_prompt = self.model_runner.tokenizer(
@@ -440,9 +300,9 @@ class A2SFTrainer:
                     input_seq_len = int(tokenized_prompt.input_ids.size(1))
                     task_type_str = str(episode_data.get("task_type") or "unknown")
                     metric_type = str(episode_data.get("metric_type") or "qa_f1_score")
-                    token_budget_candidates = TOKEN_BUDGET_CANDIDATES
-                    for token_budget in token_budget_candidates:
-                        state = self.env.encode_to_state(
+
+                    for token_budget in TOKEN_BUDGET_CANDIDATES:
+                        state = self.env.get_state(
                             prompt=prompt,
                             generation_length=episode_data["generation_length"],
                             answers=episode_data.get("answers", []),
@@ -454,89 +314,144 @@ class A2SFTrainer:
                         )
                         state = state.to(self.device)
 
-                        action, ucb_value = self.policy.act_with_ucb(
+                        best_action, _ = self.agent.get_best_action(
                             state,
                             beta=current_beta,
                             metric_type=metric_type,
                         )
-                        reward, info = self.env.step(action)
-                        gt_reward_val = reward.item() if isinstance(reward, torch.Tensor) else float(reward)
+                        worst_action, _ = self.agent.get_worst_action(
+                            state,
+                            beta=current_beta,
+                            metric_type=metric_type,
+                        )
 
-                        update_samples.append((state, action, reward, metric_type))
+                        best_reward, _best_info = self.env.run_with_action(best_action)
+                        worst_reward, _worst_info = self.env.run_with_action(worst_action)
 
-                        iteration_rewards.append(gt_reward_val)
-                        a_val, b_val = action
-                        iteration_actions_a.append(round(a_val.item(), 2) if isinstance(a_val, torch.Tensor) else a_val)
-                        iteration_actions_b.append(int(b_val.item()) if isinstance(b_val, torch.Tensor) else int(b_val))
-                        iteration_input_seq_lengths.append(input_seq_len)
-                        iteration_task_types.append(task_type_str)
+                        best_gt_reward_val = (
+                            best_reward.item() if isinstance(best_reward, torch.Tensor) else float(best_reward)
+                        )
+                        worst_gt_reward_val = (
+                            worst_reward.item() if isinstance(worst_reward, torch.Tensor) else float(worst_reward)
+                        )
+
+                        update_samples.append((state, best_action, best_reward, metric_type))
+                        update_samples.append((state, worst_action, worst_reward, metric_type))
+
+                        best_rewards.append(best_gt_reward_val)
+                        worst_rewards.append(worst_gt_reward_val)
+
+                        best_a_val, best_b_val = best_action
+                        worst_a_val, worst_b_val = worst_action
+
+                        best_actions_a.append(
+                            round(best_a_val.item(), 2) if isinstance(best_a_val, torch.Tensor) else best_a_val
+                        )
+                        best_actions_b.append(
+                            int(best_b_val.item()) if isinstance(best_b_val, torch.Tensor) else int(best_b_val)
+                        )
+                        worst_actions_a.append(
+                            round(worst_a_val.item(), 2) if isinstance(worst_a_val, torch.Tensor) else worst_a_val
+                        )
+                        worst_actions_b.append(
+                            int(worst_b_val.item()) if isinstance(worst_b_val, torch.Tensor) else int(worst_b_val)
+                        )
+                        best_input_seq_lengths.append(input_seq_len)
+                        worst_input_seq_lengths.append(input_seq_len)
+                        best_task_types.append(task_type_str)
+                        worst_task_types.append(task_type_str)
 
                 end_time = time.time()
                 print(f"Time taken for one iteration: {end_time - start_time} seconds")
 
-                # Single update after evaluating all budgets for selected episodes.
                 avg_loss_stats = self._neural_ucb_update_batch(
                     samples=update_samples,
-                    config=self.config,
+                    config=self.training_config,
                     optimizer=self.optimizer,
                 )
-                iteration_reward_pairs = avg_loss_stats.get("reward_pairs", [])
+                all_reward_pairs = avg_loss_stats.get("reward_pairs", [])
+                best_reward_pairs = all_reward_pairs[0::2]
+                worst_reward_pairs = all_reward_pairs[1::2]
 
                 self._log_progress(
                     iteration=global_iteration,
                     loss_stats=avg_loss_stats,
-                    iteration_rewards=iteration_rewards,
-                    iteration_actions_a=iteration_actions_a,
-                    iteration_actions_b=iteration_actions_b,
-                    iteration_reward_pairs=iteration_reward_pairs,
-                    iteration_input_seq_lengths=iteration_input_seq_lengths,
-                    iteration_task_types=iteration_task_types,
+                    iteration_rewards=best_rewards,
+                    iteration_actions_a=best_actions_a,
+                    iteration_actions_b=best_actions_b,
+                    iteration_reward_pairs=best_reward_pairs,
+                    iteration_input_seq_lengths=best_input_seq_lengths,
+                    iteration_task_types=best_task_types,
                     current_beta=current_beta,
+                    log_filename="training_progress_best.jsonl",
+                    log_prefix="BEST",
+                )
+                self._log_progress(
+                    iteration=global_iteration,
+                    loss_stats=avg_loss_stats,
+                    iteration_rewards=worst_rewards,
+                    iteration_actions_a=worst_actions_a,
+                    iteration_actions_b=worst_actions_b,
+                    iteration_reward_pairs=worst_reward_pairs,
+                    iteration_input_seq_lengths=worst_input_seq_lengths,
+                    iteration_task_types=worst_task_types,
+                    current_beta=current_beta,
+                    log_filename="training_progress_worst.jsonl",
+                    log_prefix="WORST",
                 )
                 global_iteration += 1
 
-            # Epoch-based cosine scheduler: step once per epoch.
             self.scheduler.step()
 
-            # Run evaluation/checkpoint/plot once per epoch end.
             last_iter = max(0, global_iteration - 1)
             self._save_checkpoint(last_iter)
             self._evaluate(last_iter, current_beta=current_beta, total_iterations=total_epochs)
             self._plot_training_progress()
 
         return max(0, global_iteration - 1)
-    
-    def _evaluate(self, iteration: int, current_beta: Optional[float] = None, total_iterations: Optional[int] = None):
+
+    def _plot_training_progress(self) -> None:
+        try:
+            from .plot_training_pregress import plot_training_progress
+        except Exception as e:
+            print(f"[plot] failed to import plot module: {e}")
+            return
+
+        plot_training_progress(
+            save_dir=self.training_config.save_dir,
+            output_path=os.path.join(self.training_config.save_dir, "training_progress.png"),
+            iterations_per_epoch=self.iterations_per_epoch,
+            epochs=self.total_epochs,
+        )
+
+    def _evaluate(
+        self,
+        iteration: int,
+        current_beta: Optional[float] = None,
+        total_iterations: Optional[int] = None,
+    ):
         print(f"Evaluating at iteration {iteration}")
-        eval_beta = 0.0
-        
-        # Set to evaluation mode
-        self.policy.eval()
+
+        self.agent.eval()
         self.env.context_encoder.eval()
-        
+
         eval_rewards = []
         eval_actions_a = []
         eval_actions_b = []
         eval_reward_pairs = []
         eval_input_seq_lengths: List[int] = []
         eval_task_types: List[str] = []
-        
+
         for batch in tqdm(self.eval_loader, desc="Evaluating"):
-            # DataLoader with batch_size=1 returns a list with one element
             episode_data = batch[0]
-            
-            # Select random token budget from candidates that are less than prompt length
+
             prompt = episode_data["input_prompt"]
             tokenized_prompt = self.model_runner.tokenizer(prompt, truncation=False, return_tensors="pt")
             prompt_length = tokenized_prompt.input_ids.size(1)
-            
-            # Evaluate all budget candidates sequentially (no random sampling).
-            token_budget_candidates = TOKEN_BUDGET_CANDIDATES
-            budgets_to_eval = token_budget_candidates
 
-            for token_budget in budgets_to_eval:
+            for token_budget in TOKEN_BUDGET_CANDIDATES:
                 metric_type = str(episode_data.get("metric_type") or "qa_f1_score")
-                state = self.env.encode_to_state(
+                state = self.env.get_state(
                     prompt=prompt,
                     generation_length=episode_data["generation_length"],
                     answers=episode_data.get("answers", []),
@@ -549,11 +464,11 @@ class A2SFTrainer:
                 state = state.to(self.device)
 
                 with torch.no_grad():
-                    action, _ = self.policy.act(state, metric_type=metric_type)
-                    pred_reward = self.policy.predict_reward(state, action, metric_type=metric_type)
+                    action, _ = self.agent.act(state, metric_type=metric_type)
+                    pred_reward = self.agent.predict_reward(state, action, metric_type=metric_type)
                     pred_reward_val = float(pred_reward.view(-1)[0].item())
 
-                reward, info = self.env.step(action)
+                reward, info = self.env.run_with_action(action)
 
                 gt_reward_val = float(reward.item())
                 eval_rewards.append(gt_reward_val)
@@ -563,14 +478,14 @@ class A2SFTrainer:
                 eval_reward_pairs.append((gt_reward_val, pred_reward_val))
                 eval_input_seq_lengths.append(int(prompt_length))
                 eval_task_types.append(str(episode_data.get("task_type") or "unknown"))
-        
+
         avg_eval_reward = sum(eval_rewards) / len(eval_rewards) if eval_rewards else 0.0
         avg_eval_reward = round(avg_eval_reward, 4)
-        
+
         print("Evaluation Results:")
         print(f"  Avg Reward:   {avg_eval_reward:.4f}")
         print()
-        
+
         eval_data = {
             "iteration": iteration,
             "eval_avg_reward": avg_eval_reward,
@@ -582,13 +497,12 @@ class A2SFTrainer:
         }
         eval_data = self._serialize_with_fixed_precision(
             eval_data,
-            digits_map={
-                "eval_avg_reward": 4,
-                "eval_actions_a": 4,
-            },
+            digits_map={"eval_avg_reward": 4, "eval_actions_a": 4},
         )
-        
-        with open(os.path.join(self.config.save_dir, "evaluation_progress.jsonl"), "a") as f:
+
+        with open(
+            os.path.join(self.training_config.save_dir, "evaluation_progress.jsonl"), "a"
+        ) as f:
             f.write(json.dumps(eval_data) + "\n")
 
     def _log_progress(
@@ -602,15 +516,17 @@ class A2SFTrainer:
         iteration_input_seq_lengths: List[int],
         iteration_task_types: List[str],
         current_beta: float,
+        log_filename: str,
+        log_prefix: str,
     ):
         avg_reward = sum(iteration_rewards) / len(iteration_rewards) if iteration_rewards else 0.0
-        
+
         prediction_loss = round(loss_stats.get("prediction_loss", 0.0), 4)
         total_loss = round(loss_stats.get("total_loss", 0.0), 4)
         l2_loss = round(loss_stats.get("l2_loss", 0.0), 4)
         grad_norm = round(loss_stats.get("grad_norm", 0.0), 4)
-        
-        print(f"Iteration {iteration}:")
+
+        print(f"Iteration {iteration} ({log_prefix}):")
         print(f"  Avg Reward:        {avg_reward:.4f}")
         print(f"  Prediction Loss:   {prediction_loss:.4f}")
         print(f"  L2 Loss:           {l2_loss:.4f}")
@@ -618,10 +534,9 @@ class A2SFTrainer:
         print(f"  Grad Norm:         {grad_norm:.4f}")
         print(f"  UCB Beta:          {current_beta:.4f}")
         print()
-        
-        # Get current learning rate
-        current_lr = self.optimizer.param_groups[0]['lr']
-        
+
+        current_lr = self.optimizer.param_groups[0]["lr"]
+
         progress_data = {
             "iteration": iteration,
             "avg_reward": avg_reward.item() if isinstance(avg_reward, torch.Tensor) else avg_reward,
@@ -650,46 +565,51 @@ class A2SFTrainer:
                 "actions_a": 4,
             },
         )
-        
-        with open(os.path.join(self.config.save_dir, "training_progress.jsonl"), "a") as f:
+
+        with open(
+            os.path.join(self.training_config.save_dir, str(log_filename)), "a"
+        ) as f:
             f.write(json.dumps(progress_data) + "\n")
 
     def _save_checkpoint(self, iteration: int):
-        checkpoint_path = os.path.join(self.config.save_dir, f"policy_{iteration}.pt")
+        checkpoint_path = os.path.join(self.training_config.save_dir, f"policy_{iteration}.pt")
         checkpoint_data = {
             "iteration": iteration,
-            "policy_state_dict": self.policy.state_dict(),
-            "attention_encoder_state_dict": {},  # Encoder is frozen, no state to save
+            "agent_state_dict": self.agent.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
-            "config": self.config,
+            "model_config": self.model_config,
+            "training_config": self.training_config,
         }
         checkpoint_data["scheduler_state_dict"] = self.scheduler.state_dict()
         torch.save(checkpoint_data, checkpoint_path)
-        
+
         print(f"Saved checkpoint: {checkpoint_path}")
-    
+
     def load_checkpoint(self, checkpoint_path: str):
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
-        
-        # Update config from checkpoint if available
-        if "config" in checkpoint:
-            checkpoint_config = checkpoint["config"]
-            # Update important config values that affect model initialization
-            if hasattr(checkpoint_config, "a_values"):
-                self.config.a_values = checkpoint_config.a_values
-            if hasattr(checkpoint_config, "b_values"):
-                self.config.b_values = checkpoint_config.b_values
-        
-        self.policy.load_state_dict(checkpoint["policy_state_dict"])
-        
-        # Encoder is frozen and metadata-based, no need to load state
-        if "attention_encoder_state_dict" in checkpoint and checkpoint["attention_encoder_state_dict"]:
-            print("Note: Context encoder is metadata-based and frozen")
-        
+
+        # Update configs from checkpoint if available (best-effort).
+        if "model_config" in checkpoint:
+            self.model_config = checkpoint["model_config"]
+        if "training_config" in checkpoint:
+            self.training_config = checkpoint["training_config"]
+
+        state_dict = checkpoint.get("agent_state_dict")
+        if state_dict is None:
+            # Backward compatibility for older checkpoints.
+            state_dict = checkpoint.get("policy_state_dict")
+        if state_dict is None:
+            raise ValueError("Checkpoint missing 'agent_state_dict' (and legacy 'policy_state_dict').")
+        self.agent.load_state_dict(state_dict)
+
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        
+
         if "scheduler_state_dict" in checkpoint:
             self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-        
+
         print(f"Loaded checkpoint from iteration {checkpoint['iteration']}")
         return checkpoint["iteration"]
+
+
+__all__ = ["A2SFTrainer"]
+
