@@ -9,28 +9,28 @@ method=snap
 window=16
 
 # GPU 0: 가장 무거운 작업
-CUDA_VISIBLE_DEVICES=0 python longbench.py --model $model --method $method --window $window --budget $budget --datasets gov_report --skip_eval &
+CUDA_VISIBLE_DEVICES=0 python longbench.py --model $model --method $method --window $window --budget $budget --datasets gov_report &
 
 # GPU 1: 두 번째로 무거운 작업
-CUDA_VISIBLE_DEVICES=1 python longbench.py --model $model --method $method --window $window --budget $budget --datasets qmsum --skip_eval &
+CUDA_VISIBLE_DEVICES=1 python longbench.py --model $model --method $method --window $window --budget $budget --datasets qmsum &
 
 # GPU 2: 세 번째로 무거운 작업
-CUDA_VISIBLE_DEVICES=2 python longbench.py --model $model --method $method --window $window --budget $budget --datasets repobench-p --skip_eval &
+CUDA_VISIBLE_DEVICES=2 python longbench.py --model $model --method $method --window $window --budget $budget --datasets repobench-p &
 
 # GPU 3: 중량급 + 경량급 조합
-CUDA_VISIBLE_DEVICES=3 python longbench.py --model $model --method $method --window $window --budget $budget --datasets multi_news multifieldqa_en --skip_eval &
+CUDA_VISIBLE_DEVICES=3 python longbench.py --model $model --method $method --window $window --budget $budget --datasets multi_news multifieldqa_en &
 
 # GPU 4: 중급 3개 조합
-CUDA_VISIBLE_DEVICES=4 python longbench.py --model $model --method $method --window $window --budget $budget --datasets lcc hotpotqa 2wikimqa --skip_eval &
+CUDA_VISIBLE_DEVICES=4 python longbench.py --model $model --method $method --window $window --budget $budget --datasets lcc hotpotqa 2wikimqa &
 
 # GPU 5: 중급 3개 조합
-CUDA_VISIBLE_DEVICES=5 python longbench.py --model $model --method $method --window $window --budget $budget --datasets samsum narrativeqa triviaqa --skip_eval &
+CUDA_VISIBLE_DEVICES=5 python longbench.py --model $model --method $method --window $window --budget $budget --datasets samsum narrativeqa triviaqa &
 
 # GPU 6: 중급 3개 조합
-CUDA_VISIBLE_DEVICES=6 python longbench.py --model $model --method $method --window $window --budget $budget --datasets musique passage_retrieval_en trec --skip_eval &
+CUDA_VISIBLE_DEVICES=6 python longbench.py --model $model --method $method --window $window --budget $budget --datasets musique passage_retrieval_en trec &
 
 # GPU 7: 중급 2개 조합
-CUDA_VISIBLE_DEVICES=7 python longbench.py --model $model --method $method --window $window --budget $budget --datasets passage_count qasper --skip_eval &
+CUDA_VISIBLE_DEVICES=7 python longbench.py --model $model --method $method --window $window --budget $budget --datasets passage_count qasper &
 
 # 모든 백그라운드 작업이 끝날 때까지 기다립니다.
 wait
