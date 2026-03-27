@@ -561,7 +561,13 @@ class KVLlamaForCausalLM(LlamaForCausalLM):
         self.layer_caches = self.layer_compressors
 
     def prepare_inputs_for_generation(
-        self, input_ids, past_key_values=None, attention_mask=None, inputs_embeds=None, **kwargs
+        self,
+        input_ids,
+        past_key_values=None,
+        attention_mask=None,
+        inputs_embeds=None,
+        cache_position=None,
+        **kwargs,
     ):
         if past_key_values is not None:
             # DynamicCustomCache follows DynamicCache API including get_seq_length.
@@ -588,7 +594,7 @@ class KVLlamaForCausalLM(LlamaForCausalLM):
         if inputs_embeds is not None and past_key_values is None:
             model_inputs = {"inputs_embeds": inputs_embeds}
         else:
-            model_inputs = {"input_ids": input_ids}
+            model_inputs = {"input_ids": input_ids.clone(memory_format=torch.contiguous_format)}
 
         model_inputs.update(
             {
@@ -596,6 +602,14 @@ class KVLlamaForCausalLM(LlamaForCausalLM):
                 "past_key_values": past_key_values,
                 "use_cache": kwargs.get("use_cache"),
                 "attention_mask": attention_mask,
+                "cache_position": cache_position,
             }
         )
+
+        # Forward additional generation kwargs (e.g., num_logits_to_keep)
+        # so memory-saving generation options are not dropped.
+        for key, value in kwargs.items():
+            if key not in model_inputs:
+                model_inputs[key] = value
+
         return model_inputs
