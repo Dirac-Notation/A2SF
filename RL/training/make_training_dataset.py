@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-LongBench 일부만 샘플링해 RL 학습/평가용 jsonl 생성.
+LongBench 일부만 샘플링해 RL 학습용 jsonl 생성.
 
 이 코드는 기존 `datasets/make_training_dataset.py`의 내용을 그대로
 `RL/training/data_generation/` 위치로 이식해, 학습 파이프라인이
 datasets 쪽을 호출하지 않도록 구성했습니다.
 
 - 데이터셋별 train: 기본 10% (길이 균형 샘플링)
-- 데이터셋별 eval: 남은 풀에서 기본 2% (길이 균형, train과 겹치지 않음)
 - 샘플이 확정된 뒤, 평가(longbench_RL 등)와 동일하게 max_input_length 기준 중간 절단 적용
 - generation_length: config/dataset2maxlen.json (데이터셋별, 평가와 동일 스케일)
 """
@@ -17,7 +16,7 @@ import json
 import math
 import os
 import random
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 
 from transformers import AutoTokenizer
 
@@ -25,7 +24,6 @@ from transformers import AutoTokenizer
 DEFAULT_SPLIT_SEED = 42
 DEFAULT_SAMPLE_RATIO = 0.10
 DEFAULT_LENGTH_BINS = 10
-DEFAULT_EVAL_RATIO = 0.02
 
 # RL/training/data_generation/make_training_dataset.py 기준으로 repo root로 이동
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -211,51 +209,14 @@ def length_balanced_sample(
     return selected
 
 
-def length_balanced_sample_by_count(
-    samples: List[Dict[str, Any]],
-    target_count: int,
-    num_bins: int,
-    seed: int,
-) -> List[Dict[str, Any]]:
-    if not samples or target_count <= 0:
-        return []
-
-    total = len(samples)
-    target = min(target_count, total)
-    ratio = target / total
-
-    sampled = length_balanced_sample(
-        samples=samples,
-        ratio=ratio,
-        num_bins=num_bins,
-        seed=seed,
-    )
-
-    if len(sampled) > target:
-        sampled_sorted = sorted(sampled, key=lambda x: x["length"])
-        keep_idx = set(evenly_spaced_indices(len(sampled_sorted), target))
-        sampled = [row for i, row in enumerate(sampled_sorted) if i in keep_idx]
-    elif len(sampled) < target:
-        sampled_ids = {id(s) for s in sampled}
-        remainder = [s for s in samples if id(s) not in sampled_ids]
-        need = target - len(sampled)
-        if remainder:
-            add_idx = evenly_spaced_indices(len(remainder), min(need, len(remainder)))
-            sampled.extend([remainder[i] for i in add_idx])
-
-    return sampled
-
-
 def load_longbench_sampled_splits(
     tokenizer,
     longbench_dir: str,
     sample_ratio: float,
-    eval_ratio: float,
     num_length_bins: int,
     seed: int,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+) -> List[Dict[str, Any]]:
     train_samples_all: List[Dict[str, Any]] = []
-    eval_samples_all: List[Dict[str, Any]] = []
     dataset_files = list_longbench_files(longbench_dir)
     print(f"Found {len(dataset_files)} LongBench dataset files in {longbench_dir}")
 
@@ -304,38 +265,19 @@ def load_longbench_sampled_splits(
             num_bins=num_length_bins,
             seed=seed,
         )
-        train_selected_ids = {id(s) for s in train_sampled}
-        remaining_for_eval = [s for s in dataset_samples if id(s) not in train_selected_ids]
-        if remaining_for_eval and eval_ratio > 0:
-            eval_target_count = int(round(len(dataset_samples) * eval_ratio))
-            eval_target_count = min(eval_target_count, len(remaining_for_eval))
-            eval_sampled = length_balanced_sample_by_count(
-                samples=remaining_for_eval,
-                target_count=eval_target_count,
-                num_bins=num_length_bins,
-                seed=seed + 1,
-            )
-        else:
-            eval_sampled = []
-
         train_samples_all.extend(train_sampled)
-        eval_samples_all.extend(eval_sampled)
 
         all_lengths = [s["length"] for s in dataset_samples]
         train_lengths = [s["length"] for s in train_sampled]
-        eval_lengths = [s["length"] for s in eval_sampled] if eval_sampled else []
-        eval_range_str = f"[{min(eval_lengths)}, {max(eval_lengths)}]" if eval_lengths else "[]"
 
         print(
             f"- {dataset_name:20s}: total={len(dataset_samples):4d}, "
             f"train={len(train_sampled):4d} ({sample_ratio*100:.1f}%), "
-            f"eval={len(eval_sampled):4d} ({eval_ratio*100:.1f}%), "
             f"len_range_all=[{min(all_lengths)}, {max(all_lengths)}], "
-            f"len_range_train=[{min(train_lengths)}, {max(train_lengths)}], "
-            f"len_range_eval={eval_range_str}"
+            f"len_range_train=[{min(train_lengths)}, {max(train_lengths)}]"
         )
 
-    return train_samples_all, eval_samples_all
+    return train_samples_all
 
 
 def apply_eval_style_truncation(samples: List[Dict[str, Any]], tokenizer, max_input_length: int) -> None:
@@ -364,23 +306,19 @@ def main(args):
     tokenizer = load_tokenizer(args.model)
     max_input_length = int(args.max_input_length or resolve_max_input_length(args.model))
 
-    train_samples, eval_samples = load_longbench_sampled_splits(
+    train_samples = load_longbench_sampled_splits(
         tokenizer=tokenizer,
         longbench_dir=args.longbench_dir,
         sample_ratio=args.sample_ratio,
-        eval_ratio=args.eval_ratio,
         num_length_bins=args.num_length_bins,
         seed=args.seed,
     )
 
     apply_eval_style_truncation(train_samples, tokenizer, max_input_length)
-    apply_eval_style_truncation(eval_samples, tokenizer, max_input_length)
 
     write_jsonl(args.output_file, train_samples, "train")
-    write_jsonl(args.eval_output_file, eval_samples, "eval")
 
     print(f"\nSaved train: {args.output_file} ({len(train_samples)} samples)")
-    print(f"Saved eval:  {args.eval_output_file} ({len(eval_samples)} samples)")
     print(f"Truncation max_input_length={max_input_length} (model={args.model})")
 
 
@@ -394,13 +332,7 @@ if __name__ == "__main__":
         type=str,
         default=os.path.join(REPO_ROOT, "RL", "training", "data", "training_data.jsonl"),
     )
-    parser.add_argument(
-        "--eval_output_file",
-        type=str,
-        default=os.path.join(REPO_ROOT, "RL", "training", "data", "eval_data.jsonl"),
-    )
     parser.add_argument("--sample_ratio", type=float, default=DEFAULT_SAMPLE_RATIO, help="Train 비율 (기본 0.10)")
-    parser.add_argument("--eval_ratio", type=float, default=DEFAULT_EVAL_RATIO, help="Eval 비율 (기본 0.02, train 제외 풀에서)")
     parser.add_argument("--num_length_bins", type=int, default=DEFAULT_LENGTH_BINS)
     parser.add_argument("--seed", type=int, default=DEFAULT_SPLIT_SEED)
     parser.add_argument("--model", type=str, default="llama3", choices=["llama", "llama2", "llama3", "opt"])

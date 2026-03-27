@@ -26,7 +26,6 @@ class TrainingConfig:
 
     # ----- Dataset paths (fixed splits) -----
     train_data_path: str = "RL/training/data/training_data.jsonl"
-    eval_data_path: str = "RL/training/data/eval_data.jsonl"
 
     @classmethod
     def from_args(cls, argv=None) -> "TrainingConfig":
@@ -36,7 +35,6 @@ class TrainingConfig:
         parser.add_argument("--save_dir", type=str, default=default_cfg.save_dir)
         parser.add_argument("--resume", type=str, default=default_cfg.resume)
         parser.add_argument("--train_data_path", type=str, default=default_cfg.train_data_path)
-        parser.add_argument("--eval_data_path", type=str, default=default_cfg.eval_data_path)
         parser.add_argument("--epochs", type=int, default=default_cfg.epochs)
         parser.add_argument("--episodes_per_update", type=int, default=default_cfg.episodes_per_update)
         parser.add_argument("--lr", type=float, default=default_cfg.lr)
@@ -57,6 +55,5 @@ class TrainingConfig:
             save_dir=args.save_dir,
             resume=args.resume,
             train_data_path=args.train_data_path,
-            eval_data_path=args.eval_data_path,
         )
 

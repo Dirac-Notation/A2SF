@@ -166,36 +166,6 @@ class NeuralUCBAgent(nn.Module):
         selected_score = scores[batch_indices, action_idx]  # (B,)
         return (a_val, b_val), selected_score
 
-    def _select_action_from_scores_minmax(
-        self, scores: torch.Tensor, mode: str
-    ) -> Tuple[Tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
-        """Select (a, b) action from per-action scores by argmax/argmin.
-
-        mode:
-          - "best": argmax
-          - "worst": argmin
-        """
-        if mode not in {"best", "worst"}:
-            raise ValueError(f"Unsupported mode: {mode}")
-
-        if scores.ndim == 1:
-            scores = scores.unsqueeze(0)
-
-        if mode == "best":
-            action_idx = torch.argmax(scores, dim=-1)  # (B,)
-        else:
-            action_idx = torch.argmin(scores, dim=-1)  # (B,)
-
-        a_idx = action_idx // self.num_b_values
-        b_idx = action_idx % self.num_b_values
-
-        a_val = self.a_values[a_idx]
-        b_val = self.b_values[b_idx]
-
-        batch_indices = torch.arange(scores.size(0), device=scores.device)
-        selected_score = scores[batch_indices, action_idx]  # (B,)
-        return (a_val, b_val), selected_score
-
     def _compute_ucb_scores(
         self,
         state: torch.Tensor,
@@ -244,28 +214,6 @@ class NeuralUCBAgent(nn.Module):
         """Training action selection with UCB exploration."""
         _, ucb = self._compute_ucb_scores(state=state, beta=beta, metric_type=metric_type)
         return self._select_action_from_scores(ucb)
-
-    @torch.no_grad()
-    def get_best_action(
-        self,
-        state: torch.Tensor,
-        beta: float = 1.0,
-        metric_type: Union[str, List[str], Tuple[str, ...], None] = None,
-    ) -> Tuple[Tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
-        """Get best (a, b) according to UCB scores (argmax)."""
-        _, ucb = self._compute_ucb_scores(state=state, beta=beta, metric_type=metric_type)
-        return self._select_action_from_scores_minmax(ucb, mode="best")
-
-    @torch.no_grad()
-    def get_worst_action(
-        self,
-        state: torch.Tensor,
-        beta: float = 1.0,
-        metric_type: Union[str, List[str], Tuple[str, ...], None] = None,
-    ) -> Tuple[Tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
-        """Get worst (a, b) according to UCB scores (argmin)."""
-        _, ucb = self._compute_ucb_scores(state=state, beta=beta, metric_type=metric_type)
-        return self._select_action_from_scores_minmax(ucb, mode="worst")
 
     def predict_reward(
         self,
