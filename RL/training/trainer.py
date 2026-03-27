@@ -312,7 +312,7 @@ class A2SFTrainer:
             current_beta = self._get_ucb_beta(epoch, total_epochs)
 
             for batch in self.train_loader:
-                label_order = ["best1", "best2"]
+                label_order = ["best1", "best2", "worst1", "worst2"]
                 per_label_data: Dict[str, Dict[str, List[Any]]] = {
                     label: {
                         "rewards": [],
@@ -372,11 +372,14 @@ class A2SFTrainer:
                             ucb_scores = ucb_scores[0]
 
                             desc_idx = torch.argsort(ucb_scores, descending=True)
+                            asc_idx = torch.argsort(ucb_scores, descending=False)
                             best1_idx = int(desc_idx[0].item())
                             best2_idx = int(desc_idx[1].item()) if desc_idx.numel() > 1 else best1_idx
-                            # Requested order: best1, best2
+                            worst1_idx = int(asc_idx[0].item())
+                            worst2_idx = int(asc_idx[1].item()) if asc_idx.numel() > 1 else worst1_idx
+                            # Requested order: best1, best2, worst1, worst2
                             selected_indices = torch.tensor(
-                                [best1_idx, best2_idx],
+                                [best1_idx, best2_idx, worst1_idx, worst2_idx],
                                 device=ucb_scores.device,
                                 dtype=torch.long,
                             )
@@ -420,11 +423,15 @@ class A2SFTrainer:
                 )
                 best_rewards = per_label_data["best1"]["rewards"]
                 best2_rewards = per_label_data["best2"]["rewards"]
+                worst1_rewards = per_label_data["worst1"]["rewards"]
+                worst2_rewards = per_label_data["worst2"]["rewards"]
                 self._log_progress_common(
                     iteration=global_iteration,
                     loss_stats=avg_loss_stats,
                     best_iteration_rewards=best_rewards,
                     best2_iteration_rewards=best2_rewards,
+                    worst1_iteration_rewards=worst1_rewards,
+                    worst2_iteration_rewards=worst2_rewards,
                     iteration_input_seq_lengths=common_input_seq_lengths,
                     iteration_task_types=common_task_types,
                     current_beta=current_beta,
@@ -467,6 +474,8 @@ class A2SFTrainer:
         loss_stats: Dict[str, float],
         best_iteration_rewards: List,
         best2_iteration_rewards: List,
+        worst1_iteration_rewards: List,
+        worst2_iteration_rewards: List,
         iteration_input_seq_lengths: List[int],
         iteration_task_types: List[str],
         current_beta: float,
@@ -477,6 +486,12 @@ class A2SFTrainer:
         best2_avg_reward = (
             sum(best2_iteration_rewards) / len(best2_iteration_rewards) if best2_iteration_rewards else 0.0
         )
+        worst1_avg_reward = (
+            sum(worst1_iteration_rewards) / len(worst1_iteration_rewards) if worst1_iteration_rewards else 0.0
+        )
+        worst2_avg_reward = (
+            sum(worst2_iteration_rewards) / len(worst2_iteration_rewards) if worst2_iteration_rewards else 0.0
+        )
 
         prediction_loss = round(loss_stats.get("prediction_loss", 0.0), 4)
         total_loss = round(loss_stats.get("total_loss", 0.0), 4)
@@ -484,8 +499,10 @@ class A2SFTrainer:
         grad_norm = round(loss_stats.get("grad_norm", 0.0), 4)
 
         print(f"Iteration {iteration} (COMMON):")
-        print(f"  Best Avg Reward:   {best_avg_reward:.4f}")
+        print(f"  Best1 Avg Reward:  {best_avg_reward:.4f}")
         print(f"  Best2 Avg Reward:  {best2_avg_reward:.4f}")
+        print(f"  Worst1 Avg Reward: {worst1_avg_reward:.4f}")
+        print(f"  Worst2 Avg Reward: {worst2_avg_reward:.4f}")
         print(f"  Prediction Loss:   {prediction_loss:.4f}")
         print(f"  L2 Loss:           {l2_loss:.4f}")
         print(f"  Total Loss:        {total_loss:.4f}")
@@ -497,11 +514,17 @@ class A2SFTrainer:
 
         progress_data = {
             "iteration": iteration,
-            "best_avg_reward": (
+            "best1_avg_reward": (
                 best_avg_reward.item() if isinstance(best_avg_reward, torch.Tensor) else best_avg_reward
             ),
             "best2_avg_reward": (
                 best2_avg_reward.item() if isinstance(best2_avg_reward, torch.Tensor) else best2_avg_reward
+            ),
+            "worst1_avg_reward": (
+                worst1_avg_reward.item() if isinstance(worst1_avg_reward, torch.Tensor) else worst1_avg_reward
+            ),
+            "worst2_avg_reward": (
+                worst2_avg_reward.item() if isinstance(worst2_avg_reward, torch.Tensor) else worst2_avg_reward
             ),
             "prediction_loss": prediction_loss,
             "l2_loss": l2_loss,
@@ -515,8 +538,10 @@ class A2SFTrainer:
         progress_data = self._serialize_with_fixed_precision(
             progress_data,
             digits_map={
-                "best_avg_reward": 4,
+                "best1_avg_reward": 4,
                 "best2_avg_reward": 4,
+                "worst1_avg_reward": 4,
+                "worst2_avg_reward": 4,
                 "prediction_loss": 4,
                 "l2_loss": 4,
                 "total_loss": 4,
