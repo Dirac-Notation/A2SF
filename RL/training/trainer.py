@@ -20,7 +20,18 @@ from .training_config import TrainingConfig
 from ..agent.neural_ucb_agent import NeuralUCBAgent
 from ..env import A2SFEnv, A2SFModelRunner
 from .dataloader import RLDataset, rl_collate_fn
-from longbench_eval import dataset2metric
+from longbench_eval import (
+    dataset2metric,
+    qa_f1_score,
+    qa_f1_zh_score,
+    rouge_score,
+    rouge_zh_score,
+    classification_score,
+    retrieval_score,
+    retrieval_zh_score,
+    count_score,
+    code_sim_score,
+)
 
 TOKEN_BUDGET_CANDIDATES = [1024]
 
@@ -45,6 +56,17 @@ class A2SFTrainer:
         # State dimension: [seq_length] + [head entropy, head max_pos] per attention head
         state_dim = int(self.env.context_encoder.output_dim)
         metric_heads = sorted({fn.__name__ for fn in dataset2metric.values()})
+        self.metric_fn_registry = {
+            "qa_f1_score": qa_f1_score,
+            "qa_f1_zh_score": qa_f1_zh_score,
+            "rouge_score": rouge_score,
+            "rouge_zh_score": rouge_zh_score,
+            "classification_score": classification_score,
+            "retrieval_score": retrieval_score,
+            "retrieval_zh_score": retrieval_zh_score,
+            "count_score": count_score,
+            "code_sim_score": code_sim_score,
+        }
 
         self.agent = NeuralUCBAgent(
             state_dim=state_dim,
@@ -86,42 +108,6 @@ class A2SFTrainer:
 
         # Initialize learning rate scheduler after total_iterations is known
         self.scheduler = self._create_scheduler()
-
-    def _augment_prompt_middle_shuffle(
-        self,
-        prompt: str,
-        seed: int,
-        prefix_keep: int = 128,
-        suffix_keep: int = 128,
-    ) -> str:
-        """
-        Keep first/last fixed token spans and shuffle middle 4 segments.
-        Applied on-the-fly during training for prompt augmentation.
-        """
-        token_ids = self.model_runner.tokenizer.encode(prompt, add_special_tokens=False)
-        if len(token_ids) <= 2*(prefix_keep + suffix_keep):
-            return prompt
-
-        prefix = token_ids[:prefix_keep]
-        suffix = token_ids[-suffix_keep:]
-        middle = token_ids[prefix_keep:-suffix_keep]
-        if len(middle) < 4:
-            return prompt
-
-        n = len(middle)
-        boundaries = [0, n // 4, n // 2, (3 * n) // 4, n]
-        segments = [middle[boundaries[i] : boundaries[i + 1]] for i in range(4)]
-
-        rng = random.Random(seed)
-        order = [0, 1, 2, 3]
-        rng.shuffle(order)
-
-        shuffled_middle: List[int] = []
-        for idx in order:
-            shuffled_middle.extend(segments[idx])
-
-        mixed = prefix + shuffled_middle + suffix
-        return self.model_runner.tokenizer.decode(mixed, skip_special_tokens=True)
 
     @staticmethod
     def _format_fixed(value: float, digits: int) -> str:
@@ -184,27 +170,22 @@ class A2SFTrainer:
             return "qa_f1_score"
         return fn.__name__
 
-    def _build_generation_kwargs(
+    def _compute_reward_from_prediction(
         self,
-        dataset_name: str,
-        context_length: int,
-        generation_length: int,
-    ) -> Dict[str, Any]:
-        generation_kwargs: Dict[str, Any] = {
-            "tokenizer": self.model_runner.tokenizer,
-            "stop_strings": "[/INST]",
-            "max_new_tokens": int(generation_length),
-            "num_beams": 1,
-            "do_sample": False,
-            "pad_token_id": self.model_runner.tokenizer.eos_token_id,
-        }
-        if str(dataset_name or "").strip().lower() == "samsum":
-            generation_kwargs["min_length"] = int(context_length) + 1
-            generation_kwargs["eos_token_id"] = [
-                self.model_runner.tokenizer.eos_token_id,
-                self.model_runner.tokenizer.encode("\n", add_special_tokens=False)[-1],
-            ]
-        return generation_kwargs
+        pred_text: str,
+        metric_type: str,
+        answers: List[str],
+        all_classes: List[str],
+    ) -> float:
+        metric_fn = self.metric_fn_registry.get(str(metric_type), qa_f1_score)
+        reward_val = 0.0
+        if answers:
+            for gt in answers:
+                reward_val = max(
+                    reward_val,
+                    float(metric_fn(pred_text, gt, all_classes=all_classes)),
+                )
+        return reward_val
 
     def _neural_ucb_update_batch(
         self,
@@ -328,23 +309,19 @@ class A2SFTrainer:
 
                 start_time = time.time()
 
-                for sample_idx, episode_data in enumerate(batch):
-                    raw_prompt = episode_data["input_prompt"]
-                    prompt = self._augment_prompt_middle_shuffle(
-                        prompt=raw_prompt,
-                        seed=self.training_config.seed + global_iteration * 1000 + sample_idx,
-                    )
+                for episode_data in batch:
+                    prompt = episode_data["input_prompt"]
                     tokenized_prompt = self.model_runner.tokenizer(
                         prompt, truncation=False, return_tensors="pt"
                     )
                     input_seq_len = int(tokenized_prompt.input_ids.size(1))
                     task_type_str = str(episode_data.get("task_type") or "unknown")
                     metric_type = str(episode_data.get("metric_type") or "qa_f1_score")
-                    generation_kwargs = self._build_generation_kwargs(
-                        episode_data.get("dataset"),
-                        input_seq_len,
-                        int(episode_data["generation_length"]),
-                    )
+                    answers = episode_data.get("answers", []) or []
+                    all_classes = episode_data.get("all_classes", []) or []
+                    action_outputs = episode_data.get("action_outputs")
+                    if not isinstance(action_outputs, list):
+                        raise ValueError("training_data must include cached 'action_outputs'")
 
                     for token_budget in TOKEN_BUDGET_CANDIDATES:
                         state = self.env.get_state(
@@ -388,12 +365,21 @@ class A2SFTrainer:
                             b_idx = selected_indices % self.agent.num_b_values
                             selected_a = self.agent.a_values[a_idx].to(self.device)
                             selected_b = self.agent.b_values[b_idx].to(self.device)
-
-                        selected_rewards_t, _selected_info = self.env.run_with_actions(
-                            (selected_a, selected_b),
-                            **generation_kwargs,
-                        )
-                        selected_rewards_t = selected_rewards_t.view(-1)
+                        selected_rewards: List[float] = []
+                        for local_idx in range(selected_indices.numel()):
+                            action_idx = int(selected_indices[local_idx].item())
+                            pred_text = str(action_outputs[action_idx])
+                            selected_rewards.append(
+                                self._compute_reward_from_prediction(
+                                    pred_text=pred_text,
+                                    metric_type=metric_type,
+                                    answers=answers,
+                                    all_classes=all_classes,
+                                )
+                            )
+                        selected_rewards_t = torch.tensor(
+                            selected_rewards, device=self.device, dtype=torch.float32
+                        ).view(-1)
 
                         for local_idx, label in enumerate(label_order):
                             action = (
