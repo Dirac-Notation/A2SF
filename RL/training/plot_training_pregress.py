@@ -120,9 +120,9 @@ def plot_training_progress(
     x_epoch_w2, y_worst2_reward_s = _smooth_chunk(y_worst2_reward, window_size)
     _, y_loss_s = _smooth_chunk(y_loss, window_size)
 
-    fig, ax = plt.subplots(1, 1, constrained_layout=True, figsize=(14, 8))
+    fig, (ax_reward, ax_loss) = plt.subplots(2, 1, constrained_layout=True, figsize=(14, 12))
 
-    ax.plot(
+    ax_reward.plot(
         x_epoch,
         y_best1_reward_s,
         marker="o",
@@ -132,7 +132,7 @@ def plot_training_progress(
         label="Best1 Avg Reward (epoch average)",
         zorder=5,
     )
-    ax.plot(
+    ax_reward.plot(
         x_epoch_b2,
         y_best2_reward_s,
         marker="o",
@@ -142,7 +142,7 @@ def plot_training_progress(
         label="Best2 Avg Reward (epoch average)",
         zorder=5,
     )
-    ax.plot(
+    ax_reward.plot(
         x_epoch_w1,
         y_worst1_reward_s,
         marker="o",
@@ -152,7 +152,7 @@ def plot_training_progress(
         label="Worst1 Avg Reward (epoch average)",
         zorder=5,
     )
-    ax.plot(
+    ax_reward.plot(
         x_epoch_w2,
         y_worst2_reward_s,
         marker="o",
@@ -162,7 +162,15 @@ def plot_training_progress(
         label="Worst2 Avg Reward (epoch average)",
         zorder=5,
     )
-    ax.plot(
+
+    ax_reward.set_title("Reward Curves (Best/Worst)", pad=20)
+    ax_reward.set_xlabel("Epoch")
+    ax_reward.set_ylabel("Reward")
+    ax_reward.grid(axis="y", linestyle="--", linewidth=1.0, alpha=0.5)
+    ax_reward.legend(frameon=False, loc="best")
+    ax_reward.margins(x=0.02)
+
+    ax_loss.plot(
         x_epoch,
         y_loss_s,
         marker="o",
@@ -172,12 +180,12 @@ def plot_training_progress(
         label="Total Loss (epoch average)",
         zorder=5,
     )
-    ax.set_title("Training Curves (Best/Worst/Loss)", pad=20)
-    ax.set_xlabel("Epoch")
-    ax.set_ylabel("Value")
-    ax.grid(axis="y", linestyle="--", linewidth=1.0, alpha=0.5)
-    ax.legend(frameon=False, loc="best")
-    ax.margins(x=0.02)
+    ax_loss.set_title("Loss Curve", pad=20)
+    ax_loss.set_xlabel("Epoch")
+    ax_loss.set_ylabel("Loss")
+    ax_loss.grid(axis="y", linestyle="--", linewidth=1.0, alpha=0.5)
+    ax_loss.legend(frameon=False, loc="best")
+    ax_loss.margins(x=0.02)
 
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
