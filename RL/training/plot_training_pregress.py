@@ -13,10 +13,14 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 
-def _load_training_progress(jsonl_path: str) -> Tuple[List[int], List[float], List[float], List[float]]:
+def _load_training_progress(
+    jsonl_path: str,
+) -> Tuple[List[int], List[float], List[float], List[float], List[float], List[float]]:
     iterations: List[int] = []
-    best_avg_rewards: List[float] = []
+    best1_avg_rewards: List[float] = []
     best2_avg_rewards: List[float] = []
+    worst1_avg_rewards: List[float] = []
+    worst2_avg_rewards: List[float] = []
     total_losses: List[float] = []
 
     with open(jsonl_path, "r", encoding="utf-8") as f:
@@ -25,11 +29,20 @@ def _load_training_progress(jsonl_path: str) -> Tuple[List[int], List[float], Li
                 continue
             row = json.loads(line)
             iterations.append(int(row["iteration"]))
-            best_avg_rewards.append(float(row["best_avg_reward"]))
+            best1_avg_rewards.append(float(row["best1_avg_reward"]))
             best2_avg_rewards.append(float(row["best2_avg_reward"]))
+            worst1_avg_rewards.append(float(row["worst1_avg_reward"]))
+            worst2_avg_rewards.append(float(row["worst2_avg_reward"]))
             total_losses.append(float(row["total_loss"]))
 
-    return iterations, best_avg_rewards, best2_avg_rewards, total_losses
+    return (
+        iterations,
+        best1_avg_rewards,
+        best2_avg_rewards,
+        worst1_avg_rewards,
+        worst2_avg_rewards,
+        total_losses,
+    )
 
 
 def _smooth_chunk(vals: np.ndarray, w: int) -> Tuple[np.ndarray, np.ndarray]:
@@ -56,7 +69,14 @@ def plot_training_progress(
     if not os.path.exists(train_file):
         print(f"[plot] training_progress.jsonl not found: {train_file}")
         return
-    iterations, best_avg_rewards, best2_avg_rewards, total_losses = _load_training_progress(train_file)
+    (
+        iterations,
+        best1_avg_rewards,
+        best2_avg_rewards,
+        worst1_avg_rewards,
+        worst2_avg_rewards,
+        total_losses,
+    ) = _load_training_progress(train_file)
     if len(iterations) == 0:
         print("[plot] training_progress.jsonl is empty")
         return
@@ -68,8 +88,10 @@ def plot_training_progress(
     else:
         window_size = 1
 
-    y_best_reward = np.array(best_avg_rewards, dtype=np.float64)
+    y_best1_reward = np.array(best1_avg_rewards, dtype=np.float64)
     y_best2_reward = np.array(best2_avg_rewards, dtype=np.float64)
+    y_worst1_reward = np.array(worst1_avg_rewards, dtype=np.float64)
+    y_worst2_reward = np.array(worst2_avg_rewards, dtype=np.float64)
     y_loss = np.array(total_losses, dtype=np.float64)
 
     # matplotlib은 플로팅이 필요할 때만 import
@@ -92,15 +114,17 @@ def plot_training_progress(
         }
     )
 
-    x_epoch, y_best_reward_s = _smooth_chunk(y_best_reward, window_size)
+    x_epoch, y_best1_reward_s = _smooth_chunk(y_best1_reward, window_size)
     x_epoch_b2, y_best2_reward_s = _smooth_chunk(y_best2_reward, window_size)
+    x_epoch_w1, y_worst1_reward_s = _smooth_chunk(y_worst1_reward, window_size)
+    x_epoch_w2, y_worst2_reward_s = _smooth_chunk(y_worst2_reward, window_size)
     _, y_loss_s = _smooth_chunk(y_loss, window_size)
 
     fig, ax = plt.subplots(1, 1, constrained_layout=True, figsize=(14, 8))
 
     ax.plot(
         x_epoch,
-        y_best_reward_s,
+        y_best1_reward_s,
         marker="o",
         linewidth=3,
         markersize=6,
@@ -119,16 +143,36 @@ def plot_training_progress(
         zorder=5,
     )
     ax.plot(
+        x_epoch_w1,
+        y_worst1_reward_s,
+        marker="o",
+        linewidth=3,
+        markersize=6,
+        color="#55A868",
+        label="Worst1 Avg Reward (epoch average)",
+        zorder=5,
+    )
+    ax.plot(
+        x_epoch_w2,
+        y_worst2_reward_s,
+        marker="o",
+        linewidth=3,
+        markersize=6,
+        color="#C44E52",
+        label="Worst2 Avg Reward (epoch average)",
+        zorder=5,
+    )
+    ax.plot(
         x_epoch,
         y_loss_s,
         marker="o",
         linewidth=3,
         markersize=6,
-        color="#C44E52",
+        color="#8172B3",
         label="Total Loss (epoch average)",
         zorder=5,
     )
-    ax.set_title("Training Curves (Best1 / Best2 / Loss)", pad=20)
+    ax.set_title("Training Curves (Best/Worst/Loss)", pad=20)
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Value")
     ax.grid(axis="y", linestyle="--", linewidth=1.0, alpha=0.5)
