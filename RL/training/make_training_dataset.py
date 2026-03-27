@@ -16,10 +16,14 @@ import json
 import math
 import os
 import random
+import multiprocessing as mp
 from typing import Any, Dict, List
 
+import torch
 from transformers import AutoTokenizer
 
+from utils import CompressionConfig, load_model
+from RL.a2sf_model import ModelConfig
 
 DEFAULT_SPLIT_SEED = 42
 DEFAULT_SAMPLE_RATIO = 0.10
@@ -301,6 +305,172 @@ def write_jsonl(path: str, rows: List[Dict[str, Any]], split_name: str) -> None:
             f.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
 
 
+def _build_generation_kwargs(tokenizer, dataset_name: str, generation_length: int) -> Dict[str, Any]:
+    kwargs: Dict[str, Any] = {
+        "tokenizer": tokenizer,
+        "stop_strings": "[/INST]",
+        "max_new_tokens": int(generation_length),
+        "num_beams": 1,
+        "do_sample": False,
+        "pad_token_id": tokenizer.eos_token_id,
+        "num_logits_to_keep": 1,
+    }
+    if str(dataset_name or "").strip().lower() == "samsum":
+        # exact context-length-dependent min_length cannot be known before tokenization,
+        # so this offline pipeline keeps shared decoding config across datasets.
+        kwargs["eos_token_id"] = [
+            tokenizer.eos_token_id,
+            tokenizer.encode("\n", add_special_tokens=False)[-1],
+        ]
+    return kwargs
+
+
+def _build_compression_config(a_vals: torch.Tensor, b_vals: torch.Tensor, token_budget: int) -> CompressionConfig:
+    config = CompressionConfig()
+    config.compression_method = "sigmoid"
+    config.total_budget = int(token_budget)
+    config.local_ratios = 0.125
+    config.a = a_vals
+    config.b = b_vals
+    return config
+
+
+def _offline_generate_for_sample(
+    model,
+    tokenizer,
+    sample: Dict[str, Any],
+    a_values: torch.Tensor,
+    b_values: torch.Tensor,
+    token_budget: int,
+) -> List[str]:
+    prompt = sample["input_prompt"]
+    batch_size = int(a_values.numel())
+    prompts = [prompt] * batch_size
+    encoded = tokenizer(prompts, truncation=False, padding=True, return_tensors="pt")
+    input_ids = encoded.input_ids.to(model.device)
+    attention_mask = encoded.attention_mask.to(model.device)
+    model.init_cache(_build_compression_config(a_values, b_values, token_budget))
+    generation_kwargs = _build_generation_kwargs(
+        tokenizer=tokenizer,
+        dataset_name=str(sample.get("dataset") or ""),
+        generation_length=int(sample.get("generation_length", 64)),
+    )
+    with torch.inference_mode():
+        output_ids = model.generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            **generation_kwargs,
+        )
+
+    pred_texts: List[str] = []
+    for row_idx in range(output_ids.size(0)):
+        prompt_len = int(attention_mask[row_idx].sum().item())
+        pred_texts.append(
+            tokenizer.decode(output_ids[row_idx, prompt_len:], skip_special_tokens=True)
+        )
+    return pred_texts
+
+
+def _offline_worker(
+    gpu_id: int,
+    model_name: str,
+    token_budget: int,
+    task_queue: mp.Queue,
+    a_values: List[float],
+    b_values: List[float],
+    result_queue: mp.Queue,
+) -> None:
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    torch.set_grad_enabled(False)
+    model, tokenizer = load_model(model_name)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    a_tensor = torch.tensor(a_values, dtype=torch.float32, device=model.device)
+    b_tensor = torch.tensor(b_values, dtype=torch.float32, device=model.device)
+    try:
+        while True:
+            sample = task_queue.get()
+            if sample is None:
+                break
+            pred_texts = _offline_generate_for_sample(
+                model=model,
+                tokenizer=tokenizer,
+                sample=sample,
+                a_values=a_tensor,
+                b_values=b_tensor,
+                token_budget=token_budget,
+            )
+            result_queue.put((int(sample["sample_id"]), pred_texts))
+    except Exception as exc:  # pragma: no cover
+        result_queue.put(("__error__", f"gpu {gpu_id}: {exc}"))
+
+
+def build_offline_action_cache(
+    samples: List[Dict[str, Any]],
+    model_name: str,
+    token_budget: int,
+    num_gpus: int,
+) -> None:
+    if num_gpus <= 0:
+        raise ValueError("num_gpus must be >= 1")
+    cfg = ModelConfig(model=model_name)
+    a_values = [float(v) for v in cfg.a_values.tolist()]
+    b_values = [float(v) for v in cfg.b_values.tolist()]
+    action_size = len(a_values) * len(b_values)
+    cart_a: List[float] = []
+    cart_b: List[float] = []
+    for a in a_values:
+        for b in b_values:
+            cart_a.append(a)
+            cart_b.append(b)
+
+    task_queue: mp.Queue = mp.Queue()
+    for sample in samples:
+        task_queue.put(sample)
+    for _ in range(num_gpus):
+        task_queue.put(None)
+    result_queue: mp.Queue = mp.Queue()
+    processes: List[mp.Process] = []
+    for gpu_id in range(num_gpus):
+        p = mp.Process(
+            target=_offline_worker,
+            args=(
+                gpu_id,
+                model_name,
+                token_budget,
+                task_queue,
+                cart_a,
+                cart_b,
+                result_queue,
+            ),
+        )
+        p.start()
+        processes.append(p)
+
+    remaining = len(samples)
+    pred_by_sample: Dict[int, List[str]] = {}
+    while remaining > 0:
+        item = result_queue.get()
+        if item[0] == "__error__":
+            raise RuntimeError(item[1])
+        sample_id, preds = item
+        pred_by_sample[int(sample_id)] = preds
+        remaining -= 1
+
+    for p in processes:
+        p.join()
+
+    for sample in samples:
+        sid = int(sample["sample_id"])
+        preds = pred_by_sample[sid]
+        sample["token_budget"] = int(token_budget)
+        sample["action_space"] = {
+            "a_values": cart_a,
+            "b_values": cart_b,
+        }
+        sample["action_outputs"] = preds
+
+
 def main(args):
     set_seed(args.seed)
     tokenizer = load_tokenizer(args.model)
@@ -315,10 +485,26 @@ def main(args):
     )
 
     apply_eval_style_truncation(train_samples, tokenizer, max_input_length)
+    for idx, sample in enumerate(train_samples):
+        sample["sample_id"] = idx
+
+    if torch.cuda.is_available():
+        use_gpu_count = int(torch.cuda.device_count())
+    else:
+        use_gpu_count = 0
+    if use_gpu_count <= 0:
+        raise RuntimeError("No GPU available for offline LLM generation cache.")
+    build_offline_action_cache(
+        samples=train_samples,
+        model_name=args.model,
+        token_budget=int(args.token_budget),
+        num_gpus=use_gpu_count,
+    )
 
     write_jsonl(args.output_file, train_samples, "train")
 
     print(f"\nSaved train: {args.output_file} ({len(train_samples)} samples)")
+    print(f"Offline action cache built with {use_gpu_count} GPU(s), token_budget={int(args.token_budget)}")
     print(f"Truncation max_input_length={max_input_length} (model={args.model})")
 
 
@@ -337,5 +523,6 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=DEFAULT_SPLIT_SEED)
     parser.add_argument("--model", type=str, default="llama3", choices=["llama", "llama2", "llama3", "opt"])
     parser.add_argument("--max_input_length", type=int, default=None)
+    parser.add_argument("--token_budget", type=int, default=1024)
     main(parser.parse_args())
 
