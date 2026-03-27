@@ -21,6 +21,9 @@ import sys
 import time
 from typing import Any, Dict, List
 
+# Silence HF tokenizers fork-parallelism warning in multiprocess workers.
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 import torch
 from transformers import AutoTokenizer
 
@@ -388,8 +391,11 @@ def _offline_worker(
     result_queue: mp.Queue,
 ) -> None:
     os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpu_group)
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
     torch.set_grad_enabled(False)
+    print(f"[offline-cache][worker {worker_id}] start with CUDA_VISIBLE_DEVICES={os.environ['CUDA_VISIBLE_DEVICES']}")
     model, tokenizer = load_model(model_name)
+    print(f"[offline-cache][worker {worker_id}] model device={model.device}")
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     a_tensor = torch.tensor(a_values, dtype=torch.float32, device=model.device)
@@ -443,15 +449,17 @@ def build_offline_action_cache(
     for start in range(0, visible_gpu_count, gpus_per_model):
         gpu_groups.append(all_gpu_ids[start : start + gpus_per_model])
 
-    task_queue: mp.Queue = mp.Queue()
+    ctx = mp.get_context("spawn")
+
+    task_queue: mp.Queue = ctx.Queue()
     for sample in samples:
         task_queue.put(sample)
     for _ in range(len(gpu_groups)):
         task_queue.put(None)
-    result_queue: mp.Queue = mp.Queue()
+    result_queue: mp.Queue = ctx.Queue()
     processes: List[mp.Process] = []
     for worker_id, gpu_group in enumerate(gpu_groups):
-        p = mp.Process(
+        p = ctx.Process(
             target=_offline_worker,
             args=(
                 worker_id,
