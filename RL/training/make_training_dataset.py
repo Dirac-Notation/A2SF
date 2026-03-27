@@ -17,10 +17,16 @@ import math
 import os
 import random
 import multiprocessing as mp
+import sys
 from typing import Any, Dict, List
 
 import torch
 from transformers import AutoTokenizer
+
+# Ensure repository root is importable when executed as a script.
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if REPO_ROOT not in sys.path:
+    sys.path.append(REPO_ROOT)
 
 from utils import CompressionConfig, load_model
 from RL.a2sf_model import ModelConfig
@@ -30,7 +36,6 @@ DEFAULT_SAMPLE_RATIO = 0.10
 DEFAULT_LENGTH_BINS = 10
 
 # RL/training/data_generation/make_training_dataset.py 기준으로 repo root로 이동
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 TASK2DATASET_PATH = os.path.join(REPO_ROOT, "config", "task2dataset.json")
 DATASET2MAXLEN_PATH = os.path.join(REPO_ROOT, "config", "dataset2maxlen.json")
