@@ -306,7 +306,12 @@ class LlamaModel(LlamaPreTrainedModel):
         if self.compression_method == "a2sf" or self.compression_method == "linear" or self.compression_method == "sigmoid":
             if input_ids.size(1) > 1:
                 orig_shape = input_ids.shape
-                exponents = torch.arange(0, orig_shape[1], device=input_ids.device).view(orig_shape[0], 1, orig_shape[1])
+                exponents = (
+                    torch.arange(0, orig_shape[1], device=input_ids.device, dtype=torch.float32)
+                    .view(1, 1, orig_shape[1])
+                    .expand(orig_shape[0], 1, orig_shape[1])
+                    .contiguous()
+                )
 
         # Set exponents in cache
         if hasattr(past_key_values, "layer_compressors"):

@@ -117,10 +117,71 @@ class A2SFEnv:
             "b": b_val,
             "reward": reward_val,
             "pred": pred_text,
-            "output_ids": result.output_ids,
+            "output_ids": result.output_ids.detach().cpu(),
         }
 
         return reward, info
+
+    def run_with_actions(
+        self,
+        action: Tuple[torch.Tensor, torch.Tensor],
+        **kwargs: Any,
+    ) -> Tuple[torch.Tensor, Dict[str, Any]]:
+        """Runs model generation for batched actions over the same prompt."""
+        a_vals, b_vals = action
+        if not isinstance(a_vals, torch.Tensor):
+            a_vals = torch.tensor([a_vals], device=self.device, dtype=torch.float32)
+        if not isinstance(b_vals, torch.Tensor):
+            b_vals = torch.tensor([b_vals], device=self.device, dtype=torch.float32)
+
+        a_vals = a_vals.to(self.device, dtype=torch.float32).view(-1)
+        b_vals = b_vals.to(self.device, dtype=torch.float32).view(-1)
+        if a_vals.numel() != b_vals.numel():
+            raise ValueError(
+                f"Action tensor sizes must match, got a:{a_vals.numel()} and b:{b_vals.numel()}"
+            )
+
+        batch_size = int(a_vals.numel())
+        prompts = [self.current_prompt] * batch_size
+
+        with torch.no_grad():
+            result = self.runner.run_with_compression(
+                prompt=prompts,
+                a=a_vals,
+                b=b_vals,
+                token_budget=self.current_token_budget,
+                **kwargs,
+            )
+
+        pred_texts = result.pred_text
+        if isinstance(pred_texts, str):
+            pred_texts = [pred_texts]
+        if len(pred_texts) != batch_size:
+            raise ValueError(
+                f"Batched prediction size mismatch, expected {batch_size}, got {len(pred_texts)}"
+            )
+
+        metric_fn = METRIC_FN_REGISTRY.get(self.current_metric_type, qa_f1_score)
+        rewards: List[float] = []
+        for pred_text in pred_texts:
+            reward_val = 0.0
+            if self.current_answers:
+                for gt in self.current_answers:
+                    reward_val = max(
+                        reward_val,
+                        float(metric_fn(pred_text, gt, all_classes=self.current_all_classes)),
+                    )
+            rewards.append(reward_val)
+
+        reward_tensor = torch.tensor(rewards, device=self.device, dtype=torch.float32)
+        info = {
+            "a": a_vals.detach().cpu(),
+            "b": b_vals.detach().cpu(),
+            "reward": rewards,
+            "pred": pred_texts,
+            "output_ids": result.output_ids.detach().cpu(),
+        }
+        return reward_tensor, info
 
 
 __all__ = ["A2SFEnv"]

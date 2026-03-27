@@ -19,6 +19,13 @@ class SigmoidCompressor(BaseCompressor):
         self.exponents = None
         self.window = None
 
+    @staticmethod
+    def _as_1d_tensor(value, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        """Accept scalar/tensor input and normalize to a 1D tensor."""
+        if isinstance(value, torch.Tensor):
+            return value.to(device=device, dtype=dtype).reshape(-1)
+        return torch.tensor([value], device=device, dtype=dtype)
+
     def init_cache(self, compression_config, layer_idx):
         self.seq_length = 0
         self.selected_indices = None
@@ -26,8 +33,8 @@ class SigmoidCompressor(BaseCompressor):
         self.total_budget = compression_config.total_budget
         self.recent_budget = int(self.total_budget * 0.125)
         self.select_budget = self.total_budget - self.recent_budget
-        self.a = compression_config.a
-        self.b = compression_config.b
+        self.a = self._as_1d_tensor(compression_config.a, device=self.device, dtype=torch.float32)
+        self.b = self._as_1d_tensor(compression_config.b, device=self.device, dtype=torch.float32)
         self.window = None
 
     def should_accumulate_scores(self, seq_len_q: int, seq_len_k: int) -> bool:
@@ -40,7 +47,9 @@ class SigmoidCompressor(BaseCompressor):
         else:
             self.exponents = self.exponents.to(device)
         # 기존 구현 수식 보존
-        self.window = 1 / (1 + torch.exp(-self.a * (self.exponents - (seq_len_q - self.b - 0.5))))
+        a = self.a.to(device=device, dtype=torch.float32).view(-1, 1, 1)
+        b = self.b.to(device=device, dtype=torch.float32).view(-1, 1, 1)
+        self.window = 1 / (torch.exp(-a * (self.exponents - (seq_len_q - b - 1.0))))
         self.window = self.window.to(dtype=torch.float32)
 
     def accumulate_scores(

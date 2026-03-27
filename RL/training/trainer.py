@@ -3,15 +3,13 @@ import sys
 import json
 import random
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 import torch
 import torch.optim as optim
 import torch.optim.lr_scheduler as lr_scheduler
 import torch.nn.functional as F
-import numpy as np
 from torch.utils.data import DataLoader
-from tqdm import tqdm
 
 sys.path.append(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -61,11 +59,10 @@ class A2SFTrainer:
         self.optimizer = optim.SGD(all_params, lr=self.training_config.lr)
 
         # Load pre-split data generated under `RL/training/data/`.
-        training_data_list, eval_data_list = self.load_training_data()
+        training_data_list = self.load_training_data()
 
         # Create datasets
         self.training_dataset = RLDataset(training_data_list)
-        self.eval_dataset = RLDataset(eval_data_list)
 
         # Create data loaders
         # For training: shuffle and use episodes_per_update as batch size
@@ -78,18 +75,7 @@ class A2SFTrainer:
             collate_fn=rl_collate_fn,  # Use custom collate function
         )
 
-        # For evaluation: no shuffle, process all at once
-        self.eval_loader = DataLoader(
-            self.eval_dataset,
-            batch_size=1,  # Process one at a time for evaluation
-            shuffle=False,
-            num_workers=0,
-            pin_memory=False,
-            collate_fn=rl_collate_fn,  # Use custom collate function
-        )
-
         print(f"Loaded {len(self.training_dataset)} training samples")
-        print(f"Loaded {len(self.eval_dataset)} evaluation samples")
         print(f"Training batches per epoch: {len(self.train_loader)}")
         os.makedirs(self.training_config.save_dir, exist_ok=True)
 
@@ -100,6 +86,42 @@ class A2SFTrainer:
 
         # Initialize learning rate scheduler after total_iterations is known
         self.scheduler = self._create_scheduler()
+
+    def _augment_prompt_middle_shuffle(
+        self,
+        prompt: str,
+        seed: int,
+        prefix_keep: int = 128,
+        suffix_keep: int = 128,
+    ) -> str:
+        """
+        Keep first/last fixed token spans and shuffle middle 4 segments.
+        Applied on-the-fly during training for prompt augmentation.
+        """
+        token_ids = self.model_runner.tokenizer.encode(prompt, add_special_tokens=False)
+        if len(token_ids) <= 2*(prefix_keep + suffix_keep):
+            return prompt
+
+        prefix = token_ids[:prefix_keep]
+        suffix = token_ids[-suffix_keep:]
+        middle = token_ids[prefix_keep:-suffix_keep]
+        if len(middle) < 4:
+            return prompt
+
+        n = len(middle)
+        boundaries = [0, n // 4, n // 2, (3 * n) // 4, n]
+        segments = [middle[boundaries[i] : boundaries[i + 1]] for i in range(4)]
+
+        rng = random.Random(seed)
+        order = [0, 1, 2, 3]
+        rng.shuffle(order)
+
+        shuffled_middle: List[int] = []
+        for idx in order:
+            shuffled_middle.extend(segments[idx])
+
+        mixed = prefix + shuffled_middle + suffix
+        return self.model_runner.tokenizer.decode(mixed, skip_special_tokens=True)
 
     @staticmethod
     def _format_fixed(value: float, digits: int) -> str:
@@ -135,25 +157,16 @@ class A2SFTrainer:
             for gt_reward, pred_reward in pairs
         ]
 
-    def load_training_data(self) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    def load_training_data(self) -> List[Dict[str, Any]]:
         train_path = self.training_config.train_data_path
-        eval_path = self.training_config.eval_data_path
 
         if not os.path.exists(train_path):
             raise FileNotFoundError(f"Training split not found: {train_path}")
-        if not os.path.exists(eval_path):
-            raise FileNotFoundError(
-                f"Evaluation split not found: {eval_path}. "
-                "Run `python -m RL.training.data_generation.make_training_dataset` "
-                "to generate fixed split files."
-            )
 
         with open(train_path, "r", encoding="utf-8") as f:
             training_data = [json.loads(line) for line in f if line.strip()]
-        with open(eval_path, "r", encoding="utf-8") as f:
-            eval_data = [json.loads(line) for line in f if line.strip()]
 
-        for sample in training_data + eval_data:
+        for sample in training_data:
             sample["metric_type"] = self._resolve_metric_type(sample.get("dataset"))
             if "answers" not in sample:
                 sample["answers"] = []
@@ -161,8 +174,7 @@ class A2SFTrainer:
                 sample["all_classes"] = []
 
         print(f"Loaded {len(training_data)} training samples from {train_path}")
-        print(f"Loaded {len(eval_data)} evaluation samples from {eval_path}")
-        return training_data, eval_data
+        return training_data
 
     @staticmethod
     def _resolve_metric_type(dataset_name: str) -> str:
@@ -300,22 +312,28 @@ class A2SFTrainer:
             current_beta = self._get_ucb_beta(epoch, total_epochs)
 
             for batch in self.train_loader:
-                best_rewards: List[float] = []
-                worst_rewards: List[float] = []
-                best_actions_a: List = []
-                best_actions_b: List = []
-                worst_actions_a: List = []
-                worst_actions_b: List = []
-                best_input_seq_lengths: List[int] = []
-                best_task_types: List[str] = []
-                worst_input_seq_lengths: List[int] = []
-                worst_task_types: List[str] = []
+                label_order = ["best1", "worst1"]
+                per_label_data: Dict[str, Dict[str, List[Any]]] = {
+                    label: {
+                        "rewards": [],
+                        "actions_a": [],
+                        "actions_b": [],
+                        "reward_pairs": [],
+                    }
+                    for label in label_order
+                }
+                common_input_seq_lengths: List[int] = []
+                common_task_types: List[str] = []
                 update_samples = []
 
                 start_time = time.time()
 
-                for episode_data in batch:
-                    prompt = episode_data["input_prompt"]
+                for sample_idx, episode_data in enumerate(batch):
+                    raw_prompt = episode_data["input_prompt"]
+                    prompt = self._augment_prompt_middle_shuffle(
+                        prompt=raw_prompt,
+                        seed=self.training_config.seed + global_iteration * 1000 + sample_idx,
+                    )
                     tokenized_prompt = self.model_runner.tokenizer(
                         prompt, truncation=False, return_tensors="pt"
                     )
@@ -341,58 +359,57 @@ class A2SFTrainer:
                         )
                         state = state.to(self.device)
 
-                        best_action, _ = self.agent.get_best_action(
-                            state,
-                            beta=current_beta,
-                            metric_type=metric_type,
-                        )
-                        worst_action, _ = self.agent.get_worst_action(
-                            state,
-                            beta=current_beta,
-                            metric_type=metric_type,
-                        )
+                        with torch.no_grad():
+                            reward_pred_all = self.agent.forward(
+                                state,
+                                metric_type=metric_type,
+                            )["reward_pred"][0]
+                            _, ucb_scores = self.agent._compute_ucb_scores(
+                                state=state,
+                                beta=current_beta,
+                                metric_type=metric_type,
+                            )
+                            ucb_scores = ucb_scores[0]
 
-                        best_reward, _best_info = self.env.run_with_action(
-                            best_action,
+                            desc_idx = torch.argsort(ucb_scores, descending=True)
+                            asc_idx = torch.argsort(ucb_scores, descending=False)
+                            best1_idx = int(desc_idx[0].item())
+                            worst1_idx = int(asc_idx[0].item())
+                            # Requested order: best1, worst1
+                            selected_indices = torch.tensor(
+                                [best1_idx, worst1_idx],
+                                device=ucb_scores.device,
+                                dtype=torch.long,
+                            )
+
+                            a_idx = selected_indices // self.agent.num_b_values
+                            b_idx = selected_indices % self.agent.num_b_values
+                            selected_a = self.agent.a_values[a_idx].to(self.device)
+                            selected_b = self.agent.b_values[b_idx].to(self.device)
+
+                        selected_rewards_t, _selected_info = self.env.run_with_actions(
+                            (selected_a, selected_b),
                             **generation_kwargs,
                         )
-                        worst_reward, _worst_info = self.env.run_with_action(
-                            worst_action,
-                            **generation_kwargs,
-                        )
+                        selected_rewards_t = selected_rewards_t.view(-1)
 
-                        best_gt_reward_val = (
-                            best_reward.item() if isinstance(best_reward, torch.Tensor) else float(best_reward)
-                        )
-                        worst_gt_reward_val = (
-                            worst_reward.item() if isinstance(worst_reward, torch.Tensor) else float(worst_reward)
-                        )
+                        for local_idx, label in enumerate(label_order):
+                            action = (
+                                selected_a[local_idx].view(1),
+                                selected_b[local_idx].view(1),
+                            )
+                            reward_val = selected_rewards_t[local_idx]
+                            update_samples.append((state, action, reward_val, metric_type))
+                            selected_idx = int(selected_indices[local_idx].item())
+                            gt_reward_val = float(reward_val.item())
+                            pred_reward_val = float(reward_pred_all[selected_idx].item())
+                            per_label_data[label]["rewards"].append(gt_reward_val)
+                            per_label_data[label]["actions_a"].append(round(float(selected_a[local_idx].item()), 4))
+                            per_label_data[label]["actions_b"].append(int(selected_b[local_idx].item()))
+                            per_label_data[label]["reward_pairs"].append((gt_reward_val, pred_reward_val))
 
-                        update_samples.append((state, best_action, best_reward, metric_type))
-                        update_samples.append((state, worst_action, worst_reward, metric_type))
-
-                        best_rewards.append(best_gt_reward_val)
-                        worst_rewards.append(worst_gt_reward_val)
-
-                        best_a_val, best_b_val = best_action
-                        worst_a_val, worst_b_val = worst_action
-
-                        best_actions_a.append(
-                            round(best_a_val.item(), 2) if isinstance(best_a_val, torch.Tensor) else best_a_val
-                        )
-                        best_actions_b.append(
-                            int(best_b_val.item()) if isinstance(best_b_val, torch.Tensor) else int(best_b_val)
-                        )
-                        worst_actions_a.append(
-                            round(worst_a_val.item(), 2) if isinstance(worst_a_val, torch.Tensor) else worst_a_val
-                        )
-                        worst_actions_b.append(
-                            int(worst_b_val.item()) if isinstance(worst_b_val, torch.Tensor) else int(worst_b_val)
-                        )
-                        best_input_seq_lengths.append(input_seq_len)
-                        worst_input_seq_lengths.append(input_seq_len)
-                        best_task_types.append(task_type_str)
-                        worst_task_types.append(task_type_str)
+                        common_input_seq_lengths.append(input_seq_len)
+                        common_task_types.append(task_type_str)
 
                 end_time = time.time()
                 print(f"Time taken for one iteration: {end_time - start_time} seconds")
@@ -402,43 +419,31 @@ class A2SFTrainer:
                     config=self.training_config,
                     optimizer=self.optimizer,
                 )
-                all_reward_pairs = avg_loss_stats.get("reward_pairs", [])
-                best_reward_pairs = all_reward_pairs[0::2]
-                worst_reward_pairs = all_reward_pairs[1::2]
-
-                self._log_progress(
+                best_rewards = per_label_data["best1"]["rewards"]
+                worst_rewards = per_label_data["worst1"]["rewards"]
+                self._log_progress_common(
                     iteration=global_iteration,
                     loss_stats=avg_loss_stats,
-                    iteration_rewards=best_rewards,
-                    iteration_actions_a=best_actions_a,
-                    iteration_actions_b=best_actions_b,
-                    iteration_reward_pairs=best_reward_pairs,
-                    iteration_input_seq_lengths=best_input_seq_lengths,
-                    iteration_task_types=best_task_types,
+                    best_iteration_rewards=best_rewards,
+                    worst_iteration_rewards=worst_rewards,
+                    iteration_input_seq_lengths=common_input_seq_lengths,
+                    iteration_task_types=common_task_types,
                     current_beta=current_beta,
-                    log_filename="training_progress_best.jsonl",
-                    log_prefix="BEST",
                 )
-                self._log_progress(
-                    iteration=global_iteration,
-                    loss_stats=avg_loss_stats,
-                    iteration_rewards=worst_rewards,
-                    iteration_actions_a=worst_actions_a,
-                    iteration_actions_b=worst_actions_b,
-                    iteration_reward_pairs=worst_reward_pairs,
-                    iteration_input_seq_lengths=worst_input_seq_lengths,
-                    iteration_task_types=worst_task_types,
-                    current_beta=current_beta,
-                    log_filename="training_progress_worst.jsonl",
-                    log_prefix="WORST",
-                )
+                for label in label_order:
+                    self._log_progress_action_detail(
+                        iteration=global_iteration,
+                        iteration_actions_a=per_label_data[label]["actions_a"],
+                        iteration_actions_b=per_label_data[label]["actions_b"],
+                        iteration_reward_pairs=per_label_data[label]["reward_pairs"],
+                        log_filename=f"training_progress_{label}.jsonl",
+                    )
                 global_iteration += 1
 
             self.scheduler.step()
 
             last_iter = max(0, global_iteration - 1)
             self._save_checkpoint(last_iter)
-            self._evaluate(last_iter, current_beta=current_beta, total_iterations=total_epochs)
             self._plot_training_progress()
 
         return max(0, global_iteration - 1)
@@ -457,118 +462,31 @@ class A2SFTrainer:
             epochs=self.total_epochs,
         )
 
-    def _evaluate(
-        self,
-        iteration: int,
-        current_beta: Optional[float] = None,
-        total_iterations: Optional[int] = None,
-    ):
-        print(f"Evaluating at iteration {iteration}")
-
-        self.agent.eval()
-        self.env.context_encoder.eval()
-
-        eval_rewards = []
-        eval_actions_a = []
-        eval_actions_b = []
-        eval_reward_pairs = []
-        eval_input_seq_lengths: List[int] = []
-        eval_task_types: List[str] = []
-
-        for batch in tqdm(self.eval_loader, desc="Evaluating"):
-            episode_data = batch[0]
-
-            prompt = episode_data["input_prompt"]
-            tokenized_prompt = self.model_runner.tokenizer(prompt, truncation=False, return_tensors="pt")
-            prompt_length = tokenized_prompt.input_ids.size(1)
-
-            for token_budget in TOKEN_BUDGET_CANDIDATES:
-                metric_type = str(episode_data.get("metric_type") or "qa_f1_score")
-                generation_kwargs = self._build_generation_kwargs(
-                    episode_data.get("dataset"),
-                    int(prompt_length),
-                    int(episode_data["generation_length"]),
-                )
-                state = self.env.get_state(
-                    prompt=prompt,
-                    metric_type=metric_type,
-                    token_budget=token_budget,
-                    answers=episode_data.get("answers", []),
-                    all_classes=episode_data.get("all_classes", []),
-                    generation_length=episode_data["generation_length"],
-                    dataset=episode_data["dataset"],
-                    task_type=episode_data.get("task_type"),
-                )
-                state = state.to(self.device)
-
-                with torch.no_grad():
-                    action, _ = self.agent.act(state, metric_type=metric_type)
-                    pred_reward = self.agent.predict_reward(state, action, metric_type=metric_type)
-                    pred_reward_val = float(pred_reward.view(-1)[0].item())
-
-                reward, info = self.env.run_with_action(
-                    action,
-                    **generation_kwargs,
-                )
-
-                gt_reward_val = float(reward.item())
-                eval_rewards.append(gt_reward_val)
-                a_val, b_val = action
-                eval_actions_a.append(round(a_val.item(), 2) if isinstance(a_val, torch.Tensor) else a_val)
-                eval_actions_b.append(int(b_val.item()) if isinstance(b_val, torch.Tensor) else int(b_val))
-                eval_reward_pairs.append((gt_reward_val, pred_reward_val))
-                eval_input_seq_lengths.append(int(prompt_length))
-                eval_task_types.append(str(episode_data.get("task_type") or "unknown"))
-
-        avg_eval_reward = sum(eval_rewards) / len(eval_rewards) if eval_rewards else 0.0
-        avg_eval_reward = round(avg_eval_reward, 4)
-
-        print("Evaluation Results:")
-        print(f"  Avg Reward:   {avg_eval_reward:.4f}")
-        print()
-
-        eval_data = {
-            "iteration": iteration,
-            "eval_avg_reward": avg_eval_reward,
-            "eval_actions_a": eval_actions_a,
-            "eval_actions_b": eval_actions_b,
-            "eval_input_seq_lengths": eval_input_seq_lengths,
-            "eval_task_types": eval_task_types,
-            "eval_reward_pairs": self._format_reward_pairs(eval_reward_pairs, digits=4),
-        }
-        eval_data = self._serialize_with_fixed_precision(
-            eval_data,
-            digits_map={"eval_avg_reward": 4, "eval_actions_a": 4},
-        )
-
-        with open(
-            os.path.join(self.training_config.save_dir, "evaluation_progress.jsonl"), "a"
-        ) as f:
-            f.write(json.dumps(eval_data) + "\n")
-
-    def _log_progress(
+    def _log_progress_common(
         self,
         iteration: int,
         loss_stats: Dict[str, float],
-        iteration_rewards: List,
-        iteration_actions_a: List,
-        iteration_actions_b: List,
-        iteration_reward_pairs: List[Tuple[float, float]],
+        best_iteration_rewards: List,
+        worst_iteration_rewards: List,
         iteration_input_seq_lengths: List[int],
         iteration_task_types: List[str],
         current_beta: float,
-        log_filename: str,
-        log_prefix: str,
     ):
-        avg_reward = sum(iteration_rewards) / len(iteration_rewards) if iteration_rewards else 0.0
+        best_avg_reward = (
+            sum(best_iteration_rewards) / len(best_iteration_rewards) if best_iteration_rewards else 0.0
+        )
+        worst_avg_reward = (
+            sum(worst_iteration_rewards) / len(worst_iteration_rewards) if worst_iteration_rewards else 0.0
+        )
 
         prediction_loss = round(loss_stats.get("prediction_loss", 0.0), 4)
         total_loss = round(loss_stats.get("total_loss", 0.0), 4)
         l2_loss = round(loss_stats.get("l2_loss", 0.0), 4)
         grad_norm = round(loss_stats.get("grad_norm", 0.0), 4)
 
-        print(f"Iteration {iteration} ({log_prefix}):")
-        print(f"  Avg Reward:        {avg_reward:.4f}")
+        print(f"Iteration {iteration} (COMMON):")
+        print(f"  Best Avg Reward:   {best_avg_reward:.4f}")
+        print(f"  Worst Avg Reward:  {worst_avg_reward:.4f}")
         print(f"  Prediction Loss:   {prediction_loss:.4f}")
         print(f"  L2 Loss:           {l2_loss:.4f}")
         print(f"  Total Loss:        {total_loss:.4f}")
@@ -580,7 +498,12 @@ class A2SFTrainer:
 
         progress_data = {
             "iteration": iteration,
-            "avg_reward": avg_reward.item() if isinstance(avg_reward, torch.Tensor) else avg_reward,
+            "best_avg_reward": (
+                best_avg_reward.item() if isinstance(best_avg_reward, torch.Tensor) else best_avg_reward
+            ),
+            "worst_avg_reward": (
+                worst_avg_reward.item() if isinstance(worst_avg_reward, torch.Tensor) else worst_avg_reward
+            ),
             "prediction_loss": prediction_loss,
             "l2_loss": l2_loss,
             "total_loss": total_loss,
@@ -589,20 +512,43 @@ class A2SFTrainer:
             "ucb_beta": current_beta,
             "input_seq_lengths": iteration_input_seq_lengths,
             "task_types": iteration_task_types,
-            "actions_a": iteration_actions_a,
-            "actions_b": iteration_actions_b,
-            "reward_pairs": self._format_reward_pairs(iteration_reward_pairs, digits=4),
         }
         progress_data = self._serialize_with_fixed_precision(
             progress_data,
             digits_map={
-                "avg_reward": 4,
+                "best_avg_reward": 4,
+                "worst_avg_reward": 4,
                 "prediction_loss": 4,
                 "l2_loss": 4,
                 "total_loss": 4,
                 "grad_norm": 4,
                 "learning_rate": 4,
                 "ucb_beta": 4,
+            },
+        )
+
+        with open(
+            os.path.join(self.training_config.save_dir, "training_progress.jsonl"), "a"
+        ) as f:
+            f.write(json.dumps(progress_data) + "\n")
+
+    def _log_progress_action_detail(
+        self,
+        iteration: int,
+        iteration_actions_a: List,
+        iteration_actions_b: List,
+        iteration_reward_pairs: List[Tuple[float, float]],
+        log_filename: str,
+    ):
+        detail_data = {
+            "iteration": iteration,
+            "reward_pairs": self._format_reward_pairs(iteration_reward_pairs, digits=4),
+            "actions_a": iteration_actions_a,
+            "actions_b": iteration_actions_b,
+        }
+        detail_data = self._serialize_with_fixed_precision(
+            detail_data,
+            digits_map={
                 "actions_a": 4,
             },
         )
@@ -610,7 +556,7 @@ class A2SFTrainer:
         with open(
             os.path.join(self.training_config.save_dir, str(log_filename)), "a"
         ) as f:
-            f.write(json.dumps(progress_data) + "\n")
+            f.write(json.dumps(detail_data) + "\n")
 
     def _save_checkpoint(self, iteration: int):
         checkpoint_path = os.path.join(self.training_config.save_dir, f"policy_{iteration}.pt")
