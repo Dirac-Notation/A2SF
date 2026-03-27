@@ -490,7 +490,8 @@ for dataset_name, selected_items in dataset_selected_data.items():
                 do_sample=False,
                 pad_token_id=tokenizer.eos_token_id,
                 return_dict_in_generate=True,
-                output_attentions=True
+                output_attentions=True,
+                num_logits_to_keep=1,
             )
 
         prefill_attention_maps = torch.stack(prefill_attention_list, dim=0).squeeze(1)

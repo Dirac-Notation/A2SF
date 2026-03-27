@@ -204,6 +204,7 @@ def evaluate_model(
                     temperature=0.0,
                     do_sample=False,
                     pad_token_id=tokenizer.eos_token_id,
+                    num_logits_to_keep=1,
                 )[0]
 
             # Decode the response

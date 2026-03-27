@@ -48,6 +48,7 @@ class A2SFModelRunner:
         self.model.init_cache(compression_config)
 
         with torch.no_grad():
+            kwargs.setdefault("num_logits_to_keep", 1)
             output_ids = self.model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
