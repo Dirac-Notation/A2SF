@@ -75,6 +75,7 @@ def get_pred(data, max_length, max_gen, dataset, model, tokenizer, out_path, mod
                 pad_token_id=tokenizer.eos_token_id,
                 min_length=context_length + 1,
                 eos_token_id=[tokenizer.eos_token_id, tokenizer.encode("\n", add_special_tokens=False)[-1]],
+                num_logits_to_keep=1,
             )
         else:
             out = model.generate(
@@ -91,6 +92,7 @@ def get_pred(data, max_length, max_gen, dataset, model, tokenizer, out_path, mod
                 num_beams=1,
                 do_sample=False,
                 pad_token_id=tokenizer.eos_token_id,
+                num_logits_to_keep=1,
             )
 
         a_val = out.info.get("a")

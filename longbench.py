@@ -69,7 +69,8 @@ def get_pred(data, max_length, max_gen, dataset, model, tokenizer, out_path, mod
                     eos_token_id=[tokenizer.eos_token_id, tokenizer.encode("\n", add_special_tokens=False)[-1]],
                     pad_token_id=tokenizer.eos_token_id,
                     tokenizer=tokenizer,
-                    stop_strings="[/INST]"
+                    stop_strings="[/INST]",
+                    num_logits_to_keep=1,
                 )[0]
             else:
                 output = model.generate(
@@ -80,7 +81,8 @@ def get_pred(data, max_length, max_gen, dataset, model, tokenizer, out_path, mod
                     do_sample=False,
                     pad_token_id=tokenizer.eos_token_id,
                     tokenizer=tokenizer,
-                    stop_strings="[/INST]"
+                    stop_strings="[/INST]",
+                    num_logits_to_keep=1,
                 )[0]
         pred = tokenizer.decode(output[context_length:], skip_special_tokens=True)
         with open(out_path, "a", encoding="utf-8") as f:

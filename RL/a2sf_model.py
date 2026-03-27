@@ -107,6 +107,7 @@ class A2SFModel:
         """
         resolved_metric_type = str(metric_type or "qa_f1_score")
         generation_length = int(kwargs.get("max_new_tokens", 64))
+        kwargs.setdefault("num_logits_to_keep", 1)
         answers = kwargs.pop("answers", None)
         all_classes = kwargs.pop("all_classes", None)
         dataset = kwargs.pop("dataset", None)

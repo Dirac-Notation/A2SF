@@ -232,7 +232,8 @@ for group_name, selected_items in selected_data.items():
                 do_sample=False,
                 pad_token_id=tokenizer.eos_token_id,
                 return_dict_in_generate=True,
-                output_attentions=True
+                output_attentions=True,
+                num_logits_to_keep=1,
             )
         
         # Extract attention weights
