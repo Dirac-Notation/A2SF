@@ -372,7 +372,8 @@ def _offline_generate_for_sample(
 
 
 def _offline_worker(
-    gpu_id: int,
+    worker_id: int,
+    gpu_group: List[int],
     model_name: str,
     token_budget: int,
     task_queue: mp.Queue,
@@ -380,7 +381,7 @@ def _offline_worker(
     b_values: List[float],
     result_queue: mp.Queue,
 ) -> None:
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpu_group)
     torch.set_grad_enabled(False)
     model, tokenizer = load_model(model_name)
     if tokenizer.pad_token is None:
@@ -402,17 +403,24 @@ def _offline_worker(
             )
             result_queue.put((int(sample["sample_id"]), pred_texts))
     except Exception as exc:  # pragma: no cover
-        result_queue.put(("__error__", f"gpu {gpu_id}: {exc}"))
+        result_queue.put(("__error__", f"worker {worker_id} gpus={gpu_group}: {exc}"))
 
 
 def build_offline_action_cache(
     samples: List[Dict[str, Any]],
     model_name: str,
     token_budget: int,
-    num_gpus: int,
+    visible_gpu_count: int,
+    gpus_per_model: int,
 ) -> None:
-    if num_gpus <= 0:
-        raise ValueError("num_gpus must be >= 1")
+    if visible_gpu_count <= 0:
+        raise ValueError("visible_gpu_count must be >= 1")
+    if gpus_per_model <= 0:
+        raise ValueError("gpus_per_model must be >= 1")
+    if gpus_per_model > visible_gpu_count:
+        raise ValueError(
+            f"gpus_per_model ({gpus_per_model}) cannot exceed visible GPU count ({visible_gpu_count})"
+        )
     cfg = ModelConfig(model=model_name)
     a_values = [float(v) for v in cfg.a_values.tolist()]
     b_values = [float(v) for v in cfg.b_values.tolist()]
@@ -424,18 +432,24 @@ def build_offline_action_cache(
             cart_a.append(a)
             cart_b.append(b)
 
+    gpu_groups: List[List[int]] = []
+    all_gpu_ids = list(range(visible_gpu_count))
+    for start in range(0, visible_gpu_count, gpus_per_model):
+        gpu_groups.append(all_gpu_ids[start : start + gpus_per_model])
+
     task_queue: mp.Queue = mp.Queue()
     for sample in samples:
         task_queue.put(sample)
-    for _ in range(num_gpus):
+    for _ in range(len(gpu_groups)):
         task_queue.put(None)
     result_queue: mp.Queue = mp.Queue()
     processes: List[mp.Process] = []
-    for gpu_id in range(num_gpus):
+    for worker_id, gpu_group in enumerate(gpu_groups):
         p = mp.Process(
             target=_offline_worker,
             args=(
-                gpu_id,
+                worker_id,
+                gpu_group,
                 model_name,
                 token_budget,
                 task_queue,
@@ -489,22 +503,28 @@ def main(args):
         sample["sample_id"] = idx
 
     if torch.cuda.is_available():
-        use_gpu_count = int(torch.cuda.device_count())
+        visible_gpu_count = int(torch.cuda.device_count())
     else:
-        use_gpu_count = 0
-    if use_gpu_count <= 0:
+        visible_gpu_count = 0
+    if visible_gpu_count <= 0:
         raise RuntimeError("No GPU available for offline LLM generation cache.")
     build_offline_action_cache(
         samples=train_samples,
         model_name=args.model,
         token_budget=int(args.token_budget),
-        num_gpus=use_gpu_count,
+        visible_gpu_count=visible_gpu_count,
+        gpus_per_model=int(args.gpus_per_model),
     )
 
     write_jsonl(args.output_file, train_samples, "train")
 
     print(f"\nSaved train: {args.output_file} ({len(train_samples)} samples)")
-    print(f"Offline action cache built with {use_gpu_count} GPU(s), token_budget={int(args.token_budget)}")
+    num_workers = (visible_gpu_count + int(args.gpus_per_model) - 1) // int(args.gpus_per_model)
+    print(
+        f"Offline action cache built with {visible_gpu_count} visible GPU(s), "
+        f"gpus_per_model={int(args.gpus_per_model)}, workers={num_workers}, "
+        f"token_budget={int(args.token_budget)}"
+    )
     print(f"Truncation max_input_length={max_input_length} (model={args.model})")
 
 
@@ -524,5 +544,6 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, default="llama3", choices=["llama", "llama2", "llama3", "opt"])
     parser.add_argument("--max_input_length", type=int, default=None)
     parser.add_argument("--token_budget", type=int, default=1024)
+    parser.add_argument("--gpus_per_model", type=int, default=1)
     main(parser.parse_args())
 
