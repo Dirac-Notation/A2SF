@@ -314,7 +314,20 @@ def write_jsonl(path: str, rows: List[Dict[str, Any]], split_name: str) -> None:
             f.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
 
 
-def _build_generation_kwargs(tokenizer, dataset_name: str, generation_length: int) -> Dict[str, Any]:
+def _format_prompt_like_longbench(prompt: str, dataset_name: str, model_name: str) -> str:
+    # Keep prompt wrapping behavior identical to longbench.py
+    if str(dataset_name or "").strip().lower() not in ["trec", "triviaqa", "samsum", "lsht", "lcc", "repobench-p"]:
+        if "llama" in str(model_name).lower():
+            return f"[INST]{prompt}[/INST]"
+    return prompt
+
+
+def _build_generation_kwargs(
+    tokenizer,
+    dataset_name: str,
+    generation_length: int,
+    context_length: int,
+) -> Dict[str, Any]:
     kwargs: Dict[str, Any] = {
         "tokenizer": tokenizer,
         "stop_strings": "[/INST]",
@@ -325,8 +338,7 @@ def _build_generation_kwargs(tokenizer, dataset_name: str, generation_length: in
         "num_logits_to_keep": 1,
     }
     if str(dataset_name or "").strip().lower() == "samsum":
-        # exact context-length-dependent min_length cannot be known before tokenization,
-        # so this offline pipeline keeps shared decoding config across datasets.
+        kwargs["min_length"] = int(context_length) + 1
         kwargs["eos_token_id"] = [
             tokenizer.eos_token_id,
             tokenizer.encode("\n", add_special_tokens=False)[-1],
@@ -348,34 +360,40 @@ def _offline_generate_for_sample(
     model,
     tokenizer,
     sample: Dict[str, Any],
+    model_name: str,
     a_values: torch.Tensor,
     b_values: torch.Tensor,
     token_budget: int,
 ) -> List[str]:
-    prompt = sample["input_prompt"]
-    batch_size = int(a_values.numel())
-    prompts = [prompt] * batch_size
-    encoded = tokenizer(prompts, truncation=False, padding=True, return_tensors="pt")
+    dataset_name = str(sample.get("dataset") or "")
+    prompt = _format_prompt_like_longbench(
+        prompt=str(sample["input_prompt"]),
+        dataset_name=dataset_name,
+        model_name=model_name,
+    )
+    encoded = tokenizer(prompt, truncation=False, return_tensors="pt")
     input_ids = encoded.input_ids.to(model.device)
-    attention_mask = encoded.attention_mask.to(model.device)
-    model.init_cache(_build_compression_config(a_values, b_values, token_budget))
+    attention_mask = encoded.attention_mask.to(torch.bfloat16).to(model.device)
+    context_length = int(input_ids.shape[-1])
     generation_kwargs = _build_generation_kwargs(
         tokenizer=tokenizer,
-        dataset_name=str(sample.get("dataset") or ""),
+        dataset_name=dataset_name,
         generation_length=int(sample.get("generation_length", 64)),
+        context_length=context_length,
     )
-    with torch.inference_mode():
-        output_ids = model.generate(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            **generation_kwargs,
-        )
-
     pred_texts: List[str] = []
-    for row_idx in range(output_ids.size(0)):
-        prompt_len = int(attention_mask[row_idx].sum().item())
+    for idx in range(int(a_values.numel())):
+        a = a_values[idx : idx + 1]
+        b = b_values[idx : idx + 1]
+        model.init_cache(_build_compression_config(a, b, token_budget))
+        with torch.inference_mode():
+            output_ids = model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                **generation_kwargs,
+            )
         pred_texts.append(
-            tokenizer.decode(output_ids[row_idx, prompt_len:], skip_special_tokens=True)
+            tokenizer.decode(output_ids[0, context_length:], skip_special_tokens=True)
         )
     return pred_texts
 
@@ -409,6 +427,7 @@ def _offline_worker(
                 model=model,
                 tokenizer=tokenizer,
                 sample=sample,
+                model_name=model_name,
                 a_values=a_tensor,
                 b_values=b_tensor,
                 token_budget=token_budget,
