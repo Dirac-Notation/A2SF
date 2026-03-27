@@ -22,7 +22,7 @@ from ..env import A2SFEnv, A2SFModelRunner
 from .dataloader import RLDataset, rl_collate_fn
 from longbench_eval import dataset2metric
 
-TOKEN_BUDGET_CANDIDATES = [128]
+TOKEN_BUDGET_CANDIDATES = [1024]
 
 
 class A2SFTrainer:

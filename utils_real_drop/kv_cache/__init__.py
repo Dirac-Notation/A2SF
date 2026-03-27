@@ -201,7 +201,7 @@ class DynamicCustomCache(Cache):
         value: torch.Tensor,
         attn_mask: Optional[torch.Tensor],
         head_dim: int,
-        block_size: int = 1024,
+        block_size: int = 128,
     ) -> torch.Tensor:
         batch_size, num_heads, seq_len_q, _ = query.shape
         _, _, seq_len_k, _ = key.shape
