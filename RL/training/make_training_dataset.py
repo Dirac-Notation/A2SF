@@ -18,6 +18,7 @@ import os
 import random
 import multiprocessing as mp
 import sys
+import time
 from typing import Any, Dict, List
 
 import torch
@@ -467,6 +468,11 @@ def build_offline_action_cache(
         processes.append(p)
 
     remaining = len(samples)
+    total = len(samples)
+    done = 0
+    started_at = time.time()
+    last_print_done = -1
+    print_step = max(1, total // 100)
     pred_by_sample: Dict[int, List[str]] = {}
     while remaining > 0:
         item = result_queue.get()
@@ -475,6 +481,19 @@ def build_offline_action_cache(
         sample_id, preds = item
         pred_by_sample[int(sample_id)] = preds
         remaining -= 1
+        done += 1
+
+        should_print = (done == 1) or (done == total) or (done - last_print_done >= print_step)
+        if should_print:
+            elapsed = max(1e-6, time.time() - started_at)
+            rate = done / elapsed
+            eta_sec = int((total - done) / rate) if rate > 0 else 0
+            pct = (100.0 * done / total) if total > 0 else 100.0
+            print(
+                f"[offline-cache] progress: {done}/{total} ({pct:.1f}%) | "
+                f"{rate:.2f} samples/s | ETA {eta_sec}s"
+            )
+            last_print_done = done
 
     for p in processes:
         p.join()
