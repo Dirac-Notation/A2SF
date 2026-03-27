@@ -19,6 +19,7 @@ import random
 import multiprocessing as mp
 import sys
 import time
+import hashlib
 from typing import Any, Dict, List
 
 # Silence HF tokenizers fork-parallelism warning in multiprocess workers.
@@ -55,6 +56,13 @@ with open(DATASET2MAXLEN_PATH, "r", encoding="utf-8") as f:
 
 def set_seed(seed: int) -> None:
     random.seed(seed)
+def stable_seed_from_name(base_seed: int, name: str) -> int:
+    """Create a stable per-dataset seed independent of Python hash randomization."""
+    digest = hashlib.sha256(str(name).encode("utf-8")).hexdigest()
+    # Use lower 32 bits to keep it in a practical range.
+    return int(base_seed) + (int(digest[:8], 16))
+
+
 
 
 def count_tokens(tokenizer, text: str) -> int:
@@ -272,11 +280,12 @@ def load_longbench_sampled_splits(
             print(f"- {dataset_name}: no valid samples, skipped")
             continue
 
+        dataset_seed = stable_seed_from_name(seed, dataset_name)
         train_sampled = length_balanced_sample(
             samples=dataset_samples,
             ratio=sample_ratio,
             num_bins=num_length_bins,
-            seed=seed,
+            seed=dataset_seed,
         )
         train_samples_all.extend(train_sampled)
 
