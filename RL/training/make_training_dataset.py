@@ -20,7 +20,7 @@ import multiprocessing as mp
 import sys
 import time
 import hashlib
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 # Silence HF tokenizers fork-parallelism warning in multiprocess workers.
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
@@ -89,6 +89,61 @@ def load_tokenizer(model_name: str):
         model2path = json.load(f)
     model_path = model2path[model_name]
     return AutoTokenizer.from_pretrained(model_path)
+
+
+MIDDLE_TRIM = 128
+# 문자 길이가 이 값 이하면 중간 4등분 셔플을 적용하지 않는다(샘플 1개만 유지).
+MIN_PROMPT_LEN_FOR_MIDDLE_SHUFFLE = 512
+
+
+def augment_prompt_middle_quarter_shuffle_variants(prompt: str, rng: random.Random) -> List[str]:
+    """
+    `prompt[128:-128]` 구간을 4등분한 뒤, 청크 1~4가 모두 한 번씩 쓰이도록 순서를 바꾼 프롬프트 4개를 만든다.
+    - 1개: 원래 순서 (1→2→3→4)
+    - 3개: 서로 다른 랜덤 순열(가능하면 중복 없이)
+    앞 128자·뒤 128자는 그대로 둔다.
+    `len(prompt) <= MIN_PROMPT_LEN_FOR_MIDDLE_SHUFFLE`이면 셔플을 하지 않고 `[prompt]` 한 개만 반환한다.
+    """
+    if len(prompt) <= MIN_PROMPT_LEN_FOR_MIDDLE_SHUFFLE:
+        return [prompt]
+
+    head = prompt[:MIDDLE_TRIM]
+    tail = prompt[-MIDDLE_TRIM:]
+    middle = prompt[MIDDLE_TRIM:-MIDDLE_TRIM]
+    n = len(middle)
+    if n < 4:
+        return [prompt]
+
+    q, r = divmod(n, 4)
+    sizes = [q + (1 if i < r else 0) for i in range(4)]
+    parts: List[str] = []
+    pos = 0
+    for sz in sizes:
+        parts.append(middle[pos : pos + sz])
+        pos += sz
+
+    def assemble(order: List[int]) -> str:
+        return head + "".join(parts[i] for i in order) + tail
+
+    identity = (0, 1, 2, 3)
+    orders: List[Tuple[int, ...]] = [identity]
+    seen = {identity}
+    for _ in range(3):
+        for _attempt in range(500):
+            perm = [0, 1, 2, 3]
+            rng.shuffle(perm)
+            t = tuple(perm)
+            if t not in seen:
+                seen.add(t)
+                orders.append(t)
+                break
+        else:
+            # 극히 드물게 3개를 못 채우면 남은 슬롯은 임의 순열로 채움
+            perm = [0, 1, 2, 3]
+            rng.shuffle(perm)
+            orders.append(tuple(perm))
+
+    return [assemble(list(o)) for o in orders[:4]]
 
 
 def truncate_middle_by_max_length(prompt: str, tokenizer, max_input_length: int) -> str:
@@ -554,6 +609,20 @@ def main(args):
     )
 
     apply_eval_style_truncation(train_samples, tokenizer, max_input_length)
+
+    expanded: List[Dict[str, Any]] = []
+    for idx, sample in enumerate(train_samples):
+        rng = random.Random(stable_seed_from_name(args.seed, f"middle_shuffle_{idx}"))
+        variants = augment_prompt_middle_quarter_shuffle_variants(sample["input_prompt"], rng)
+        for aug_i, p in enumerate(variants):
+            row = dict(sample)
+            row["input_prompt"] = p
+            row["middle_shuffle_aug"] = int(aug_i)
+            tok = tokenizer(p, truncation=False, return_tensors="pt")
+            row["length"] = int(tok.input_ids.size(1))
+            expanded.append(row)
+    train_samples = expanded
+
     for idx, sample in enumerate(train_samples):
         sample["sample_id"] = idx
 

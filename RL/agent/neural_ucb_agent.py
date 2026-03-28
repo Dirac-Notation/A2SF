@@ -25,6 +25,37 @@ class MLPResidualBlock(nn.Module):
         return residual + x
 
 
+class MetricPolicyNetwork(nn.Module):
+    """Per-metric network: input projection, backbone, and reward head."""
+
+    def __init__(self, state_dim: int, num_actions: int):
+        super().__init__()
+        self.feature_dim = 512
+        self.input_proj = nn.Sequential(
+            nn.Linear(state_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, self.feature_dim),
+            nn.ReLU(),
+        )
+        self.backbone = nn.Sequential(
+            MLPResidualBlock(dim=self.feature_dim, hidden_dim=1024, dropout=0.1),
+            MLPResidualBlock(dim=self.feature_dim, hidden_dim=1024, dropout=0.1),
+        )
+        self.reward_head = nn.Linear(self.feature_dim, num_actions)
+
+    def forward(self, state: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Returns:
+          - reward_pred: (B, num_actions) after sigmoid
+          - feature_vector: (B, feature_dim)
+        """
+        x = self.input_proj(state.to(dtype=torch.float32))
+        h = self.backbone(x)
+        logits = self.reward_head(h)
+        reward_pred = torch.sigmoid(logits)
+        return reward_pred, h
+
+
 class NeuralUCBAgent(nn.Module):
     """
     NeuralUCB agent network for Sigmoid Cache RL (single-step / bandit).
@@ -57,37 +88,32 @@ class NeuralUCBAgent(nn.Module):
         if self.state_dim < 1:
             raise ValueError(f"state_dim must be >= 1, got {self.state_dim}")
 
-        # Projection + single normalization + residual ReLU MLP stack.
-        self.input_proj = nn.Sequential(
-            nn.Linear(self.state_dim, 256),
-            nn.ReLU(),
-            nn.Linear(256, 512),
-            nn.ReLU(),
-        )
-
-        self.backbone = nn.Sequential(
-            MLPResidualBlock(dim=512, hidden_dim=1024, dropout=0.1),
-            MLPResidualBlock(dim=512, hidden_dim=1024, dropout=0.1),
-        )
-        self.feature_dim = 512
-
         if metric_heads is None:
             metric_heads = ["qa_f1_score"]
         self.metric_heads = list(metric_heads)
         self.default_metric_head = self.metric_heads[0]
-        self.reward_heads = nn.ModuleDict(
-            {metric_name: nn.Linear(512, self.num_actions) for metric_name in self.metric_heads}
-        )
+        self.metric_name_to_idx = {name: i for i, name in enumerate(self.metric_heads)}
 
-        # Initialize inverse covariance matrices for each action.
+        self.networks = nn.ModuleDict(
+            {
+                metric_name: MetricPolicyNetwork(self.state_dim, self.num_actions)
+                for metric_name in self.metric_heads
+            }
+        )
+        self.feature_dim = 512
+
+        # Per-metric, per-action inverse covariance (Neural-Linear uncertainty).
+        eye = torch.eye(self.feature_dim, device=a_values.device)
+        inv0 = eye.unsqueeze(0).repeat(self.num_actions, 1, 1) / self.lambda_reg
         self.register_buffer(
             "inverse_lambdas",
-            torch.eye(self.feature_dim, device=a_values.device).unsqueeze(0).repeat(self.num_actions, 1, 1)
-            / self.lambda_reg,
+            inv0.unsqueeze(0).repeat(len(self.metric_heads), 1, 1, 1).contiguous(),
         )
 
-        # Action counts for tracking
-        self.register_buffer("action_counts", torch.zeros(self.num_actions, dtype=torch.long))
+        self.register_buffer(
+            "action_counts",
+            torch.zeros(len(self.metric_heads), self.num_actions, dtype=torch.long),
+        )
 
         self._init_weights()
 
@@ -114,14 +140,12 @@ class NeuralUCBAgent(nn.Module):
             return [str(m) for m in metric_type]
         raise TypeError(f"Unsupported metric_type type: {type(metric_type)}")
 
-    def _compute_reward_pred(self, features: torch.Tensor, metric_types: List[str]) -> torch.Tensor:
-        out = []
-        for row_idx, metric_name in enumerate(metric_types):
-            head_name = metric_name if metric_name in self.reward_heads else self.default_metric_head
-            logits = self.reward_heads[head_name](features[row_idx : row_idx + 1])
-            pred_row = torch.sigmoid(logits)
-            out.append(pred_row)
-        return torch.cat(out, dim=0)
+    def _network_key(self, metric_name: str) -> str:
+        return metric_name if metric_name in self.networks else self.default_metric_head
+
+    def _metric_idx(self, metric_name: str) -> int:
+        key = self._network_key(metric_name)
+        return int(self.metric_name_to_idx[key])
 
     def forward(
         self,
@@ -140,13 +164,18 @@ class NeuralUCBAgent(nn.Module):
         if state.size(-1) != self.state_dim:
             raise ValueError(f"Expected state last dim {self.state_dim}, got {state.size(-1)}")
 
-        x = self.input_proj(state.to(dtype=torch.float32))
-        h = self.backbone(x)
+        metric_types = self._resolve_metric_type_for_batch(metric_type, state.size(0))
+        reward_rows: List[torch.Tensor] = []
+        feature_rows: List[torch.Tensor] = []
+        for row_idx, mname in enumerate(metric_types):
+            net = self.networks[self._network_key(mname)]
+            rp, h = net(state[row_idx : row_idx + 1])
+            reward_rows.append(rp)
+            feature_rows.append(h)
+        reward_pred = torch.cat(reward_rows, dim=0)
+        feature_vector = torch.cat(feature_rows, dim=0)
 
-        metric_types = self._resolve_metric_type_for_batch(metric_type, h.size(0))
-        reward_pred = self._compute_reward_pred(h, metric_types)
-
-        return {"reward_pred": reward_pred, "feature_vector": h}
+        return {"reward_pred": reward_pred, "feature_vector": feature_vector}
 
     def _select_action_from_scores(
         self, scores: torch.Tensor
@@ -178,6 +207,10 @@ class NeuralUCBAgent(nn.Module):
           - reward_pred: (B, num_actions)
           - ucb_scores: (B, num_actions)
         """
+        if state.ndim == 1:
+            state = state.unsqueeze(0)
+
+        metric_types = self._resolve_metric_type_for_batch(metric_type, state.size(0))
         out = self.forward(state, metric_type=metric_type)
         reward_pred = out["reward_pred"]  # (B, num_actions)
         feature_vector = out["feature_vector"]  # (B, feature_dim)
@@ -186,10 +219,19 @@ class NeuralUCBAgent(nn.Module):
             reward_pred = reward_pred.unsqueeze(0)
             feature_vector = feature_vector.unsqueeze(0)
 
-        uncertainty = torch.einsum(
-            "bi,aij,bj->ba", feature_vector, self.inverse_lambdas, feature_vector
+        batch_size = reward_pred.size(0)
+        uncertainty = torch.zeros(
+            batch_size,
+            self.num_actions,
+            device=reward_pred.device,
+            dtype=reward_pred.dtype,
         )
-        
+        for b in range(batch_size):
+            m = self._metric_idx(metric_types[b])
+            fv = feature_vector[b : b + 1]
+            inv = self.inverse_lambdas[m]
+            uncertainty[b : b + 1] = torch.einsum("bi,aij,bj->ba", fv, inv, fv)
+
         ucb = reward_pred + beta * torch.sqrt(uncertainty + EPS)
         return reward_pred, ucb
 
@@ -252,12 +294,19 @@ class NeuralUCBAgent(nn.Module):
 
         return a_idx * self.num_b_values + b_idx
 
-    def _update_inverse_covariances(self, feature_vectors: torch.Tensor, action_idx: torch.Tensor):
+    def _update_inverse_covariances(
+        self,
+        feature_vectors: torch.Tensor,
+        action_idx: torch.Tensor,
+        metric_type: str,
+    ):
         """
         Update inverse covariance matrices using Sherman-Morrison formula.
 
         Note: this is primarily used during training to update per-action uncertainty.
         """
+        m = self._metric_idx(metric_type)
+
         if action_idx.ndim == 0:
             action_idx = action_idx.unsqueeze(0)
         action_indices = action_idx.flatten()
@@ -268,7 +317,7 @@ class NeuralUCBAgent(nn.Module):
             mask = action_indices == act_idx_val
             z_batch = feature_vectors[mask]  # (K, feature_dim)
 
-            lambda_inv = self.inverse_lambdas[act_idx]  # (feature_dim, feature_dim)
+            lambda_inv = self.inverse_lambdas[m, act_idx].clone()
             for z in z_batch:
                 z = z.unsqueeze(0)  # (1, feature_dim)
                 z_lambda_z = torch.mm(torch.mm(z, lambda_inv), z.t()).item()
@@ -278,9 +327,9 @@ class NeuralUCBAgent(nn.Module):
 
                 update_term = torch.mm(lambda_inv_z, z_lambda_inv) / (1.0 + z_lambda_z + EPS)
                 lambda_inv = lambda_inv - update_term
-                self.action_counts[act_idx] += 1
+                self.action_counts[m, act_idx] += 1
 
-            self.inverse_lambdas[act_idx] = lambda_inv
+            self.inverse_lambdas[m, act_idx] = lambda_inv
 
 
 __all__ = ["NeuralUCBAgent"]

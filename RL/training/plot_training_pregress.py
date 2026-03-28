@@ -129,7 +129,7 @@ def plot_training_progress(
         linewidth=3,
         markersize=6,
         color="#4C72B0",
-        label="Best1 Avg Reward (epoch average)",
+        label="Best1 Avg Reward",
         zorder=5,
     )
     ax_reward.plot(
@@ -139,17 +139,7 @@ def plot_training_progress(
         linewidth=3,
         markersize=6,
         color="#DD8452",
-        label="Best2 Avg Reward (epoch average)",
-        zorder=5,
-    )
-    ax_reward.plot(
-        x_epoch_w1,
-        y_worst1_reward_s,
-        marker="o",
-        linewidth=3,
-        markersize=6,
-        color="#55A868",
-        label="Worst1 Avg Reward (epoch average)",
+        label="Best2 Avg Reward",
         zorder=5,
     )
     ax_reward.plot(
@@ -159,7 +149,17 @@ def plot_training_progress(
         linewidth=3,
         markersize=6,
         color="#C44E52",
-        label="Worst2 Avg Reward (epoch average)",
+        label="Worst2 Avg Reward",
+        zorder=5,
+    )
+    ax_reward.plot(
+        x_epoch_w1,
+        y_worst1_reward_s,
+        marker="o",
+        linewidth=3,
+        markersize=6,
+        color="#55A868",
+        label="Worst1 Avg Reward",
         zorder=5,
     )
 
@@ -177,7 +177,7 @@ def plot_training_progress(
         linewidth=3,
         markersize=6,
         color="#8172B3",
-        label="Total Loss (epoch average)",
+        label="Total Loss",
         zorder=5,
     )
     ax_loss.set_title("Loss Curve", pad=20)

@@ -230,7 +230,7 @@ class A2SFTrainer:
                     float(selected_predict.view(-1)[0].detach().item()),
                 )
             )
-            feature_action_pairs.append((feature_vector.detach(), action_idx))
+            feature_action_pairs.append((feature_vector.detach(), action_idx, str(metric_type)))
 
         mean_mse = torch.stack(prediction_mse_losses).mean()
         prediction_loss = torch.sqrt(mean_mse + 1e-8)
@@ -254,8 +254,8 @@ class A2SFTrainer:
         optimizer.step()
 
         with torch.no_grad():
-            for feature_vector, action_idx in feature_action_pairs:
-                self.agent._update_inverse_covariances(feature_vector, action_idx)
+            for feature_vector, action_idx, mt in feature_action_pairs:
+                self.agent._update_inverse_covariances(feature_vector, action_idx, mt)
 
         return {
             "prediction_loss": float(prediction_loss.item()),
@@ -487,8 +487,8 @@ class A2SFTrainer:
         print(f"Iteration {iteration} (COMMON):")
         print(f"  Best1 Avg Reward:  {best_avg_reward:.4f}")
         print(f"  Best2 Avg Reward:  {best2_avg_reward:.4f}")
-        print(f"  Worst1 Avg Reward: {worst1_avg_reward:.4f}")
         print(f"  Worst2 Avg Reward: {worst2_avg_reward:.4f}")
+        print(f"  Worst1 Avg Reward: {worst1_avg_reward:.4f}")
         print(f"  Prediction Loss:   {prediction_loss:.4f}")
         print(f"  L2 Loss:           {l2_loss:.4f}")
         print(f"  Total Loss:        {total_loss:.4f}")
@@ -578,7 +578,7 @@ class A2SFTrainer:
             "training_config": self.training_config,
         }
         checkpoint_data["scheduler_state_dict"] = self.scheduler.state_dict()
-        torch.save(checkpoint_data, checkpoint_path)
+        # torch.save(checkpoint_data, checkpoint_path)
 
         print(f"Saved checkpoint: {checkpoint_path}")
 
