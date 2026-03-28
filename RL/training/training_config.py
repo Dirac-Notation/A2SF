@@ -13,10 +13,10 @@ class TrainingConfig:
     lr: float = 1e-1
     ucb_beta_max: float = 1.0
     ucb_beta_min: float = 0.1
-    l2_coef: float = 1e-5
+    l2_coef: float = 1e-6
 
     # ----- Training configuration -----
-    epochs: int = 50
+    epochs: int = 500
     episodes_per_update: int = 4
 
     # ----- Reproducibility / IO -----
