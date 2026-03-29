@@ -23,6 +23,8 @@ class TrainingConfig:
     seed: int = 42
     save_dir: str = "runs/a2sf_rl"
     resume: Optional[str] = None
+    # 0이면 에폭 중간 체크포인트를 저장하지 않는다. 최종 저장은 run.py에서 policy_final.pt로 수행.
+    checkpoint_every_epochs: int = 100
 
     # ----- Dataset paths (fixed splits) -----
     train_data_path: str = "RL/training/256_augmented/training_data.jsonl"
@@ -42,6 +44,12 @@ class TrainingConfig:
         parser.add_argument("--ucb_beta_min", type=float, default=default_cfg.ucb_beta_min)
         parser.add_argument("--l2_coef", type=float, default=default_cfg.l2_coef)
         parser.add_argument("--seed", type=int, default=default_cfg.seed)
+        parser.add_argument(
+            "--checkpoint_every_epochs",
+            type=int,
+            default=default_cfg.checkpoint_every_epochs,
+            help="N 에폭마다 policy_epoch_{N}.pt 저장. 0이면 에폭 중 저장 안 함.",
+        )
 
         args = parser.parse_args(argv)
         return cls(
@@ -55,5 +63,6 @@ class TrainingConfig:
             save_dir=args.save_dir,
             resume=args.resume,
             train_data_path=args.train_data_path,
+            checkpoint_every_epochs=args.checkpoint_every_epochs,
         )
 

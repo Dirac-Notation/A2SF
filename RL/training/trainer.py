@@ -435,7 +435,9 @@ class A2SFTrainer:
             self.scheduler.step()
 
             last_iter = max(0, global_iteration - 1)
-            self._save_checkpoint(last_iter)
+            ce = int(getattr(self.training_config, "checkpoint_every_epochs", 100) or 0)
+            if ce > 0 and (epoch + 1) % ce == 0:
+                self._save_checkpoint(iteration=last_iter, epoch=epoch + 1)
             self._plot_training_progress()
 
         return max(0, global_iteration - 1)
@@ -568,18 +570,19 @@ class A2SFTrainer:
         ) as f:
             f.write(json.dumps(detail_data) + "\n")
 
-    def _save_checkpoint(self, iteration: int):
-        checkpoint_path = os.path.join(self.training_config.save_dir, f"policy_{iteration}.pt")
+    def _save_checkpoint(self, iteration: int, epoch: int):
+        checkpoint_path = os.path.join(self.training_config.save_dir, f"policy_epoch_{epoch}.pt")
         checkpoint_data = {
             "iteration": iteration,
+            "epoch": epoch,
             "agent_state_dict": self.agent.state_dict(),
+            "attention_encoder_state_dict": {},
             "optimizer_state_dict": self.optimizer.state_dict(),
             "model_config": self.model_config,
             "training_config": self.training_config,
+            "scheduler_state_dict": self.scheduler.state_dict(),
         }
-        checkpoint_data["scheduler_state_dict"] = self.scheduler.state_dict()
-        # torch.save(checkpoint_data, checkpoint_path)
-
+        torch.save(checkpoint_data, checkpoint_path)
         print(f"Saved checkpoint: {checkpoint_path}")
 
     def load_checkpoint(self, checkpoint_path: str):
