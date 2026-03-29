@@ -16,7 +16,7 @@ class TrainingConfig:
     l2_coef: float = 1e-6
 
     # ----- Training configuration -----
-    epochs: int = 500
+    epochs: int = 1000
     episodes_per_update: int = 4
 
     # ----- Reproducibility / IO -----
@@ -25,7 +25,7 @@ class TrainingConfig:
     resume: Optional[str] = None
 
     # ----- Dataset paths (fixed splits) -----
-    train_data_path: str = "RL/training/data/training_data.jsonl"
+    train_data_path: str = "RL/training/256_augmented/training_data.jsonl"
 
     @classmethod
     def from_args(cls, argv=None) -> "TrainingConfig":

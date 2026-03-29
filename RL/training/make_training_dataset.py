@@ -96,14 +96,21 @@ MIDDLE_TRIM = 128
 MIN_PROMPT_LEN_FOR_MIDDLE_SHUFFLE = 512
 
 
-def augment_prompt_middle_quarter_shuffle_variants(prompt: str, rng: random.Random) -> List[str]:
+def augment_prompt_middle_quarter_shuffle_variants(
+    prompt: str,
+    rng: random.Random,
+    num_augment: int = 4,
+) -> List[str]:
     """
-    `prompt[128:-128]` 구간을 4등분한 뒤, 청크 1~4가 모두 한 번씩 쓰이도록 순서를 바꾼 프롬프트 4개를 만든다.
-    - 1개: 원래 순서 (1→2→3→4)
-    - 3개: 서로 다른 랜덤 순열(가능하면 중복 없이)
+    `prompt[128:-128]` 구간을 4등분한 뒤, 청크 1~4가 모두 한 번씩 쓰이도록 순서를 바꾼 프롬프트들을 만든다.
+    - `num_augment == 1`: 원래 순서 (1→2→3→4)만.
+    - `num_augment >= 2`: 위 1개 + 랜덤 순열을 `num_augment - 1`개 추가(가능하면 서로 다른 순열).
     앞 128자·뒤 128자는 그대로 둔다.
     `len(prompt) <= MIN_PROMPT_LEN_FOR_MIDDLE_SHUFFLE`이면 셔플을 하지 않고 `[prompt]` 한 개만 반환한다.
     """
+    if num_augment < 1:
+        raise ValueError(f"num_augment must be >= 1, got {num_augment}")
+
     if len(prompt) <= MIN_PROMPT_LEN_FOR_MIDDLE_SHUFFLE:
         return [prompt]
 
@@ -127,8 +134,11 @@ def augment_prompt_middle_quarter_shuffle_variants(prompt: str, rng: random.Rand
 
     identity = (0, 1, 2, 3)
     orders: List[Tuple[int, ...]] = [identity]
+    if num_augment == 1:
+        return [assemble(list(identity))]
+
     seen = {identity}
-    for _ in range(3):
+    for _ in range(num_augment - 1):
         for _attempt in range(500):
             perm = [0, 1, 2, 3]
             rng.shuffle(perm)
@@ -138,12 +148,11 @@ def augment_prompt_middle_quarter_shuffle_variants(prompt: str, rng: random.Rand
                 orders.append(t)
                 break
         else:
-            # 극히 드물게 3개를 못 채우면 남은 슬롯은 임의 순열로 채움
             perm = [0, 1, 2, 3]
             rng.shuffle(perm)
             orders.append(tuple(perm))
 
-    return [assemble(list(o)) for o in orders[:4]]
+    return [assemble(list(o)) for o in orders[:num_augment]]
 
 
 def truncate_middle_by_max_length(prompt: str, tokenizer, max_input_length: int) -> str:
@@ -613,7 +622,11 @@ def main(args):
     expanded: List[Dict[str, Any]] = []
     for idx, sample in enumerate(train_samples):
         rng = random.Random(stable_seed_from_name(args.seed, f"middle_shuffle_{idx}"))
-        variants = augment_prompt_middle_quarter_shuffle_variants(sample["input_prompt"], rng)
+        variants = augment_prompt_middle_quarter_shuffle_variants(
+            sample["input_prompt"],
+            rng,
+            num_augment=int(args.num_augment),
+        )
         for aug_i, p in enumerate(variants):
             row = dict(sample)
             row["input_prompt"] = p
@@ -669,5 +682,11 @@ if __name__ == "__main__":
     parser.add_argument("--max_input_length", type=int, default=None)
     parser.add_argument("--token_budget", type=int, default=1024)
     parser.add_argument("--gpus_per_model", type=int, default=1)
+    parser.add_argument(
+        "--num_augment",
+        type=int,
+        default=4,
+        help="중간 4등분 셔플 변형 개수. 1이면 순서 1234만, 2 이상이면 그만큼(1+랜덤) 생성.",
+    )
     main(parser.parse_args())
 
