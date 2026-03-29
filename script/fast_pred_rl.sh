@@ -2,33 +2,34 @@
 
 trap "kill 0" EXIT
 
-budget=128
+budget=1024
 model=llama3
-rl_checkpoint=policy_3477.pt
+rl_checkpoint=policy_final.pt
 
-# GPU 0: 가장 무거운 작업 (약 48분)
-CUDA_VISIBLE_DEVICES=0 python longbench_RL.py --model $model --budget $budget --datasets gov_report --rl_checkpoint $rl_checkpoint &
+# Bin packing 기준 8 GPU 그룹 (목표 ~67–68분/그룹, narrativeqa 단독 병목)
+# Group 1: 병목 (~106분)
+CUDA_VISIBLE_DEVICES=0 python longbench_RL.py --model $model --budget $budget --datasets narrativeqa --rl_checkpoint $rl_checkpoint &
 
-# GPU 1: 두 번째로 무거운 작업 (약 44분)
-CUDA_VISIBLE_DEVICES=1 python longbench_RL.py --model $model --budget $budget --datasets qmsum --rl_checkpoint $rl_checkpoint &
+# Group 2 (~70분)
+CUDA_VISIBLE_DEVICES=1 python longbench_RL.py --model $model --budget $budget --datasets repobench-p --rl_checkpoint $rl_checkpoint &
 
-# GPU 2: 세 번째로 무거운 작업 (약 42분)
-CUDA_VISIBLE_DEVICES=2 python longbench_RL.py --model $model --budget $budget --datasets repobench-p --rl_checkpoint $rl_checkpoint &
+# Group 3 (~69분)
+CUDA_VISIBLE_DEVICES=2 python longbench_RL.py --model $model --budget $budget --datasets qmsum 2wikimqa qasper --rl_checkpoint $rl_checkpoint &
 
-# GPU 3: 중량급 + 경량급 조합 (약 45.7분)
-CUDA_VISIBLE_DEVICES=3 python longbench_RL.py --model $model --budget $budget --datasets multi_news multifieldqa_en --rl_checkpoint $rl_checkpoint &
+# Group 4 (~68분)
+CUDA_VISIBLE_DEVICES=3 python longbench_RL.py --model $model --budget $budget --datasets gov_report trec multifieldqa_en --rl_checkpoint $rl_checkpoint &
 
-# GPU 4: 중급 3개 조합 (약 49.6분)
-CUDA_VISIBLE_DEVICES=4 python longbench_RL.py --model $model --budget $budget --datasets lcc hotpotqa 2wikimqa --rl_checkpoint $rl_checkpoint &
+# Group 5 (~67분)
+CUDA_VISIBLE_DEVICES=4 python longbench_RL.py --model $model --budget $budget --datasets passage_count hotpotqa --rl_checkpoint $rl_checkpoint &
 
-# GPU 5: 중급 3개 조합 (약 50.9분)
-CUDA_VISIBLE_DEVICES=5 python longbench_RL.py --model $model --budget $budget --datasets samsum narrativeqa triviaqa --rl_checkpoint $rl_checkpoint &
+# Group 6 (~66분)
+CUDA_VISIBLE_DEVICES=5 python longbench_RL.py --model $model --budget $budget --datasets musique triviaqa --rl_checkpoint $rl_checkpoint &
 
-# GPU 6: 중급 3개 조합 (약 50.5분)
-CUDA_VISIBLE_DEVICES=6 python longbench_RL.py --model $model --budget $budget --datasets musique passage_retrieval_en trec --rl_checkpoint $rl_checkpoint &
+# Group 7 (~60분)
+CUDA_VISIBLE_DEVICES=6 python longbench_RL.py --model $model --budget $budget --datasets multi_news passage_retrieval_en --rl_checkpoint $rl_checkpoint &
 
-# GPU 7: 중급 2개 조합 (약 33.4분)
-CUDA_VISIBLE_DEVICES=7 python longbench_RL.py --model $model --budget $budget --datasets passage_count qasper --rl_checkpoint $rl_checkpoint &
+# Group 8 (~36분, 잔여·경량)
+CUDA_VISIBLE_DEVICES=7 python longbench_RL.py --model $model --budget $budget --datasets samsum lcc --rl_checkpoint $rl_checkpoint &
 
 # 모든 백그라운드 작업이 끝날 때까지 기다립니다.
 wait
