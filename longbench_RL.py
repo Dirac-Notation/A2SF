@@ -14,7 +14,7 @@ from longbench_eval import dataset2metric
 
 def parse_args(args=None):
     parser = argparse.ArgumentParser(description="LongBench RL evaluation (multi-GPU, multi-process)")
-    parser.add_argument("--model", type=str, required=True, choices=["llama", "llama2", "llama3", "opt"])
+    parser.add_argument("--model", type=str, required=True, choices=["llama3-8b", "llama3-1b", "qwen2"])
     parser.add_argument("--budget", type=int, default=100)
     parser.add_argument("--rl_checkpoint", type=str, required=True, help="Path to RL model checkpoint (.pt file)")
     parser.add_argument("--gpus_per_model", type=int, default=1, help="한 모델 인스턴스가 사용할 GPU 개수 (연속된 ID 그룹).")

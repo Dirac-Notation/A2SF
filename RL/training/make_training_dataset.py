@@ -493,6 +493,7 @@ def _offline_generate_for_sample(
     a_values: torch.Tensor,
     b_values: torch.Tensor,
     token_budget: int,
+    action_batch_size: int,
 ) -> List[str]:
     dataset_name = str(sample.get("dataset") or "")
     prompt = _format_prompt_like_longbench(
@@ -510,20 +511,27 @@ def _offline_generate_for_sample(
         generation_length=int(sample.get("generation_length", 64)),
         context_length=context_length,
     )
+    action_batch_size = max(1, int(action_batch_size))
     pred_texts: List[str] = []
-    for idx in range(int(a_values.numel())):
-        a = a_values[idx : idx + 1]
-        b = b_values[idx : idx + 1]
+    num_actions = int(a_values.numel())
+    for start in range(0, num_actions, action_batch_size):
+        end = min(start + action_batch_size, num_actions)
+        a = a_values[start:end]
+        b = b_values[start:end]
+        batch_n = int(a.numel())
+        input_ids_batch = input_ids.repeat(batch_n, 1)
+        attention_mask_batch = attention_mask.repeat(batch_n, 1)
         model.init_cache(_build_compression_config(a, b, token_budget))
         with torch.inference_mode():
             output_ids = model.generate(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
+                input_ids=input_ids_batch,
+                attention_mask=attention_mask_batch,
                 **generation_kwargs,
             )
-        pred_texts.append(
-            tokenizer.decode(output_ids[0, context_length:], skip_special_tokens=True)
-        )
+        for i in range(batch_n):
+            pred_texts.append(
+                tokenizer.decode(output_ids[i, context_length:], skip_special_tokens=True)
+            )
     return pred_texts
 
 
@@ -536,6 +544,7 @@ def _offline_worker(
     a_values: List[float],
     b_values: List[float],
     result_queue: mp.Queue,
+    action_batch_size: int,
 ) -> None:
     os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpu_group)
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -560,6 +569,7 @@ def _offline_worker(
                 a_values=a_tensor,
                 b_values=b_tensor,
                 token_budget=token_budget,
+                action_batch_size=action_batch_size,
             )
             result_queue.put((int(sample["sample_id"]), pred_texts))
     except Exception as exc:  # pragma: no cover
@@ -572,6 +582,7 @@ def build_offline_action_cache(
     token_budgets: List[int],
     visible_gpu_count: int,
     gpus_per_model: int,
+    action_batch_size: int,
 ) -> None:
     if visible_gpu_count <= 0:
         raise ValueError("visible_gpu_count must be >= 1")
@@ -635,6 +646,7 @@ def build_offline_action_cache(
                     cart_a,
                     cart_b,
                     result_queue,
+                    action_batch_size,
                 ),
             )
             p.start()
@@ -743,6 +755,7 @@ def main(args):
         token_budgets=DEFAULT_TOKEN_BUDGETS,
         visible_gpu_count=visible_gpu_count,
         gpus_per_model=int(args.gpus_per_model),
+        action_batch_size=int(args.action_batch_size),
     )
 
     write_jsonl(args.output_file, train_samples, "train")
@@ -770,14 +783,10 @@ if __name__ == "__main__":
     parser.add_argument("--sample_ratio", type=float, default=DEFAULT_SAMPLE_RATIO, help="Train 비율 (기본 0.10)")
     parser.add_argument("--num_length_bins", type=int, default=DEFAULT_LENGTH_BINS)
     parser.add_argument("--seed", type=int, default=DEFAULT_SPLIT_SEED)
-    parser.add_argument("--model", type=str, default="llama3", choices=["llama", "llama2", "llama3", "opt"])
+    parser.add_argument("--model", type=str, default="llama3-1b", choices=["llama3-8b", "llama3-1b", "qwen2"])
     parser.add_argument("--max_input_length", type=int, default=None)
     parser.add_argument("--gpus_per_model", type=int, default=1)
-    parser.add_argument(
-        "--num_augment",
-        type=int,
-        default=4,
-        help="중간 4등분 셔플 변형 개수. 1이면 순서 1234만, 2 이상이면 그만큼(1+랜덤) 생성.",
-    )
+    parser.add_argument("--action_batch_size", type=int, default=1, help="액션 생성 시 batch 크기(기본 1)")
+    parser.add_argument("--num_augment", type=int, default=4, help="중간 4등분 셔플 변형 개수. 1이면 순서 1234만, 2 이상이면 그만큼(1+랜덤) 생성.")
     main(parser.parse_args())
 
