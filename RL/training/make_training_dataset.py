@@ -598,6 +598,11 @@ def build_offline_action_cache(
         gpu_groups.append(all_gpu_ids[start : start + gpus_per_model])
 
     token_budgets = [int(tb) for tb in token_budgets]
+    total_samples = len(samples)
+    total_budgets = len(token_budgets)
+    total_sample_budget_units = total_samples * total_budgets
+    total_action_units = total_sample_budget_units * action_size
+    completed_sample_budget_units = 0
     for sample in samples:
         sample["token_budgets"] = token_budgets
         sample["action_space"] = {
@@ -653,13 +658,30 @@ def build_offline_action_cache(
             rate = done / elapsed
             eta_sec = int((total - done) / rate) if rate > 0 else 0
             pct = (100.0 * done / total) if total > 0 else 100.0
+            global_done_sample_budget = completed_sample_budget_units + done
+            global_done_actions = global_done_sample_budget * action_size
+            global_pct_sample_budget = (
+                (100.0 * global_done_sample_budget / total_sample_budget_units)
+                if total_sample_budget_units > 0
+                else 100.0
+            )
+            global_pct_actions = (
+                (100.0 * global_done_actions / total_action_units)
+                if total_action_units > 0
+                else 100.0
+            )
             print(
-                f"[offline-cache][budget={token_budget}] progress: {done}/{total} ({pct:.1f}%) | "
-                f"{rate:.2f} samples/s | ETA {eta_sec}s"
+                f"[offline-cache][budget={token_budget}] budget-progress: "
+                f"{done}/{total} ({pct:.1f}%) | {rate:.2f} samples/s | ETA {eta_sec}s | "
+                f"global sample×budget: {global_done_sample_budget}/{total_sample_budget_units} "
+                f"({global_pct_sample_budget:.1f}%) | "
+                f"global sample×budget×action: {global_done_actions}/{total_action_units} "
+                f"({global_pct_actions:.1f}%)"
             )
 
         for p in processes:
             p.join()
+        completed_sample_budget_units += total
 
         budget_key = str(token_budget)
         for sample in samples:
