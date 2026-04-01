@@ -550,7 +550,6 @@ def _offline_worker(
     worker_id: int,
     gpu_group: List[int],
     model_name: str,
-    token_budget: int,
     task_queue: mp.Queue,
     a_values: List[float],
     b_values: List[float],
@@ -569,9 +568,10 @@ def _offline_worker(
     b_tensor = torch.tensor(b_values, dtype=torch.float32, device=model.device)
     try:
         while True:
-            sample = task_queue.get()
-            if sample is None:
+            task = task_queue.get()
+            if task is None:
                 break
+            token_budget, sample = task
             pred_texts = _offline_generate_for_sample(
                 model=model,
                 tokenizer=tokenizer,
@@ -579,10 +579,10 @@ def _offline_worker(
                 model_name=model_name,
                 a_values=a_tensor,
                 b_values=b_tensor,
-                token_budget=token_budget,
+                token_budget=int(token_budget),
                 action_batch_size=action_batch_size,
             )
-            result_queue.put((int(sample["sample_id"]), pred_texts))
+            result_queue.put((int(token_budget), int(sample["sample_id"]), pred_texts))
     except Exception as exc:  # pragma: no cover
         result_queue.put(("__error__", f"worker {worker_id} gpus={gpu_group}: {exc}"))
 
@@ -641,18 +641,21 @@ def build_offline_action_cache(
         sample["action_scores_by_budget"] = {}
         sample["metric_type"] = resolve_metric_type_for_dataset(sample.get("dataset"))
 
+    pending_budgets: List[int] = []
     for token_budget in token_budgets:
         budget_path = _budget_cache_path(token_budget)
         if os.path.exists(budget_path):
             print(f"[offline-cache] skip existing budget={token_budget}: {budget_path}")
             completed_sample_budget_units += total_samples
             continue
+        pending_budgets.append(int(token_budget))
 
-        print(f"[offline-cache] building budget={token_budget}")
+    if pending_budgets:
         ctx = mp.get_context("spawn")
         task_queue = ctx.Queue()
-        for sample in samples:
-            task_queue.put(sample)
+        for token_budget in pending_budgets:
+            for sample in samples:
+                task_queue.put((int(token_budget), sample))
         for _ in range(len(gpu_groups)):
             task_queue.put(None)
         result_queue = ctx.Queue()
@@ -664,7 +667,6 @@ def build_offline_action_cache(
                     worker_id,
                     gpu_group,
                     model_name,
-                    token_budget,
                     task_queue,
                     cart_a,
                     cart_b,
@@ -675,17 +677,23 @@ def build_offline_action_cache(
             p.start()
             processes.append(p)
 
-        remaining = len(samples)
-        total = len(samples)
+        total = len(samples) * len(pending_budgets)
+        remaining = total
         done = 0
         started_at = time.time()
-        pred_by_sample: Dict[int, List[str]] = {}
+        done_by_budget: Dict[int, int] = {int(tb): 0 for tb in pending_budgets}
+        pred_by_budget_sample: Dict[int, Dict[int, List[str]]] = {
+            int(tb): {} for tb in pending_budgets
+        }
         while remaining > 0:
             item = result_queue.get()
             if item[0] == "__error__":
                 raise RuntimeError(item[1])
-            sample_id, preds = item
-            pred_by_sample[int(sample_id)] = preds
+            token_budget, sample_id, preds = item
+            token_budget = int(token_budget)
+            sample_id = int(sample_id)
+            pred_by_budget_sample[token_budget][sample_id] = preds
+            done_by_budget[token_budget] += 1
             remaining -= 1
             done += 1
 
@@ -706,8 +714,8 @@ def build_offline_action_cache(
                 else 100.0
             )
             print(
-                f"[offline-cache][budget={token_budget}] budget-progress: "
-                f"{done}/{total} ({pct:.1f}%) | {rate:.2f} samples/s | ETA {eta_sec}s | "
+                f"[offline-cache] all-budgets-progress: "
+                f"{done}/{total} ({pct:.1f}%) | {rate:.2f} sample-budget/s | ETA {eta_sec}s | "
                 f"global sample×budget: {global_done_sample_budget}/{total_sample_budget_units} "
                 f"({global_pct_sample_budget:.1f}%) | "
                 f"global sample×budget×action: {global_done_actions}/{total_action_units} "
@@ -718,24 +726,25 @@ def build_offline_action_cache(
             p.join()
         completed_sample_budget_units += total
 
-        with open(budget_path, "w", encoding="utf-8") as f:
-            for sample in samples:
-                sid = int(sample["sample_id"])
-                preds = pred_by_sample[sid]
-                answers = sample.get("answers") or []
-                all_classes = sample.get("all_classes") or []
-                mt = str(sample["metric_type"])
-                payload = dict(sample)
-                payload["token_budget"] = int(token_budget)
-                payload["action_space"] = {
-                    "a_values": cart_a,
-                    "b_values": cart_b,
-                }
-                payload["action_outputs"] = preds
-                payload["action_scores"] = compute_action_scores(preds, mt, answers, all_classes)
-                f.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
-
-        print(f"[offline-cache] saved budget file: {budget_path}")
+        for token_budget in pending_budgets:
+            budget_path = _budget_cache_path(token_budget)
+            with open(budget_path, "w", encoding="utf-8") as f:
+                for sample in samples:
+                    sid = int(sample["sample_id"])
+                    preds = pred_by_budget_sample[int(token_budget)][sid]
+                    answers = sample.get("answers") or []
+                    all_classes = sample.get("all_classes") or []
+                    mt = str(sample["metric_type"])
+                    payload = dict(sample)
+                    payload["token_budget"] = int(token_budget)
+                    payload["action_space"] = {
+                        "a_values": cart_a,
+                        "b_values": cart_b,
+                    }
+                    payload["action_outputs"] = preds
+                    payload["action_scores"] = compute_action_scores(preds, mt, answers, all_classes)
+                    f.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
+            print(f"[offline-cache] saved budget file: {budget_path}")
 
     # Merge per-budget cache files into one unified training jsonl.
     merged_by_sample_id: Dict[int, Dict[str, Any]] = {}
