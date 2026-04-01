@@ -15,13 +15,14 @@ import numpy as np
 
 def _load_training_progress(
     jsonl_path: str,
-) -> Tuple[List[int], List[float], List[float], List[float], List[float], List[float]]:
+) -> Tuple[List[int], List[float], List[float], List[float], List[float], List[float], Optional[float]]:
     iterations: List[int] = []
     best1_avg_rewards: List[float] = []
     best2_avg_rewards: List[float] = []
     worst1_avg_rewards: List[float] = []
     worst2_avg_rewards: List[float] = []
     total_losses: List[float] = []
+    real_best_reference_avg: Optional[float] = None
 
     with open(jsonl_path, "r", encoding="utf-8") as f:
         for line in f:
@@ -34,6 +35,8 @@ def _load_training_progress(
             worst1_avg_rewards.append(float(row["worst1_avg_reward"]))
             worst2_avg_rewards.append(float(row["worst2_avg_reward"]))
             total_losses.append(float(row["total_loss"]))
+            if real_best_reference_avg is None and "real_best_reference_avg_reward" in row:
+                real_best_reference_avg = float(row["real_best_reference_avg_reward"])
 
     return (
         iterations,
@@ -42,7 +45,23 @@ def _load_training_progress(
         worst1_avg_rewards,
         worst2_avg_rewards,
         total_losses,
+        real_best_reference_avg,
     )
+
+
+def _load_epoch_mrr(jsonl_path: str) -> Tuple[List[int], List[float]]:
+    epochs: List[int] = []
+    mrr_values: List[float] = []
+
+    with open(jsonl_path, "r", encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            epochs.append(int(row["epoch"]))
+            mrr_values.append(float(row["mrr"]))
+
+    return epochs, mrr_values
 
 
 def _smooth_chunk(vals: np.ndarray, w: int) -> Tuple[np.ndarray, np.ndarray]:
@@ -62,6 +81,7 @@ def plot_training_progress(
     epochs: Optional[int] = None,
 ) -> None:
     train_file = os.path.join(save_dir, "training_progress.jsonl")
+    epoch_metric_file = os.path.join(save_dir, "training_epoch_metrics.jsonl")
 
     if output_path is None:
         output_path = os.path.join(save_dir, "training_progress.png")
@@ -76,6 +96,7 @@ def plot_training_progress(
         worst1_avg_rewards,
         worst2_avg_rewards,
         total_losses,
+        real_best_reference_avg,
     ) = _load_training_progress(train_file)
     if len(iterations) == 0:
         print("[plot] training_progress.jsonl is empty")
@@ -93,6 +114,11 @@ def plot_training_progress(
     y_worst1_reward = np.array(worst1_avg_rewards, dtype=np.float64)
     y_worst2_reward = np.array(worst2_avg_rewards, dtype=np.float64)
     y_loss = np.array(total_losses, dtype=np.float64)
+    has_epoch_mrr = os.path.exists(epoch_metric_file)
+    mrr_epochs: List[int] = []
+    mrr_values: List[float] = []
+    if has_epoch_mrr:
+        mrr_epochs, mrr_values = _load_epoch_mrr(epoch_metric_file)
 
     # matplotlib은 플로팅이 필요할 때만 import
     import matplotlib.pyplot as plt
@@ -120,7 +146,9 @@ def plot_training_progress(
     x_epoch_w2, y_worst2_reward_s = _smooth_chunk(y_worst2_reward, window_size)
     _, y_loss_s = _smooth_chunk(y_loss, window_size)
 
-    fig, (ax_reward, ax_loss) = plt.subplots(2, 1, constrained_layout=True, figsize=(14, 12))
+    fig, (ax_reward, ax_loss, ax_mrr) = plt.subplots(
+        3, 1, constrained_layout=True, figsize=(14, 16)
+    )
 
     ax_reward.plot(
         x_epoch,
@@ -162,6 +190,15 @@ def plot_training_progress(
         label="Worst1 Avg Reward",
         zorder=5,
     )
+    if real_best_reference_avg is not None:
+        ax_reward.axhline(
+            y=float(real_best_reference_avg),
+            linestyle="--",
+            linewidth=2.5,
+            color="#222222",
+            label="RealBest Avg (Global)",
+            zorder=4,
+        )
 
     ax_reward.set_title("Reward Curves (Best/Worst)", pad=20)
     ax_reward.set_xlabel("Epoch")
@@ -186,6 +223,35 @@ def plot_training_progress(
     ax_loss.grid(axis="y", linestyle="--", linewidth=1.0, alpha=0.5)
     ax_loss.legend(frameon=False, loc="best")
     ax_loss.margins(x=0.02)
+
+    if len(mrr_epochs) > 0:
+        ax_mrr.plot(
+            np.array(mrr_epochs, dtype=np.int64),
+            np.array(mrr_values, dtype=np.float64),
+            marker="o",
+            linewidth=3,
+            markersize=6,
+            color="#64B5CD",
+            label="Epoch MRR",
+            zorder=5,
+        )
+        ax_mrr.legend(frameon=False, loc="best")
+    else:
+        ax_mrr.text(
+            0.5,
+            0.5,
+            "No epoch MRR data yet",
+            horizontalalignment="center",
+            verticalalignment="center",
+            transform=ax_mrr.transAxes,
+            fontsize=18,
+            alpha=0.8,
+        )
+    ax_mrr.set_title("MRR Curve", pad=20)
+    ax_mrr.set_xlabel("Epoch")
+    ax_mrr.set_ylabel("MRR")
+    ax_mrr.grid(axis="y", linestyle="--", linewidth=1.0, alpha=0.5)
+    ax_mrr.margins(x=0.02)
 
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)

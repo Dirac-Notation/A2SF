@@ -51,7 +51,7 @@ class AttentionEncoder(nn.Module):
     Metadata encoder for RL state construction.
 
     Returns a feature vector:
-      [ normalized_sequence_length, per-head entropy, per-head max-position ].
+      [ normalized_sequence_length, normalized_token_budget, per-head entropy, per-head max-position ].
     where per-head max-position is normalized by sequence length.
 
     Important: Do NOT register `target_model` or any of its submodules as children of this
@@ -94,8 +94,8 @@ class AttentionEncoder(nn.Module):
         object.__setattr__(self, "embed_tokens", self.target_model.model.embed_tokens)
 
         if self.output_dim <= 0:
-            # seq_len scalar + [entropy,max_pos] per head
-            self.output_dim = 1 + (2 * self.num_heads)
+            # [seq_len, token_budget] scalars + [entropy,max_pos] per head
+            self.output_dim = 2 + (2 * self.num_heads)
 
     @property
     def _encode_device(self) -> torch.device:
@@ -161,8 +161,8 @@ class AttentionEncoder(nn.Module):
         task_type: Optional[str] = None,
         dataset: Optional[str] = None,
     ) -> torch.Tensor:
-        # generation_length / token_budget / task_type / dataset are currently kept only for API compatibility.
-        del generation_length, token_budget, task_type, dataset
+        # generation_length / task_type / dataset are currently kept only for API compatibility.
+        del generation_length, task_type, dataset
 
         tokenized = self.target_tokenizer(
             text,
@@ -175,11 +175,13 @@ class AttentionEncoder(nn.Module):
 
         seq_len = int(input_ids.size(1))
         seq_len_feature = min(float(seq_len), self.max_seq_length) / self.max_seq_length
+        token_budget_feature = max(0.0, min(float(token_budget) / 4096.0, 1.0))
         attention_features = self._build_first_layer_attention_features(input_ids)
 
         features = torch.cat(
             [
                 torch.tensor([seq_len_feature], device=enc_dev, dtype=torch.float32),
+                torch.tensor([token_budget_feature], device=enc_dev, dtype=torch.float32),
                 attention_features.to(dtype=torch.float32),
             ],
             dim=-1,

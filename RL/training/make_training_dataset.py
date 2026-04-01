@@ -9,6 +9,7 @@ datasets 쪽을 호출하지 않도록 구성했습니다.
 - 데이터셋별 train: 기본 10% (길이 균형 샘플링)
 - 샘플이 확정된 뒤, 평가(longbench_RL 등)와 동일하게 max_input_length 기준 중간 절단 적용
 - generation_length: config/dataset2maxlen.json (데이터셋별, 평가와 동일 스케일)
+- 각 라인에 `metric_type`, `action_scores`(액션별 채점 결과)를 함께 기록해 학습 시 재계산 없이 사용
 """
 
 import argparse
@@ -35,10 +36,35 @@ if REPO_ROOT not in sys.path:
 
 from utils import CompressionConfig, load_model
 from RL.a2sf_model import ModelConfig
+from longbench_eval import (
+    dataset2metric,
+    qa_f1_score,
+    qa_f1_zh_score,
+    rouge_score,
+    rouge_zh_score,
+    classification_score,
+    retrieval_score,
+    retrieval_zh_score,
+    count_score,
+    code_sim_score,
+)
+
+_METRIC_FN_REGISTRY = {
+    "qa_f1_score": qa_f1_score,
+    "qa_f1_zh_score": qa_f1_zh_score,
+    "rouge_score": rouge_score,
+    "rouge_zh_score": rouge_zh_score,
+    "classification_score": classification_score,
+    "retrieval_score": retrieval_score,
+    "retrieval_zh_score": retrieval_zh_score,
+    "count_score": count_score,
+    "code_sim_score": code_sim_score,
+}
 
 DEFAULT_SPLIT_SEED = 42
 DEFAULT_SAMPLE_RATIO = 0.10
 DEFAULT_LENGTH_BINS = 10
+DEFAULT_TOKEN_BUDGETS = [128, 256, 512, 1024, 2048, 4096]
 
 # RL/training/data_generation/make_training_dataset.py 기준으로 repo root로 이동
 
@@ -52,6 +78,36 @@ DATASET_TO_TASK = {dataset_name: task_name for task_name, datasets in TASK_TO_DA
 
 with open(DATASET2MAXLEN_PATH, "r", encoding="utf-8") as f:
     DATASET_TO_MAXGEN = json.load(f)
+
+
+def resolve_metric_type_for_dataset(dataset_name: str) -> str:
+    """Same mapping as RL training / LongBench eval (`dataset2metric`)."""
+    dataset_key = str(dataset_name or "").strip().lower()
+    fn = dataset2metric.get(dataset_key)
+    if fn is None:
+        return "qa_f1_score"
+    return fn.__name__
+
+
+def compute_action_scores(
+    action_outputs: List[str],
+    metric_type: str,
+    answers: List[str],
+    all_classes: List[str],
+) -> List[float]:
+    """Per-action reward under the dataset metric (max over reference answers)."""
+    metric_fn = _METRIC_FN_REGISTRY.get(str(metric_type), qa_f1_score)
+    scores: List[float] = []
+    for pred_text in action_outputs:
+        reward_val = 0.0
+        if answers:
+            for gt in answers:
+                reward_val = max(
+                    reward_val,
+                    float(metric_fn(str(pred_text), gt, all_classes=all_classes)),
+                )
+        scores.append(float(reward_val))
+    return scores
 
 
 def set_seed(seed: int) -> None:
@@ -513,7 +569,7 @@ def _offline_worker(
 def build_offline_action_cache(
     samples: List[Dict[str, Any]],
     model_name: str,
-    token_budget: int,
+    token_budgets: List[int],
     visible_gpu_count: int,
     gpus_per_model: int,
 ) -> None:
@@ -541,67 +597,81 @@ def build_offline_action_cache(
     for start in range(0, visible_gpu_count, gpus_per_model):
         gpu_groups.append(all_gpu_ids[start : start + gpus_per_model])
 
-    ctx = mp.get_context("spawn")
-
-    task_queue: mp.Queue = ctx.Queue()
+    token_budgets = [int(tb) for tb in token_budgets]
     for sample in samples:
-        task_queue.put(sample)
-    for _ in range(len(gpu_groups)):
-        task_queue.put(None)
-    result_queue: mp.Queue = ctx.Queue()
-    processes: List[mp.Process] = []
-    for worker_id, gpu_group in enumerate(gpu_groups):
-        p = ctx.Process(
-            target=_offline_worker,
-            args=(
-                worker_id,
-                gpu_group,
-                model_name,
-                token_budget,
-                task_queue,
-                cart_a,
-                cart_b,
-                result_queue,
-            ),
-        )
-        p.start()
-        processes.append(p)
-
-    remaining = len(samples)
-    total = len(samples)
-    done = 0
-    started_at = time.time()
-    pred_by_sample: Dict[int, List[str]] = {}
-    while remaining > 0:
-        item = result_queue.get()
-        if item[0] == "__error__":
-            raise RuntimeError(item[1])
-        sample_id, preds = item
-        pred_by_sample[int(sample_id)] = preds
-        remaining -= 1
-        done += 1
-
-        elapsed = max(1e-6, time.time() - started_at)
-        rate = done / elapsed
-        eta_sec = int((total - done) / rate) if rate > 0 else 0
-        pct = (100.0 * done / total) if total > 0 else 100.0
-        print(
-            f"[offline-cache] progress: {done}/{total} ({pct:.1f}%) | "
-            f"{rate:.2f} samples/s | ETA {eta_sec}s"
-        )
-
-    for p in processes:
-        p.join()
-
-    for sample in samples:
-        sid = int(sample["sample_id"])
-        preds = pred_by_sample[sid]
-        sample["token_budget"] = int(token_budget)
+        sample["token_budgets"] = token_budgets
         sample["action_space"] = {
             "a_values": cart_a,
             "b_values": cart_b,
         }
-        sample["action_outputs"] = preds
+        sample["action_outputs_by_budget"] = {}
+        sample["action_scores_by_budget"] = {}
+        sample["metric_type"] = resolve_metric_type_for_dataset(sample.get("dataset"))
+
+    for token_budget in token_budgets:
+        print(f"[offline-cache] building budget={token_budget}")
+        ctx = mp.get_context("spawn")
+        task_queue = ctx.Queue()
+        for sample in samples:
+            task_queue.put(sample)
+        for _ in range(len(gpu_groups)):
+            task_queue.put(None)
+        result_queue = ctx.Queue()
+        processes = []
+        for worker_id, gpu_group in enumerate(gpu_groups):
+            p = ctx.Process(
+                target=_offline_worker,
+                args=(
+                    worker_id,
+                    gpu_group,
+                    model_name,
+                    token_budget,
+                    task_queue,
+                    cart_a,
+                    cart_b,
+                    result_queue,
+                ),
+            )
+            p.start()
+            processes.append(p)
+
+        remaining = len(samples)
+        total = len(samples)
+        done = 0
+        started_at = time.time()
+        pred_by_sample: Dict[int, List[str]] = {}
+        while remaining > 0:
+            item = result_queue.get()
+            if item[0] == "__error__":
+                raise RuntimeError(item[1])
+            sample_id, preds = item
+            pred_by_sample[int(sample_id)] = preds
+            remaining -= 1
+            done += 1
+
+            elapsed = max(1e-6, time.time() - started_at)
+            rate = done / elapsed
+            eta_sec = int((total - done) / rate) if rate > 0 else 0
+            pct = (100.0 * done / total) if total > 0 else 100.0
+            print(
+                f"[offline-cache][budget={token_budget}] progress: {done}/{total} ({pct:.1f}%) | "
+                f"{rate:.2f} samples/s | ETA {eta_sec}s"
+            )
+
+        for p in processes:
+            p.join()
+
+        budget_key = str(token_budget)
+        for sample in samples:
+            sid = int(sample["sample_id"])
+            preds = pred_by_sample[sid]
+            answers = sample.get("answers") or []
+            all_classes = sample.get("all_classes") or []
+            mt = str(sample["metric_type"])
+            sample["action_outputs_by_budget"][budget_key] = preds
+            sample["action_scores_by_budget"][budget_key] = compute_action_scores(
+                preds, mt, answers, all_classes
+            )
 
 
 def main(args):
@@ -648,7 +718,7 @@ def main(args):
     build_offline_action_cache(
         samples=train_samples,
         model_name=args.model,
-        token_budget=int(args.token_budget),
+        token_budgets=DEFAULT_TOKEN_BUDGETS,
         visible_gpu_count=visible_gpu_count,
         gpus_per_model=int(args.gpus_per_model),
     )
@@ -660,7 +730,7 @@ def main(args):
     print(
         f"Offline action cache built with {visible_gpu_count} visible GPU(s), "
         f"gpus_per_model={int(args.gpus_per_model)}, workers={num_workers}, "
-        f"token_budget={int(args.token_budget)}"
+        f"token_budgets={DEFAULT_TOKEN_BUDGETS}"
     )
     print(f"Truncation max_input_length={max_input_length} (model={args.model})")
 
@@ -680,7 +750,6 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=DEFAULT_SPLIT_SEED)
     parser.add_argument("--model", type=str, default="llama3", choices=["llama", "llama2", "llama3", "opt"])
     parser.add_argument("--max_input_length", type=int, default=None)
-    parser.add_argument("--token_budget", type=int, default=1024)
     parser.add_argument("--gpus_per_model", type=int, default=1)
     parser.add_argument(
         "--num_augment",
