@@ -19,7 +19,7 @@ def main(argv=None):
         "--model",
         type=str,
         required=True,
-        choices=["llama", "llama2", "llama3", "opt"],
+        choices=["llama3-8b", "llama3-1b", "qwen2"],
         help="Base model type (used by utils.load_model())",
     )
     parser.add_argument("--epochs", type=int, default=None, help="(override) number of epochs")

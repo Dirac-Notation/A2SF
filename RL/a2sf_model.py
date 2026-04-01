@@ -13,7 +13,7 @@ from longbench_eval import dataset2metric
 @dataclass
 class ModelConfig:
     # ----- Model Configuration -----
-    model: str = "llama3"
+    model: str = "llama3-1b"
 
     # ----- Agent Action Space -----
     a_values: torch.Tensor = field(

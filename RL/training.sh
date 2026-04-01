@@ -3,7 +3,7 @@
 # Example training script for A2SF RL agent
 
 gpu="0"
-model="llama3"
+model="llama3-1b"
 save_dir="runs/a2sf_rl"
 
 echo "Starting A2SF RL Training Example"
