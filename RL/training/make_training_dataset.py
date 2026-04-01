@@ -110,6 +110,17 @@ def compute_action_scores(
     return scores
 
 
+def _best_action_index_from_scores(scores: List[float]) -> int:
+    best_idx = 0
+    best_r = float("-inf")
+    for i, s in enumerate(scores):
+        v = float(s)
+        if v > best_r:
+            best_r = v
+            best_idx = i
+    return int(best_idx)
+
+
 def set_seed(seed: int) -> None:
     random.seed(seed)
 def stable_seed_from_name(base_seed: int, name: str) -> int:
@@ -579,6 +590,7 @@ def _offline_worker(
 def build_offline_action_cache(
     samples: List[Dict[str, Any]],
     model_name: str,
+    output_file: str,
     token_budgets: List[int],
     visible_gpu_count: int,
     gpus_per_model: int,
@@ -608,6 +620,11 @@ def build_offline_action_cache(
     for start in range(0, visible_gpu_count, gpus_per_model):
         gpu_groups.append(all_gpu_ids[start : start + gpus_per_model])
 
+    def _budget_cache_path(tb: int) -> str:
+        base, ext = os.path.splitext(output_file)
+        ext = ext or ".jsonl"
+        return f"{base}.budget_{int(tb)}{ext}"
+
     token_budgets = [int(tb) for tb in token_budgets]
     total_samples = len(samples)
     total_budgets = len(token_budgets)
@@ -625,6 +642,12 @@ def build_offline_action_cache(
         sample["metric_type"] = resolve_metric_type_for_dataset(sample.get("dataset"))
 
     for token_budget in token_budgets:
+        budget_path = _budget_cache_path(token_budget)
+        if os.path.exists(budget_path):
+            print(f"[offline-cache] skip existing budget={token_budget}: {budget_path}")
+            completed_sample_budget_units += total_samples
+            continue
+
         print(f"[offline-cache] building budget={token_budget}")
         ctx = mp.get_context("spawn")
         task_queue = ctx.Queue()
@@ -695,17 +718,64 @@ def build_offline_action_cache(
             p.join()
         completed_sample_budget_units += total
 
-        budget_key = str(token_budget)
-        for sample in samples:
-            sid = int(sample["sample_id"])
-            preds = pred_by_sample[sid]
-            answers = sample.get("answers") or []
-            all_classes = sample.get("all_classes") or []
-            mt = str(sample["metric_type"])
-            sample["action_outputs_by_budget"][budget_key] = preds
-            sample["action_scores_by_budget"][budget_key] = compute_action_scores(
-                preds, mt, answers, all_classes
-            )
+        with open(budget_path, "w", encoding="utf-8") as f:
+            for sample in samples:
+                sid = int(sample["sample_id"])
+                preds = pred_by_sample[sid]
+                answers = sample.get("answers") or []
+                all_classes = sample.get("all_classes") or []
+                mt = str(sample["metric_type"])
+                payload = dict(sample)
+                payload["token_budget"] = int(token_budget)
+                payload["action_space"] = {
+                    "a_values": cart_a,
+                    "b_values": cart_b,
+                }
+                payload["action_outputs"] = preds
+                payload["action_scores"] = compute_action_scores(preds, mt, answers, all_classes)
+                f.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+        print(f"[offline-cache] saved budget file: {budget_path}")
+
+    # Merge per-budget cache files into one unified training jsonl.
+    merged_by_sample_id: Dict[int, Dict[str, Any]] = {}
+    for token_budget in token_budgets:
+        budget_path = _budget_cache_path(token_budget)
+        if not os.path.exists(budget_path):
+            raise FileNotFoundError(f"Missing budget cache file: {budget_path}")
+        with open(budget_path, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                sid = int(row["sample_id"])
+                if sid not in merged_by_sample_id:
+                    base = dict(row)
+                    base.pop("token_budget", None)
+                    base.pop("action_outputs", None)
+                    base.pop("action_scores", None)
+                    base["token_budgets"] = token_budgets
+                    base["action_outputs_by_budget"] = {}
+                    base["action_scores_by_budget"] = {}
+                    merged_by_sample_id[sid] = base
+                merged = merged_by_sample_id[sid]
+                bkey = str(int(token_budget))
+                merged["action_outputs_by_budget"][bkey] = row["action_outputs"]
+                merged["action_scores_by_budget"][bkey] = row["action_scores"]
+
+    merged_rows: List[Dict[str, Any]] = []
+    for sid in sorted(merged_by_sample_id.keys()):
+        row = merged_by_sample_id[sid]
+        ref_budget_key = "1024" if "1024" in row["action_scores_by_budget"] else str(
+            int(token_budgets[0])
+        )
+        row["best_action_index"] = _best_action_index_from_scores(
+            [float(v) for v in row["action_scores_by_budget"][ref_budget_key]]
+        )
+        merged_rows.append(row)
+
+    write_jsonl(output_file, merged_rows, "train")
+    print(f"[offline-cache] merged all budget files into: {output_file}")
 
 
 def main(args):
@@ -752,6 +822,7 @@ def main(args):
     build_offline_action_cache(
         samples=train_samples,
         model_name=args.model,
+        output_file=args.output_file,
         token_budgets=DEFAULT_TOKEN_BUDGETS,
         visible_gpu_count=visible_gpu_count,
         gpus_per_model=int(args.gpus_per_model),
