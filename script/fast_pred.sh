@@ -4,7 +4,7 @@ set -e
 
 # 기본값 (CLI에서 덮어쓸 수 있음)
 budget=256
-model=llama3
+model=llama3-1b
 method=snap
 window=16
 gpus_per_model=1
