@@ -27,7 +27,7 @@ class TrainingConfig:
     checkpoint_every_epochs: int = 100
 
     # ----- Dataset paths (fixed splits) -----
-    train_data_path: str = "RL/training/exp_512/training_data.jsonl"
+    train_data_path: str = "RL/training/data/training_data.jsonl"
 
     @classmethod
     def from_args(cls, argv=None) -> "TrainingConfig":

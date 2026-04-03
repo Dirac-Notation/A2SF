@@ -851,15 +851,9 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="LongBench 부분 샘플링(10%/2%) + 평가 동일 절단, GT 기반 RL 학습용 jsonl"
-    )
+    parser = argparse.ArgumentParser(description="LongBench 부분 샘플링(10%/2%) + 평가 동일 절단, GT 기반 RL 학습용 jsonl")
     parser.add_argument("--longbench_dir", type=str, default=os.path.join(REPO_ROOT, "datasets", "longbench"))
-    parser.add_argument(
-        "--output_file",
-        type=str,
-        default=os.path.join(REPO_ROOT, "RL", "training", "data", "training_data.jsonl"),
-    )
+    parser.add_argument("--output_file", type=str, default=os.path.join(REPO_ROOT, "RL", "training", "data", "training_data.jsonl"))
     parser.add_argument("--sample_ratio", type=float, default=DEFAULT_SAMPLE_RATIO, help="Train 비율 (기본 0.10)")
     parser.add_argument("--num_length_bins", type=int, default=DEFAULT_LENGTH_BINS)
     parser.add_argument("--seed", type=int, default=DEFAULT_SPLIT_SEED)
