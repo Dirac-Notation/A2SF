@@ -20,7 +20,7 @@ class H2OCompressor(BaseCompressor):
         self.selected_indices = None
         self.prompt = False
         self.total_budget = compression_config.total_budget
-        self.recent_budget = round(self.total_budget * 0.125)
+        self.recent_budget = 16
         self.select_budget = self.total_budget - self.recent_budget
 
     def should_accumulate_scores(self, seq_len_q: int, seq_len_k: int) -> bool:

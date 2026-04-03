@@ -22,7 +22,7 @@ class SnapCompressor(BaseCompressor):
         self.selected_indices = None
         self.prompt = False
         self.total_budget = compression_config.total_budget
-        self.recent_budget = int(self.total_budget * 0.125)
+        self.recent_budget = 16
         self.select_budget = self.total_budget - self.recent_budget
         self.observation_window = compression_config.observation_window
 
