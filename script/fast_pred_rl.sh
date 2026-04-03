@@ -4,8 +4,8 @@ set -e
 
 # 기본값 (CLI에서 덮어쓸 수 있음)
 budget=1024
-model=llama3
-rl_checkpoint=policy_final.pt
+model=llama3-1b
+rl_checkpoint=runs/a2sf_rl/policy_final.pt
 gpus_per_model=1
 
 usage() {

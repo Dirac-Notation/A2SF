@@ -23,7 +23,7 @@ from ..env import A2SFEnv, A2SFModelRunner
 from .dataloader import RLDataset, rl_collate_fn
 from longbench_eval import dataset2metric
 
-TOKEN_BUDGET_CANDIDATES = [128, 256, 512, 1024, 2048, 4096]
+TOKEN_BUDGET_CANDIDATES = [256, 512]
 
 
 class A2SFTrainer:
@@ -262,8 +262,6 @@ class A2SFTrainer:
 
                     scores_f = [float(s) for s in action_scores]
                     max_score = max(scores_f)
-                    if max_score <= score_eps:
-                        continue
 
                     optimal_indices = [
                         i for i, s in enumerate(scores_f) if s >= max_score - score_eps
@@ -303,7 +301,7 @@ class A2SFTrainer:
         self.agent.train()
         self.env.context_encoder.eval()
 
-        prediction_mse_losses = []
+        prediction_abs_losses = []
         reward_pairs: List[Tuple[float, float]] = []
         feature_action_pairs = []
 
@@ -321,7 +319,7 @@ class A2SFTrainer:
 
             selected_predict = reward_pred[0, action_idx].unsqueeze(0)
             actual_reward = reward.unsqueeze(0) if reward.ndim == 0 else reward
-            prediction_mse_losses.append(F.mse_loss(selected_predict, actual_reward))
+            prediction_abs_losses.append(F.l1_loss(selected_predict, actual_reward))
             reward_pairs.append(
                 (
                     float(actual_reward.view(-1)[0].detach().item()),
@@ -330,8 +328,7 @@ class A2SFTrainer:
             )
             feature_action_pairs.append((feature_vector.detach(), action_idx, str(metric_type)))
 
-        mean_mse = torch.stack(prediction_mse_losses).mean()
-        prediction_loss = torch.sqrt(mean_mse + 1e-8)
+        prediction_loss = torch.stack(prediction_abs_losses).mean()
 
         l2_loss = 0.0
         for param in self.agent.parameters():
@@ -480,33 +477,26 @@ class A2SFTrainer:
                             per_label_data[label]["actions_b"].append(int(selected_b[local_idx].item()))
                             per_label_data[label]["reward_pairs"].append((gt_reward_val, pred_reward_val))
 
-                        # Add real-best supervised term only when it has a positive signal.
-                        max_action_score = max(float(s) for s in action_scores) if action_scores else 0.0
-                        if max_action_score > self.REAL_BEST_SCORE_EPS:
-                            real_best_idx = int(self._best_action_index_from_scores(action_scores))
-                            real_best_a_idx = real_best_idx // self.agent.num_b_values
-                            real_best_b_idx = real_best_idx % self.agent.num_b_values
-                            real_best_action = (
-                                self.agent.a_values[real_best_a_idx].to(self.device).view(1),
-                                self.agent.b_values[real_best_b_idx].to(self.device).view(1),
-                            )
-                            real_best_reward = torch.tensor(
-                                self._reward_for_action_index(action_scores, real_best_idx),
-                                device=self.device,
-                                dtype=torch.float32,
-                            )
-                            update_samples.append((state, real_best_action, real_best_reward, metric_type))
-                            per_label_data.setdefault("real_best", {}).setdefault("used_count", 0)
-                            per_label_data["real_best"]["used_count"] += 1
-                            gt_real_best_reward = float(real_best_reward.item())
-                            pred_real_best_reward = float(reward_pred_all[real_best_idx].item())
-                            per_label_data.setdefault("real_best", {}).setdefault("reward_pairs", [])
-                            per_label_data["real_best"]["reward_pairs"].append(
-                                (gt_real_best_reward, pred_real_best_reward)
-                            )
-                        else:
-                            per_label_data.setdefault("real_best", {}).setdefault("skipped_zero_count", 0)
-                            per_label_data["real_best"]["skipped_zero_count"] += 1
+                        # Always include real-best action in loss, even when its score is 0.0.
+                        real_best_idx = int(self._best_action_index_from_scores(action_scores))
+                        real_best_a_idx = real_best_idx // self.agent.num_b_values
+                        real_best_b_idx = real_best_idx % self.agent.num_b_values
+                        real_best_action = (
+                            self.agent.a_values[real_best_a_idx].to(self.device).view(1),
+                            self.agent.b_values[real_best_b_idx].to(self.device).view(1),
+                        )
+                        real_best_reward = torch.tensor(
+                            self._reward_for_action_index(action_scores, real_best_idx),
+                            device=self.device,
+                            dtype=torch.float32,
+                        )
+                        update_samples.append((state, real_best_action, real_best_reward, metric_type))
+                        gt_real_best_reward = float(real_best_reward.item())
+                        pred_real_best_reward = float(reward_pred_all[real_best_idx].item())
+                        per_label_data.setdefault("real_best", {}).setdefault("reward_pairs", [])
+                        per_label_data["real_best"]["reward_pairs"].append(
+                            (gt_real_best_reward, pred_real_best_reward)
+                        )
 
                         common_input_seq_lengths.append(input_seq_len)
                         common_task_types.append(task_type_str)
@@ -533,20 +523,10 @@ class A2SFTrainer:
                     iteration_input_seq_lengths=common_input_seq_lengths,
                     iteration_task_types=common_task_types,
                     current_beta=current_beta,
-                    real_best_used_count=int(
-                        per_label_data.get("real_best", {}).get("used_count", 0)
-                    ),
-                    real_best_skipped_zero_count=int(
-                        per_label_data.get("real_best", {}).get("skipped_zero_count", 0)
-                    ),
                     real_best_reward_pairs=per_label_data.get("real_best", {}).get("reward_pairs", []),
                 )
                 self._log_real_best_status(
                     iteration=global_iteration,
-                    used_count=int(per_label_data.get("real_best", {}).get("used_count", 0)),
-                    skipped_zero_count=int(
-                        per_label_data.get("real_best", {}).get("skipped_zero_count", 0)
-                    ),
                     reward_pairs=per_label_data.get("real_best", {}).get("reward_pairs", []),
                 )
                 for label in label_order:
@@ -596,8 +576,6 @@ class A2SFTrainer:
         iteration_input_seq_lengths: List[int],
         iteration_task_types: List[str],
         current_beta: float,
-        real_best_used_count: int,
-        real_best_skipped_zero_count: int,
         real_best_reward_pairs: List[Tuple[float, float]],
     ):
         best_avg_reward = (
@@ -643,8 +621,6 @@ class A2SFTrainer:
         print(f"  Total Loss:        {total_loss:.4f}")
         print(f"  Grad Norm:         {grad_norm:.4f}")
         print(f"  UCB Beta:          {current_beta:.4f}")
-        print(f"  RealBest Used:     {real_best_used_count}")
-        print(f"  RealBest Skipped0: {real_best_skipped_zero_count}")
         print(f"  RealBest Avg GT:   {real_best_avg_gt:.4f}")
         print(f"  RealBest Avg Pred: {real_best_avg_pred:.4f}")
         print(f"  RealBest MAE:      {real_best_mae:.4f}")
@@ -672,8 +648,6 @@ class A2SFTrainer:
             "grad_norm": grad_norm,
             "learning_rate": current_lr,
             "ucb_beta": current_beta,
-            "real_best_used_count": int(real_best_used_count),
-            "real_best_skipped_zero_count": int(real_best_skipped_zero_count),
             "real_best_avg_gt_reward": real_best_avg_gt,
             "real_best_avg_pred_reward": real_best_avg_pred,
             "real_best_mae": real_best_mae,
@@ -709,8 +683,6 @@ class A2SFTrainer:
     def _log_real_best_status(
         self,
         iteration: int,
-        used_count: int,
-        skipped_zero_count: int,
         reward_pairs: List[Tuple[float, float]],
     ) -> None:
         avg_gt = (
@@ -726,8 +698,6 @@ class A2SFTrainer:
         )
         payload = {
             "iteration": int(iteration),
-            "real_best_used_count": int(used_count),
-            "real_best_skipped_zero_count": int(skipped_zero_count),
             "avg_gt_reward": self._format_fixed(avg_gt, 4),
             "avg_pred_reward": self._format_fixed(avg_pred, 4),
             "mae": self._format_fixed(mae, 4),
