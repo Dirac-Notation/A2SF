@@ -64,7 +64,7 @@ _METRIC_FN_REGISTRY = {
 DEFAULT_SPLIT_SEED = 42
 DEFAULT_SAMPLE_RATIO = 0.10
 DEFAULT_LENGTH_BINS = 10
-DEFAULT_TOKEN_BUDGETS = [128, 256, 512, 1024, 2048, 4096]
+DEFAULT_TOKEN_BUDGETS = [128, 256, 512]
 
 # RL/training/data_generation/make_training_dataset.py 기준으로 repo root로 이동
 
