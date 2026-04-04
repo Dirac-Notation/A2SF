@@ -21,7 +21,7 @@ import multiprocessing as mp
 import sys
 import time
 import hashlib
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Set, Tuple
 
 # Silence HF tokenizers fork-parallelism warning in multiprocess workers.
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
@@ -452,6 +452,7 @@ def write_jsonl(path: str, rows: List[Dict[str, Any]], split_name: str) -> None:
             payload["sample_id"] = idx
             payload["split"] = split_name
             f.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
+            f.flush()
 
 
 def _format_prompt_like_longbench(prompt: str, dataset_name: str, model_name: str) -> str:
@@ -496,7 +497,7 @@ def _build_compression_config(a_vals: torch.Tensor, b_vals: torch.Tensor, token_
     return config
 
 
-def _offline_generate_for_sample(
+def _iter_offline_preds_for_sample(
     model,
     tokenizer,
     sample: Dict[str, Any],
@@ -505,7 +506,8 @@ def _offline_generate_for_sample(
     b_values: torch.Tensor,
     token_budget: int,
     action_batch_size: int,
-) -> List[str]:
+):
+    """단일 (sample, token_budget)에 대해 액션 인덱스 순으로 (idx, pred_text)를 낸다."""
     dataset_name = str(sample.get("dataset") or "")
     prompt = _format_prompt_like_longbench(
         prompt=str(sample["input_prompt"]),
@@ -523,7 +525,6 @@ def _offline_generate_for_sample(
         context_length=context_length,
     )
     action_batch_size = max(1, int(action_batch_size))
-    pred_texts: List[str] = []
     num_actions = int(a_values.numel())
     for start in range(0, num_actions, action_batch_size):
         end = min(start + action_batch_size, num_actions)
@@ -540,10 +541,11 @@ def _offline_generate_for_sample(
                 **generation_kwargs,
             )
         for i in range(batch_n):
-            pred_texts.append(
-                tokenizer.decode(output_ids[i, context_length:], skip_special_tokens=True)
+            idx = start + i
+            pred_text = tokenizer.decode(
+                output_ids[i, context_length:], skip_special_tokens=True
             )
-    return pred_texts
+            yield idx, pred_text
 
 
 def _offline_worker(
@@ -572,19 +574,63 @@ def _offline_worker(
             if task is None:
                 break
             token_budget, sample = task
-            pred_texts = _offline_generate_for_sample(
+            tb = int(token_budget)
+            sid = int(sample["sample_id"])
+            for action_idx, pred_text in _iter_offline_preds_for_sample(
                 model=model,
                 tokenizer=tokenizer,
                 sample=sample,
                 model_name=model_name,
                 a_values=a_tensor,
                 b_values=b_tensor,
-                token_budget=int(token_budget),
+                token_budget=tb,
                 action_batch_size=action_batch_size,
-            )
-            result_queue.put((int(token_budget), int(sample["sample_id"]), pred_texts))
+            ):
+                result_queue.put(("action", tb, sid, int(action_idx), pred_text))
     except Exception as exc:  # pragma: no cover
         result_queue.put(("__error__", f"worker {worker_id} gpus={gpu_group}: {exc}"))
+
+
+def _merged_training_row_from_budget_lines(
+    rows_by_bkey: Dict[str, Dict[str, Any]],
+    token_budgets: List[int],
+    cart_a: List[float],
+    cart_b: List[float],
+) -> Dict[str, Any]:
+    """단일 샘플에 대해 budget별 jsonl 한 줄씩을 합쳐 학습용 한 줄 레코드로 만든다."""
+    first_bkey = str(int(token_budgets[0]))
+    base = dict(rows_by_bkey[first_bkey])
+    base.pop("token_budget", None)
+    base.pop("action_outputs", None)
+    base.pop("action_scores", None)
+    base["token_budgets"] = token_budgets
+    base["action_space"] = {"a_values": cart_a, "b_values": cart_b}
+    base["action_outputs_by_budget"] = {}
+    base["action_scores_by_budget"] = {}
+    for tb in token_budgets:
+        bkey = str(int(tb))
+        r = rows_by_bkey[bkey]
+        base["action_outputs_by_budget"][bkey] = r["action_outputs"]
+        base["action_scores_by_budget"][bkey] = r["action_scores"]
+    ref_budget_key = (
+        "1024" if "1024" in base["action_scores_by_budget"] else str(int(token_budgets[0]))
+    )
+    base["best_action_index"] = _best_action_index_from_scores(
+        [float(v) for v in base["action_scores_by_budget"][ref_budget_key]]
+    )
+    base["split"] = "train"
+    return base
+
+
+def _format_eta_sec(seconds: int) -> str:
+    seconds = max(0, int(seconds))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    if h > 0:
+        return f"{h}h{m:02d}m"
+    if m > 0:
+        return f"{m}m{s:02d}s"
+    return f"{s}s"
 
 
 def build_offline_action_cache(
@@ -626,6 +672,15 @@ def build_offline_action_cache(
         return f"{base}.budget_{int(tb)}{ext}"
 
     token_budgets = [int(tb) for tb in token_budgets]
+
+    # budget/병합 출력 경로의 부모 디렉터리가 없으면 open(..., "w")에서 ENOENT가 난다.
+    _paths_to_ensure = [os.path.abspath(output_file)]
+    for _tb in token_budgets:
+        _paths_to_ensure.append(os.path.abspath(_budget_cache_path(int(_tb))))
+    for _p in _paths_to_ensure:
+        _d = os.path.dirname(_p)
+        if _d:
+            os.makedirs(_d, exist_ok=True)
     total_samples = len(samples)
     total_budgets = len(token_budgets)
     total_sample_budget_units = total_samples * total_budgets
@@ -650,88 +705,137 @@ def build_offline_action_cache(
             continue
         pending_budgets.append(int(token_budget))
 
+    streamed_merged_to_output = False
+    pending_set = {int(x) for x in pending_budgets}
+    needed_bkeys = {str(int(tb)) for tb in token_budgets}
+
     if pending_budgets:
-        ctx = mp.get_context("spawn")
-        task_queue = ctx.Queue()
-        for token_budget in pending_budgets:
-            for sample in samples:
-                task_queue.put((int(token_budget), sample))
-        for _ in range(len(gpu_groups)):
-            task_queue.put(None)
-        result_queue = ctx.Queue()
-        processes = []
-        for worker_id, gpu_group in enumerate(gpu_groups):
-            p = ctx.Process(
-                target=_offline_worker,
-                args=(
-                    worker_id,
-                    gpu_group,
-                    model_name,
-                    task_queue,
-                    cart_a,
-                    cart_b,
-                    result_queue,
-                    action_batch_size,
-                ),
-            )
-            p.start()
-            processes.append(p)
+        streamed_merged_to_output = True
+        out_parent = os.path.dirname(output_file)
+        if out_parent:
+            os.makedirs(out_parent, exist_ok=True)
 
-        total = len(samples) * len(pending_budgets)
-        remaining = total
-        done = 0
-        started_at = time.time()
-        done_by_budget: Dict[int, int] = {int(tb): 0 for tb in pending_budgets}
-        pred_by_budget_sample: Dict[int, Dict[int, List[str]]] = {
-            int(tb): {} for tb in pending_budgets
-        }
-        while remaining > 0:
-            item = result_queue.get()
-            if item[0] == "__error__":
-                raise RuntimeError(item[1])
-            token_budget, sample_id, preds = item
-            token_budget = int(token_budget)
-            sample_id = int(sample_id)
-            pred_by_budget_sample[token_budget][sample_id] = preds
-            done_by_budget[token_budget] += 1
-            remaining -= 1
-            done += 1
+        per_sample_budget_rows: Dict[int, Dict[str, Dict[str, Any]]] = {}
+        emitted_merged: Set[int] = set()
 
-            elapsed = max(1e-6, time.time() - started_at)
-            rate = done / elapsed
-            eta_sec = int((total - done) / rate) if rate > 0 else 0
-            pct = (100.0 * done / total) if total > 0 else 100.0
-            global_done_sample_budget = completed_sample_budget_units + done
-            global_done_actions = global_done_sample_budget * action_size
-            global_pct_sample_budget = (
-                (100.0 * global_done_sample_budget / total_sample_budget_units)
-                if total_sample_budget_units > 0
-                else 100.0
-            )
-            global_pct_actions = (
-                (100.0 * global_done_actions / total_action_units)
-                if total_action_units > 0
-                else 100.0
-            )
-            print(
-                f"[offline-cache] all-budgets-progress: "
-                f"{done}/{total} ({pct:.1f}%) | {rate:.2f} sample-budget/s | ETA {eta_sec}s | "
-                f"global sample×budget: {global_done_sample_budget}/{total_sample_budget_units} "
-                f"({global_pct_sample_budget:.1f}%) | "
-                f"global sample×budget×action: {global_done_actions}/{total_action_units} "
-                f"({global_pct_actions:.1f}%)"
-            )
+        merged_f = open(output_file, "w", encoding="utf-8")
+        budget_handles: Dict[int, Any] = {}
+        try:
+            for tb in pending_budgets:
+                bp = _budget_cache_path(tb)
+                bp_parent = os.path.dirname(bp)
+                if bp_parent:
+                    os.makedirs(bp_parent, exist_ok=True)
+                budget_handles[int(tb)] = open(bp, "w", encoding="utf-8")
 
-        for p in processes:
-            p.join()
-        completed_sample_budget_units += total
+            def try_emit_merged(sid: int) -> None:
+                if sid in emitted_merged:
+                    return
+                inner = per_sample_budget_rows.get(sid)
+                if not inner or set(inner.keys()) != needed_bkeys:
+                    return
+                merged = _merged_training_row_from_budget_lines(
+                    inner, token_budgets, cart_a, cart_b
+                )
+                merged_f.write(
+                    json.dumps(merged, ensure_ascii=False, separators=(",", ":")) + "\n"
+                )
+                merged_f.flush()
+                emitted_merged.add(sid)
 
-        for token_budget in pending_budgets:
-            budget_path = _budget_cache_path(token_budget)
-            with open(budget_path, "w", encoding="utf-8") as f:
-                for sample in samples:
-                    sid = int(sample["sample_id"])
-                    preds = pred_by_budget_sample[int(token_budget)][sid]
+            # 이미 완료된 budget 파일은 먼저 읽어 두어, 동일 샘플의 나머지 budget만 돌 때도 병합 가능하게 함.
+            for tb in token_budgets:
+                tb_int = int(tb)
+                if tb_int in pending_set:
+                    continue
+                budget_path = _budget_cache_path(tb_int)
+                if not os.path.exists(budget_path):
+                    raise FileNotFoundError(f"Expected budget cache file missing: {budget_path}")
+                with open(budget_path, "r", encoding="utf-8") as bf:
+                    for line in bf:
+                        if not line.strip():
+                            continue
+                        row = json.loads(line)
+                        sid = int(row["sample_id"])
+                        bkey = str(tb_int)
+                        per_sample_budget_rows.setdefault(sid, {})[bkey] = row
+                        try_emit_merged(sid)
+
+            ctx = mp.get_context("spawn")
+            task_queue = ctx.Queue()
+            # prefill 토큰 길이(긴 것 먼저) 순.
+            ordered_samples = sorted(
+                samples,
+                key=lambda s: -int(s.get("length", 0)),
+            )
+            # sample → budget 순으로 태스크 큐에 넣음 (각 태스크 안에서 액션 순차 생성).
+            for sample in ordered_samples:
+                for token_budget in pending_budgets:
+                    task_queue.put((int(token_budget), sample))
+            for _ in range(len(gpu_groups)):
+                task_queue.put(None)
+            result_queue = ctx.Queue()
+            processes = []
+            for worker_id, gpu_group in enumerate(gpu_groups):
+                p = ctx.Process(
+                    target=_offline_worker,
+                    args=(
+                        worker_id,
+                        gpu_group,
+                        model_name,
+                        task_queue,
+                        cart_a,
+                        cart_b,
+                        result_queue,
+                        action_batch_size,
+                    ),
+                )
+                p.start()
+                processes.append(p)
+
+            total_pending_actions = len(samples) * len(pending_budgets) * action_size
+            remaining = total_pending_actions
+            done_actions_loop = 0
+            started_at = time.time()
+            pred_acc: Dict[Tuple[int, int], Dict[int, str]] = {}
+            while remaining > 0:
+                item = result_queue.get()
+                if item[0] == "__error__":
+                    raise RuntimeError(item[1])
+                if item[0] != "action":
+                    raise RuntimeError(f"unexpected result message: {item!r}")
+                _, token_budget, sample_id, action_idx, pred_text = item
+                token_budget = int(token_budget)
+                sample_id = int(sample_id)
+                action_idx = int(action_idx)
+                key = (sample_id, token_budget)
+                if key not in pred_acc:
+                    pred_acc[key] = {}
+                pred_acc[key][action_idx] = pred_text
+
+                done_actions_loop += 1
+                elapsed = max(1e-6, time.time() - started_at)
+                rate = done_actions_loop / elapsed
+                eta_sec = (
+                    int((total_pending_actions - done_actions_loop) / rate) if rate > 0 else 0
+                )
+                global_done_actions = completed_sample_budget_units * action_size + done_actions_loop
+                global_pct_actions = (
+                    (100.0 * global_done_actions / total_action_units)
+                    if total_action_units > 0
+                    else 100.0
+                )
+                print(
+                    f"[offline-cache] {global_done_actions}/{total_action_units} "
+                    f"actions ({global_pct_actions:.1f}%) | {rate:.2f} actions/s | "
+                    f"ETA {_format_eta_sec(eta_sec)}",
+                    flush=True,
+                )
+
+                if len(pred_acc[key]) == action_size:
+                    preds = [pred_acc[key][i] for i in range(action_size)]
+                    del pred_acc[key]
+                    sample = samples[sample_id]
                     answers = sample.get("answers") or []
                     all_classes = sample.get("all_classes") or []
                     mt = str(sample["metric_type"])
@@ -743,48 +847,72 @@ def build_offline_action_cache(
                     }
                     payload["action_outputs"] = preds
                     payload["action_scores"] = compute_action_scores(preds, mt, answers, all_classes)
-                    f.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
-            print(f"[offline-cache] saved budget file: {budget_path}")
 
-    # Merge per-budget cache files into one unified training jsonl.
-    merged_by_sample_id: Dict[int, Dict[str, Any]] = {}
-    for token_budget in token_budgets:
-        budget_path = _budget_cache_path(token_budget)
-        if not os.path.exists(budget_path):
-            raise FileNotFoundError(f"Missing budget cache file: {budget_path}")
-        with open(budget_path, "r", encoding="utf-8") as f:
-            for line in f:
-                if not line.strip():
-                    continue
-                row = json.loads(line)
-                sid = int(row["sample_id"])
-                if sid not in merged_by_sample_id:
-                    base = dict(row)
-                    base.pop("token_budget", None)
-                    base.pop("action_outputs", None)
-                    base.pop("action_scores", None)
-                    base["token_budgets"] = token_budgets
-                    base["action_outputs_by_budget"] = {}
-                    base["action_scores_by_budget"] = {}
-                    merged_by_sample_id[sid] = base
-                merged = merged_by_sample_id[sid]
-                bkey = str(int(token_budget))
-                merged["action_outputs_by_budget"][bkey] = row["action_outputs"]
-                merged["action_scores_by_budget"][bkey] = row["action_scores"]
+                    bkey = str(int(token_budget))
+                    per_sample_budget_rows.setdefault(sample_id, {})[bkey] = payload
+                    fh = budget_handles[token_budget]
+                    fh.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
+                    fh.flush()
 
-    merged_rows: List[Dict[str, Any]] = []
-    for sid in sorted(merged_by_sample_id.keys()):
-        row = merged_by_sample_id[sid]
-        ref_budget_key = "1024" if "1024" in row["action_scores_by_budget"] else str(
-            int(token_budgets[0])
-        )
-        row["best_action_index"] = _best_action_index_from_scores(
-            [float(v) for v in row["action_scores_by_budget"][ref_budget_key]]
-        )
-        merged_rows.append(row)
+                    try_emit_merged(sample_id)
 
-    write_jsonl(output_file, merged_rows, "train")
-    print(f"[offline-cache] merged all budget files into: {output_file}")
+                remaining -= 1
+
+            for p in processes:
+                p.join()
+            completed_sample_budget_units += len(samples) * len(pending_budgets)
+
+            for tb in pending_budgets:
+                print(f"[offline-cache] saved budget file (streaming): {_budget_cache_path(tb)}")
+            print(
+                f"[offline-cache] merged (streaming) into: {output_file} "
+                f"({len(emitted_merged)}/{total_samples} samples)"
+            )
+        finally:
+            for fh in budget_handles.values():
+                fh.close()
+            merged_f.close()
+
+    if not streamed_merged_to_output:
+        # 모든 budget 캐시가 이미 있을 때: 파일을 끝까지 한 번에 읽지 않고, 병합 결과만 라인 단위로 기록.
+        merged_by_sample_id: Dict[int, Dict[str, Any]] = {}
+        for token_budget in token_budgets:
+            budget_path = _budget_cache_path(token_budget)
+            if not os.path.exists(budget_path):
+                raise FileNotFoundError(f"Missing budget cache file: {budget_path}")
+            with open(budget_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    row = json.loads(line)
+                    sid = int(row["sample_id"])
+                    if sid not in merged_by_sample_id:
+                        base = dict(row)
+                        base.pop("token_budget", None)
+                        base.pop("action_outputs", None)
+                        base.pop("action_scores", None)
+                        base["token_budgets"] = token_budgets
+                        base["action_outputs_by_budget"] = {}
+                        base["action_scores_by_budget"] = {}
+                        merged_by_sample_id[sid] = base
+                    merged = merged_by_sample_id[sid]
+                    bkey = str(int(token_budget))
+                    merged["action_outputs_by_budget"][bkey] = row["action_outputs"]
+                    merged["action_scores_by_budget"][bkey] = row["action_scores"]
+
+        merged_rows: List[Dict[str, Any]] = []
+        for sid in sorted(merged_by_sample_id.keys()):
+            row = merged_by_sample_id[sid]
+            ref_budget_key = "1024" if "1024" in row["action_scores_by_budget"] else str(
+                int(token_budgets[0])
+            )
+            row["best_action_index"] = _best_action_index_from_scores(
+                [float(v) for v in row["action_scores_by_budget"][ref_budget_key]]
+            )
+            merged_rows.append(row)
+
+        write_jsonl(output_file, merged_rows, "train")
+        print(f"[offline-cache] merged all budget files into: {output_file}")
 
 
 def main(args):
@@ -837,8 +965,6 @@ def main(args):
         gpus_per_model=int(args.gpus_per_model),
         action_batch_size=int(args.action_batch_size),
     )
-
-    write_jsonl(args.output_file, train_samples, "train")
 
     print(f"\nSaved train: {args.output_file} ({len(train_samples)} samples)")
     num_workers = (visible_gpu_count + int(args.gpus_per_model) - 1) // int(args.gpus_per_model)
