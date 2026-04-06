@@ -19,7 +19,7 @@ class TrainingConfig:
     epochs: int = 2000
     episodes_per_update: int = 32
     # 학습에 사용할 token budget (jsonl의 action_*_by_budget 키와 일치해야 함).
-    token_budget: int = 128
+    token_budget: int = 256
 
     # ----- Reproducibility / IO -----
     seed: int = 42
