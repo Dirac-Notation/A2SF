@@ -2,6 +2,7 @@ import math
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
+import torch.nn.functional as F
 from transformers.cache_utils import Cache
 
 
@@ -207,34 +208,51 @@ class DynamicCustomCache(Cache):
         _, _, seq_len_k, _ = key.shape
         sm_scale = 1.0 / math.sqrt(head_dim)
 
-        output = torch.zeros_like(query)
         layer_compressor = (
             self.layer_compressors[layer_idx] if len(self.layer_compressors) > layer_idx else None
         )
 
-        acc_scores = None
-        if layer_compressor is not None and layer_compressor.should_accumulate_scores(seq_len_q, seq_len_k):
-            layer_compressor.prepare_prefill(seq_len_q, seq_len_k, query.device, query.dtype)
-            acc_scores = torch.zeros((batch_size, num_heads, seq_len_k), dtype=torch.float32, device=query.device)
+        need_scores = (
+            layer_compressor is not None
+            and layer_compressor.should_accumulate_scores(seq_len_q, seq_len_k)
+        )
+
+        if not need_scores:
+            # Decode / non-accumulating path: use fused SDPA (FlashAttention / mem-efficient).
+            output = F.scaled_dot_product_attention(
+                query,
+                key,
+                value,
+                attn_mask=attn_mask,
+                dropout_p=0.0,
+                is_causal=False,
+            )
+            return output
+
+        layer_compressor.prepare_prefill(seq_len_q, seq_len_k, query.device, query.dtype)
+        acc_scores = torch.zeros(
+            (batch_size, num_heads, seq_len_k), dtype=torch.float32, device=query.device
+        )
+        output = torch.empty_like(query)
 
         for q_start in range(0, seq_len_q, block_size):
             q_end = min(q_start + block_size, seq_len_q)
             q_chunk = query[:, :, q_start:q_end, :]
 
-            scores = torch.matmul(q_chunk.to(torch.float32), key.transpose(2, 3).to(torch.float32)) * sm_scale
+            # Native-dtype matmul; softmax in fp32 for numerical stability only.
+            scores = torch.matmul(q_chunk, key.transpose(2, 3)) * sm_scale
             if attn_mask is not None:
-                scores = scores + attn_mask[:, :, q_start:q_end, :].to(torch.float32)
+                scores = scores + attn_mask[:, :, q_start:q_end, :]
 
-            probs = torch.softmax(scores, dim=-1).to(q_chunk.dtype)
+            probs = torch.softmax(scores, dim=-1, dtype=torch.float32).to(q_chunk.dtype)
             output[:, :, q_start:q_end] = torch.matmul(probs, value)
 
-            if acc_scores is not None:
-                layer_compressor.accumulate_scores(
-                    attn_probs=probs,
-                    q_start=q_start,
-                    q_end=q_end,
-                    acc_scores=acc_scores,
-                )
+            layer_compressor.accumulate_scores(
+                attn_probs=probs,
+                q_start=q_start,
+                q_end=q_end,
+                acc_scores=acc_scores,
+            )
 
         if acc_scores is not None:
             reduced_scores = self._reduce_to_kv_heads(
@@ -245,6 +263,8 @@ class DynamicCustomCache(Cache):
             self._apply_selection(layer_idx=layer_idx, selected_indices=selected)
 
         return output
+
+
 
     def get_seq_length(self, layer_idx: Optional[int] = 0) -> int:
         # Return logical sequence length used for position progression.
