@@ -19,11 +19,11 @@ class TrainingConfig:
     epochs: int = 2000
     episodes_per_update: int = 32
     # 학습에 사용할 token budget (jsonl의 action_*_by_budget 키와 일치해야 함).
-    token_budget: int = 256
+    token_budget: int = 512
 
     # ----- Reproducibility / IO -----
     seed: int = 42
-    save_dir: str = "runs/a2sf_rl"
+    save_dir: str = "runs/fix_512_2000"
     resume: Optional[str] = None
     # 0이면 에폭 중간 체크포인트를 저장하지 않는다. 최종 저장은 run.py에서 policy_final.pt로 수행.
     checkpoint_every_epochs: int = 100
@@ -46,12 +46,7 @@ class TrainingConfig:
         parser.add_argument("--ucb_beta_min", type=float, default=default_cfg.ucb_beta_min)
         parser.add_argument("--l2_coef", type=float, default=default_cfg.l2_coef)
         parser.add_argument("--seed", type=int, default=default_cfg.seed)
-        parser.add_argument(
-            "--checkpoint_every_epochs",
-            type=int,
-            default=default_cfg.checkpoint_every_epochs,
-            help="N 에폭마다 policy_epoch_{N}.pt 저장. 0이면 에폭 중 저장 안 함.",
-        )
+        parser.add_argument("--checkpoint_every_epochs", type=int, default=default_cfg.checkpoint_every_epochs, help="N 에폭마다 policy_epoch_{N}.pt 저장. 0이면 에폭 중 저장 안 함.")
 
         args = parser.parse_args(argv)
         return cls(

@@ -40,17 +40,10 @@ class A2SFCompressor(BaseCompressor):
             self.exponents = self.exponents.to(device)
         self.window = (self.forgetting_factor ** (self.exponents.max() - self.exponents)).to(dtype=torch.float32)
 
-    def accumulate_scores(
-        self,
-        attn_probs: torch.Tensor,
-        q_start: int,
-        q_end: int,
-        acc_scores: torch.Tensor,
-    ):
-        chunk_len = q_end - q_start
-        forgetting = self.window[:, :, q_start:q_end].view(self.window.shape[0], 1, chunk_len, 1)
-        weighted = forgetting * attn_probs.to(torch.float32)
-        acc_scores.add_(weighted.sum(dim=2))
+    def get_query_weights(self, q_start, q_end, device, dtype):
+        # window shape: [1, 1, seq_len_q] (or [B,1,seq_len_q]); collapse to [qb]
+        w = self.window[..., q_start:q_end].reshape(-1, q_end - q_start)[0]
+        return w.to(device=device, dtype=torch.float32)
 
     def select(self, scores: torch.Tensor, seq_len_k: int):
         if seq_len_k <= self.total_budget:

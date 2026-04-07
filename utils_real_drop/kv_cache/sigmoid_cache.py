@@ -53,17 +53,9 @@ class SigmoidCompressor(BaseCompressor):
         self.window = 1 / (torch.exp(-a * (self.exponents - (seq_len_q - b - 1.0))))
         self.window = self.window.to(dtype=torch.float32)
 
-    def accumulate_scores(
-        self,
-        attn_probs: torch.Tensor,
-        q_start: int,
-        q_end: int,
-        acc_scores: torch.Tensor,
-    ):
-        chunk_len = q_end - q_start
-        forgetting = self.window[:, :, q_start:q_end].view(self.window.shape[0], 1, chunk_len, 1)
-        weighted = forgetting * attn_probs.to(torch.float32)
-        acc_scores.add_(weighted.sum(dim=2))
+    def get_query_weights(self, q_start, q_end, device, dtype):
+        w = self.window[..., q_start:q_end].reshape(-1, q_end - q_start)[0]
+        return w.to(device=device, dtype=torch.float32)
 
     def select(self, scores: torch.Tensor, seq_len_k: int):
         if seq_len_k <= self.total_budget:
