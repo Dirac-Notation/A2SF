@@ -33,17 +33,13 @@ class SnapCompressor(BaseCompressor):
         self.prompt = True
         self.observation_start = max(0, seq_len_q - self.observation_window)
 
-    def accumulate_scores(
-        self,
-        attn_probs: torch.Tensor,
-        q_start: int,
-        q_end: int,
-        acc_scores: torch.Tensor,
-    ):
-        if q_end <= self.observation_start:
-            return
+    def get_query_weights(self, q_start, q_end, device, dtype):
+        qb = q_end - q_start
+        w = torch.zeros(qb, device=device, dtype=torch.float32)
         local_start = max(0, self.observation_start - q_start)
-        acc_scores.add_(attn_probs[:, :, local_start:, :].to(torch.float32).sum(dim=2))
+        if local_start < qb:
+            w[local_start:] = 1.0
+        return w
 
     def select(self, scores: torch.Tensor, seq_len_k: int):
         if seq_len_k <= self.total_budget:

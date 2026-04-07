@@ -129,7 +129,7 @@ class LlamaAttention(nn.Module):
         # Prepare attention mask like original LlamaAttention
         # Original: causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
         causal_mask = None
-        if attention_mask is not None:
+        if attention_mask is not None and attention_mask.dim() == 4:
             causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
         
         if cache is not None:
@@ -142,16 +142,25 @@ class LlamaAttention(nn.Module):
                 head_dim=self.head_dim,
             )
         else:
-            attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
-            if causal_mask is not None:
-                attn_weights = attn_weights + causal_mask
-            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-            attn_weights = nn.functional.dropout(
-                attn_weights,
-                p=self.attention_dropout,
-                training=self.training,
-            )
-            attn_output = torch.matmul(attn_weights, value_states)
+            # No-cache path (e.g. use_cache=False forward). Causal masking must
+            # still apply: when no explicit 4D mask is provided, delegate to SDPA
+            # with is_causal=True so prefill cannot attend to future tokens.
+            if causal_mask is None and q_len > 1:
+                attn_output = F.scaled_dot_product_attention(
+                    query_states, key_states, value_states,
+                    attn_mask=None, dropout_p=0.0, is_causal=True,
+                )
+            else:
+                attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+                if causal_mask is not None:
+                    attn_weights = attn_weights + causal_mask
+                attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+                attn_weights = nn.functional.dropout(
+                    attn_weights,
+                    p=self.attention_dropout,
+                    training=self.training,
+                )
+                attn_output = torch.matmul(attn_weights, value_states)
 
         attn_output = attn_output.transpose(1, 2).contiguous()
 
@@ -374,23 +383,30 @@ class LlamaModel(LlamaPreTrainedModel):
             # 2d mask is passed through the layers
             attention_mask = attention_mask if (attention_mask is not None and 0 in attention_mask) else None
         else:
-            # 4d mask is passed through the layers using cache_position (transformers 4.46.2 style)
-            target_length = (
-                attention_mask.shape[-1]
-                if isinstance(attention_mask, torch.Tensor) and attention_mask.dim() >= 2
-                else past_key_values_length + seq_length
+            # Issue #6: skip the [B,1,Sq,Sk] mask materialization when there's no
+            # padding to encode. Causal masking is generated per-block inside
+            # flash_attention (or handled by SDPA's is_causal in the decode path).
+            no_padding = (
+                attention_mask is None
+                or (attention_mask.dim() == 2 and bool((attention_mask == 1).all()))
             )
-            
-            # Use the static method from LlamaModel
-            attention_mask = self._prepare_4d_causal_attention_mask_with_cache_position(
-                attention_mask=attention_mask,
-                sequence_length=seq_length,
-                target_length=target_length,
-                dtype=inputs_embeds.dtype,
-                device=inputs_embeds.device,
-                cache_position=cache_position,
-                batch_size=batch_size,
-            )
+            if no_padding:
+                attention_mask = None
+            else:
+                target_length = (
+                    attention_mask.shape[-1]
+                    if isinstance(attention_mask, torch.Tensor) and attention_mask.dim() >= 2
+                    else past_key_values_length + seq_length
+                )
+                attention_mask = self._prepare_4d_causal_attention_mask_with_cache_position(
+                    attention_mask=attention_mask,
+                    sequence_length=seq_length,
+                    target_length=target_length,
+                    dtype=inputs_embeds.dtype,
+                    device=inputs_embeds.device,
+                    cache_position=cache_position,
+                    batch_size=batch_size,
+                )
         
         # embed positions
         hidden_states = inputs_embeds

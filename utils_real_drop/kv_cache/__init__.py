@@ -25,14 +25,15 @@ class BaseCompressor:
     def prepare_prefill(self, seq_len_q: int, seq_len_k: int, device: torch.device, dtype: torch.dtype):
         return
 
-    def accumulate_scores(
+    def get_query_weights(
         self,
-        attn_probs: torch.Tensor,
         q_start: int,
         q_end: int,
-        acc_scores: torch.Tensor,
-    ):
-        return
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> Optional[torch.Tensor]:
+        """Return per-query forgetting weights, shape [q_end - q_start], or None to skip."""
+        return None
 
     def select(self, scores: torch.Tensor, seq_len_k: int) -> Optional[torch.Tensor]:
         return None
@@ -182,18 +183,6 @@ class DynamicCustomCache(Cache):
             # Selection may shrink KV tensors, but logical position index must keep increasing.
             self.layer_compressors[layer_idx].seq_length = self._seen_tokens
 
-    @staticmethod
-    def _reduce_to_kv_heads(acc_scores: torch.Tensor, num_key_value_heads: int) -> torch.Tensor:
-        # acc_scores: [batch, num_heads, seq_len]
-        if acc_scores.shape[1] == num_key_value_heads:
-            return acc_scores
-        if acc_scores.shape[1] % num_key_value_heads != 0:
-            return acc_scores
-        group_size = acc_scores.shape[1] // num_key_value_heads
-        return acc_scores.view(
-            acc_scores.shape[0], num_key_value_heads, group_size, acc_scores.shape[-1]
-        ).sum(dim=2)
-
     def flash_attention(
         self,
         layer_idx: int,
@@ -202,8 +191,18 @@ class DynamicCustomCache(Cache):
         value: torch.Tensor,
         attn_mask: Optional[torch.Tensor],
         head_dim: int,
-        block_size: int = 128,
+        q_block_size: int = 128,
+        k_block_size: int = 1024,
     ) -> torch.Tensor:
+        """
+        Memory-efficient attention with optional score accumulation for KV compression.
+
+        - Decode / non-accumulating path: delegates to fused SDPA.
+        - Score-accumulating path: K-tiled online softmax (true flash-attention style),
+          so the [B,H,qb,Sk] score/probs tensor is never materialized. A second
+          K-tiled pass reconstructs probabilities (using the saved m, l) to feed the
+          compressor's per-query weights, accumulating directly in KV-head space.
+        """
         batch_size, num_heads, seq_len_q, _ = query.shape
         _, _, seq_len_k, _ = key.shape
         sm_scale = 1.0 / math.sqrt(head_dim)
@@ -218,49 +217,119 @@ class DynamicCustomCache(Cache):
         )
 
         if not need_scores:
-            # Decode / non-accumulating path: use fused SDPA (FlashAttention / mem-efficient).
-            output = F.scaled_dot_product_attention(
+            # Decode / non-accumulating path. With no padding mask and Sq>1 we can
+            # let SDPA handle causal masking internally; otherwise pass the mask
+            # through (Sq=1 decode is fine with attn_mask=None too).
+            is_causal = attn_mask is None and seq_len_q > 1
+            return F.scaled_dot_product_attention(
                 query,
                 key,
                 value,
-                attn_mask=attn_mask,
+                attn_mask=None if is_causal else attn_mask,
                 dropout_p=0.0,
-                is_causal=False,
+                is_causal=is_causal,
             )
-            return output
 
         layer_compressor.prepare_prefill(seq_len_q, seq_len_k, query.device, query.dtype)
+
+        num_kv = layer_compressor.num_key_value_heads
+        if num_kv > 0 and num_heads % num_kv == 0:
+            group = num_heads // num_kv
+        else:
+            num_kv = num_heads
+            group = 1
+
+        # Issue #2: accumulate directly in KV-head space (4x smaller for Llama3-8B).
         acc_scores = torch.zeros(
-            (batch_size, num_heads, seq_len_k), dtype=torch.float32, device=query.device
+            (batch_size, num_kv, seq_len_k), dtype=torch.float32, device=query.device
         )
         output = torch.empty_like(query)
 
-        for q_start in range(0, seq_len_q, block_size):
-            q_end = min(q_start + block_size, seq_len_q)
+        # Precompute key positions; query positions are offset because the new
+        # tokens correspond to the last seq_len_q slots of the key sequence.
+        device = query.device
+        k_pos_full = torch.arange(seq_len_k, device=device)
+        q_offset = seq_len_k - seq_len_q
+
+        for q_start in range(0, seq_len_q, q_block_size):
+            q_end = min(q_start + q_block_size, seq_len_q)
+            qb = q_end - q_start
             q_chunk = query[:, :, q_start:q_end, :]
+            q_pos = torch.arange(q_start + q_offset, q_end + q_offset, device=device)
 
-            # Native-dtype matmul; softmax in fp32 for numerical stability only.
-            scores = torch.matmul(q_chunk, key.transpose(2, 3)) * sm_scale
-            if attn_mask is not None:
-                scores = scores + attn_mask[:, :, q_start:q_end, :]
-
-            probs = torch.softmax(scores, dim=-1, dtype=torch.float32).to(q_chunk.dtype)
-            output[:, :, q_start:q_end] = torch.matmul(probs, value)
-
-            layer_compressor.accumulate_scores(
-                attn_probs=probs,
-                q_start=q_start,
-                q_end=q_end,
-                acc_scores=acc_scores,
+            # Online-softmax running state. Only [B,H,qb,*] — never grows with Sk.
+            m_i = torch.full(
+                (batch_size, num_heads, qb, 1), float("-inf"),
+                device=device, dtype=torch.float32,
+            )
+            l_i = torch.zeros(
+                (batch_size, num_heads, qb, 1), device=device, dtype=torch.float32,
+            )
+            o_i = torch.zeros(
+                (batch_size, num_heads, qb, head_dim), device=device, dtype=torch.float32,
             )
 
-        if acc_scores is not None:
-            reduced_scores = self._reduce_to_kv_heads(
-                acc_scores=acc_scores,
-                num_key_value_heads=layer_compressor.num_key_value_heads,
+            # ---- Pass 1: streaming online softmax over K blocks. ----
+            for k_start in range(0, seq_len_k, k_block_size):
+                k_end = min(k_start + k_block_size, seq_len_k)
+                kb = k_end - k_start
+                k_chunk = key[:, :, k_start:k_end, :]
+                v_chunk = value[:, :, k_start:k_end, :]
+
+                s = torch.matmul(q_chunk, k_chunk.transpose(2, 3)) * sm_scale
+                s = s.to(torch.float32)
+
+                # Issue #6: causal mask built on the fly, only [qb, kb].
+                kp = k_pos_full[k_start:k_end]
+                causal = kp.view(1, kb) > q_pos.view(qb, 1)
+                s.masked_fill_(causal.view(1, 1, qb, kb), float("-inf"))
+
+                if attn_mask is not None:
+                    s = s + attn_mask[:, :, q_start:q_end, k_start:k_end].to(torch.float32)
+
+                m_block = s.amax(dim=-1, keepdim=True)
+                m_new = torch.maximum(m_i, m_block)
+                alpha = torch.exp(m_i - m_new)
+                p = torch.exp(s - m_new)
+                l_i = l_i * alpha + p.sum(dim=-1, keepdim=True)
+                o_i = o_i * alpha + torch.matmul(p, v_chunk.to(torch.float32))
+                m_i = m_new
+
+            output[:, :, q_start:q_end, :] = (o_i / l_i).to(query.dtype)
+
+            # Per-query forgetting weights for this q-block (issue #3: no temporaries).
+            q_weights = layer_compressor.get_query_weights(
+                q_start=q_start, q_end=q_end, device=device, dtype=torch.float32,
             )
-            selected = layer_compressor.select(reduced_scores, seq_len_k=seq_len_k)
-            self._apply_selection(layer_idx=layer_idx, selected_indices=selected)
+            if q_weights is None:
+                continue
+
+            # ---- Pass 2: re-stream K blocks, materialize probs only block-by-block. ----
+            for k_start in range(0, seq_len_k, k_block_size):
+                k_end = min(k_start + k_block_size, seq_len_k)
+                kb = k_end - k_start
+                k_chunk = key[:, :, k_start:k_end, :]
+
+                s = torch.matmul(q_chunk, k_chunk.transpose(2, 3)) * sm_scale
+                s = s.to(torch.float32)
+                kp = k_pos_full[k_start:k_end]
+                causal = kp.view(1, kb) > q_pos.view(qb, 1)
+                s.masked_fill_(causal.view(1, 1, qb, kb), float("-inf"))
+                if attn_mask is not None:
+                    s = s + attn_mask[:, :, q_start:q_end, k_start:k_end].to(torch.float32)
+
+                probs = torch.exp(s - m_i) / l_i  # [B, H, qb, kb]
+
+                # Reduce query heads to KV heads (issue #2) before weighting.
+                if group > 1:
+                    probs = probs.view(batch_size, num_kv, group, qb, kb).sum(dim=2)
+
+                # Issue #3: einsum collapses q with forgetting weights, no temp tensor.
+                contrib = torch.einsum("q,bhqk->bhk", q_weights, probs)
+                acc_scores[:, :, k_start:k_end].add_(contrib)
+
+        selected = layer_compressor.select(acc_scores, seq_len_k=seq_len_k)
+        self._apply_selection(layer_idx=layer_idx, selected_indices=selected)
 
         return output
 

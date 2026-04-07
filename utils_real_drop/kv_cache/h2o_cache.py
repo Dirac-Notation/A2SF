@@ -26,14 +26,8 @@ class H2OCompressor(BaseCompressor):
     def should_accumulate_scores(self, seq_len_q: int, seq_len_k: int) -> bool:
         return not self.prompt
 
-    def accumulate_scores(
-        self,
-        attn_probs: torch.Tensor,
-        q_start: int,
-        q_end: int,
-        acc_scores: torch.Tensor,
-    ):
-        acc_scores.add_(attn_probs.to(torch.float32).sum(dim=2))
+    def get_query_weights(self, q_start, q_end, device, dtype):
+        return torch.ones(q_end - q_start, device=device, dtype=torch.float32)
 
     def select(self, scores: torch.Tensor, seq_len_k: int):
         if seq_len_k <= self.total_budget:
