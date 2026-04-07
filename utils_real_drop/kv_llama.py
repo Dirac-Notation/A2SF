@@ -25,7 +25,8 @@ from transformers.models.llama.modeling_llama import (
     repeat_kv
 )
 
-from .kv_cache import DynamicCustomCache
+from .cache import CompressedKVCache
+from .attention import compressed_attention
 
 # This makes `_prepare_4d_causal_attention_mask` a leaf function in the FX graph.
 # It means that the function will not be traced through and simply appear as a node in the graph.
@@ -80,13 +81,13 @@ class LlamaAttention(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[DynamicCustomCache] = None,
+        past_key_value: Optional[CompressedKVCache] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         **kwargs,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[DynamicCustomCache]]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[CompressedKVCache]]:
         if "padding_mask" in kwargs:
             warnings.warn(
                 "Passing `padding_mask` is deprecated and will be removed in v4.37. Please make sure use `attention_mask` instead.`"
@@ -132,35 +133,15 @@ class LlamaAttention(nn.Module):
         if attention_mask is not None and attention_mask.dim() == 4:
             causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
         
-        if cache is not None:
-            attn_output = cache.flash_attention(
-                layer_idx=self.layer_idx,
-                query=query_states,
-                key=key_states,
-                value=value_states,
-                attn_mask=causal_mask,
-                head_dim=self.head_dim,
-            )
-        else:
-            # No-cache path (e.g. use_cache=False forward). Causal masking must
-            # still apply: when no explicit 4D mask is provided, delegate to SDPA
-            # with is_causal=True so prefill cannot attend to future tokens.
-            if causal_mask is None and q_len > 1:
-                attn_output = F.scaled_dot_product_attention(
-                    query_states, key_states, value_states,
-                    attn_mask=None, dropout_p=0.0, is_causal=True,
-                )
-            else:
-                attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
-                if causal_mask is not None:
-                    attn_weights = attn_weights + causal_mask
-                attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-                attn_weights = nn.functional.dropout(
-                    attn_weights,
-                    p=self.attention_dropout,
-                    training=self.training,
-                )
-                attn_output = torch.matmul(attn_weights, value_states)
+        policy = cache.get_policy(self.layer_idx) if cache is not None else None
+        attn_output, selected = compressed_attention(
+            query_states, key_states, value_states,
+            policy=policy,
+            attn_mask=causal_mask,
+            head_dim=self.head_dim,
+        )
+        if cache is not None and selected is not None:
+            cache.compress(self.layer_idx, selected)
 
         attn_output = attn_output.transpose(1, 2).contiguous()
 
@@ -193,13 +174,13 @@ class LlamaDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[DynamicCustomCache] = None,
+        past_key_value: Optional[CompressedKVCache] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         **kwargs,
-    ) -> Tuple[torch.FloatTensor, Optional[DynamicCustomCache]]:
+    ) -> Tuple[torch.FloatTensor, Optional[CompressedKVCache]]:
         residual = hidden_states
 
         hidden_states = self.input_layernorm(hidden_states)
@@ -313,7 +294,7 @@ class LlamaModel(LlamaPreTrainedModel):
         input_ids: torch.LongTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[DynamicCustomCache] = None,
+        past_key_values: Optional[CompressedKVCache] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
@@ -339,8 +320,8 @@ class LlamaModel(LlamaPreTrainedModel):
         else:
             raise ValueError("You have to specify either input_ids or inputs_embeds")
 
-        if use_cache and past_key_values is not None and not isinstance(past_key_values, DynamicCustomCache):
-            raise TypeError("`past_key_values` must be `DynamicCustomCache` for KVLlama.")
+        if use_cache and past_key_values is not None and not isinstance(past_key_values, CompressedKVCache):
+            raise TypeError("`past_key_values` must be `CompressedKVCache` for KVLlama.")
 
         if use_cache and past_key_values is None:
             cache_device = (
@@ -348,7 +329,7 @@ class LlamaModel(LlamaPreTrainedModel):
                 if inputs_embeds is not None
                 else (input_ids.device if input_ids is not None else self.device)
             )
-            past_key_values = DynamicCustomCache(
+            past_key_values = CompressedKVCache(
                 config=self.config,
                 compression_config=getattr(self, "compression_config", None),
                 device=cache_device,
@@ -468,11 +449,7 @@ class LlamaModel(LlamaPreTrainedModel):
             all_hidden_states += (hidden_states,)
 
         next_cache = next_decoder_cache if use_cache else None
-        if next_cache is not None:
-            # 외부 코드(RL 등) 하위 호환
-            self.layer_compressors = next_cache.layer_compressors
-            self.layer_caches = self.layer_compressors
-        
+
         if not return_dict:
             return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns] if v is not None)
         return BaseModelOutputWithPast(
@@ -495,9 +472,7 @@ class KVLlamaForCausalLM(LlamaForCausalLM):
         
         # Store compression config for use in _prepare_cache_for_generation
         self.compression_config = None
-        self.layer_compressors = None
-        self.layer_caches = None
-    
+
     def init_cache(self, compression_config):
         """Initialize cache with compression config. Can also be called automatically via _prepare_cache_for_generation."""
         self.compression_config = compression_config
@@ -537,13 +512,11 @@ class KVLlamaForCausalLM(LlamaForCausalLM):
             else:
                 inferred_device = self.device
 
-        model_kwargs[cache_name] = DynamicCustomCache(
+        model_kwargs[cache_name] = CompressedKVCache(
             config=self.model.config,
             compression_config=self.compression_config,
             device=inferred_device,
         )
-        self.layer_compressors = model_kwargs[cache_name].layer_compressors
-        self.layer_caches = self.layer_compressors
 
     def prepare_inputs_for_generation(
         self,
@@ -555,7 +528,7 @@ class KVLlamaForCausalLM(LlamaForCausalLM):
         **kwargs,
     ):
         if past_key_values is not None:
-            # DynamicCustomCache follows DynamicCache API including get_seq_length.
+            # CompressedKVCache follows DynamicCache API including get_seq_length.
             past_length = past_key_values.get_seq_length()
 
             # Some generation methods already pass only the last input ID

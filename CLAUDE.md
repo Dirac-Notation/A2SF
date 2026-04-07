@@ -24,6 +24,8 @@ python longbench.py --model llama3-1b --method snap --window 16 --budget 256
 python longbench_eval.py result_txt/pred/llama3-1b_snap_16_256
 ```
 
+Supported `--method` values: `full`, `a2sf`, `snap`, `sigmoid`. (`h2o` was removed.)
+
 ### Run LongBench evaluation (RL agent)
 ```bash
 python longbench_RL.py --model llama3-1b --budget 1024 --rl_checkpoint runs/a2sf_rl/policy_final.pt
@@ -38,13 +40,21 @@ python RL/training/run.py --model llama3-1b --epochs 2000 --save_dir runs/a2sf_r
 ## Architecture
 
 ### KV Cache Compression (`utils_real_drop/`)
-- `kv_llama.py` — `KVLlamaForCausalLM`: Custom Llama model extending HuggingFace with configurable KV cache compression. Entry point is `model.init_cache(use_compression, select_budget, recent_budget)`.
-- `kv_cache/` — Compressor implementations, all inheriting `BaseCompressor`:
-  - `a2sf_cache.py` — A2SF: exponential forgetting factor for temporal weighting of attention scores
-  - `h2o_cache.py` — H2O: simple score accumulation on prefill then selection
-  - `sigmoid_cache.py` — Sigmoid-based compression
-  - `snap_cache.py` — SnapKV compression
-- All methods balance `select_budget` (scored token selection) vs `recent_budget` (always-keep recent tokens).
+Responsibilities are split into four model-agnostic pieces plus a Llama wiring layer:
+
+- `kv_llama.py` — `KVLlamaForCausalLM`: Custom Llama model extending HuggingFace. Entry point is `model.init_cache(compression_config)` (pass `None` for no compression). Its `LlamaAttention.forward` does: `cache.update(k, v)` → `repeat_kv` → `compressed_attention(...)` → `cache.compress(layer_idx, selected)`.
+- `attention.py` — `compressed_attention(query, key, value, *, policy, attn_mask, head_dim)`: model-agnostic attention kernel. Two paths:
+  - Fast path (no policy or already prefilled): `F.scaled_dot_product_attention` with `is_causal`.
+  - Score-accumulating path: K-tiled online softmax (true flash-attention style, never materializes `[B,H,qb,Sk]`), followed by a second K-tiled pass that reconstructs probabilities from saved `(m, l)` to feed the policy's per-query weights. Scores are accumulated directly in KV-head space.
+- `cache.py` — `CompressedKVCache(Cache)`: HuggingFace-compatible cache. Stores K/V tensors, owns the per-layer policies, exposes `update`, `compress`, `get_seq_length` (always returns the *logical* length so position ids keep advancing after compression). Knows nothing about attention math.
+- `policies/` — Compression policies, all inheriting `CompressionPolicy`:
+  - `base.py` — abstract base + `_topk_with_recent` helper for the "score topk + always-keep recent" pattern. `recent_budget=16` is hardcoded by design.
+  - `a2sf.py` — A2SF: exponential forgetting window over query positions
+  - `snap.py` — SnapKV: only queries inside the observation window contribute
+  - `sigmoid.py` — Sigmoid-shaped forgetting window
+  - `__init__.py` — `build_policies(compression_config, num_layers, num_kv_heads)` dispatcher with `_REGISTRY`. Adding a new method = subclass `CompressionPolicy` + register one line.
+
+Each policy implements only `prepare_prefill`, `get_query_weights(q_start, q_end, ...)`, and `select(scores, seq_len_k)`. The attention kernel handles the rest.
 
 ### Reinforcement Learning (`RL/`)
 - `a2sf_model.py` — `A2SFModel`: ties together environment, agent, and runner. `ModelConfig` defines action space (a_values, b_values).
