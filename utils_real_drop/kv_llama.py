@@ -293,34 +293,6 @@ class LlamaModel(LlamaPreTrainedModel):
         # Note: Actual cache creation is done in _prepare_cache_for_generation
         # This method just stores the config for later use
         
-    def set_forget(self, input_ids, past_key_values):
-        """
-        Set forgetting factors/exponents for compression methods that need them.
-        This is called during forward pass to set exponents based on input_ids.
-        """
-        if not hasattr(self, 'compression_method') or self.compression_method is None:
-            return
-            
-        exponents = None
-        
-        if self.compression_method == "a2sf" or self.compression_method == "linear" or self.compression_method == "sigmoid":
-            if input_ids.size(1) > 1:
-                orig_shape = input_ids.shape
-                exponents = (
-                    torch.arange(0, orig_shape[1], device=input_ids.device, dtype=torch.float32)
-                    .view(1, 1, orig_shape[1])
-                    .expand(orig_shape[0], 1, orig_shape[1])
-                    .contiguous()
-                )
-
-        # Set exponents in cache
-        if hasattr(past_key_values, "layer_compressors"):
-            for layer_compressor in past_key_values.layer_compressors:
-                if hasattr(layer_compressor, 'exponents'):
-                    # Keep exponents on input device. Per-layer cache hooks
-                    # align to the layer's device at use-time.
-                    layer_compressor.exponents = exponents
-
     def get_input_embeddings(self):
         return self.embed_tokens
 
@@ -392,9 +364,6 @@ class LlamaModel(LlamaPreTrainedModel):
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
 
-        if input_ids is not None and past_key_values is not None:
-            self.set_forget(input_ids, past_key_values)
-        
         # Create position embeddings to be shared across decoder layers (transformers 4.46.2)
         position_embeddings = self.rotary_emb(inputs_embeds, position_ids)
         
@@ -594,7 +563,7 @@ class KVLlamaForCausalLM(LlamaForCausalLM):
         if inputs_embeds is not None and past_key_values is None:
             model_inputs = {"inputs_embeds": inputs_embeds}
         else:
-            model_inputs = {"input_ids": input_ids.clone(memory_format=torch.contiguous_format)}
+            model_inputs = {"input_ids": input_ids}
 
         model_inputs.update(
             {

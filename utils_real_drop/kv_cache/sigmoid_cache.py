@@ -35,6 +35,7 @@ class SigmoidCompressor(BaseCompressor):
         self.select_budget = self.total_budget - self.recent_budget
         self.a = self._as_1d_tensor(compression_config.a, device=self.device, dtype=torch.float32)
         self.b = self._as_1d_tensor(compression_config.b, device=self.device, dtype=torch.float32)
+        self.exponents = None
         self.window = None
 
     def should_accumulate_scores(self, seq_len_q: int, seq_len_k: int) -> bool:
