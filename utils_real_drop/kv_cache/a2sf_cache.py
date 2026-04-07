@@ -26,6 +26,7 @@ class A2SFCompressor(BaseCompressor):
         self.recent_budget = 16
         self.select_budget = self.total_budget - self.recent_budget
         self.forgetting_factor = compression_config.forgetting_factor
+        self.exponents = None
         self.window = None
 
     def should_accumulate_scores(self, seq_len_q: int, seq_len_k: int) -> bool:
