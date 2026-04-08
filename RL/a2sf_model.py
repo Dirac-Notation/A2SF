@@ -71,9 +71,16 @@ class A2SFModel:
         # Policy head names must match longbench_eval.dataset2metric fn names.
         metric_heads = sorted({fn.__name__ for fn in dataset2metric.values()})
 
-        # Default action-space values come from `config`.
-        a_values = self.config.a_values
-        b_values = self.config.b_values
+        # When loading a checkpoint, the action space (a_values / b_values) is
+        # baked into the saved state_dict as parameters. Rebuild the agent using
+        # those shapes so old checkpoints stay loadable even after ModelConfig
+        # defaults change.
+        if state_dict is not None and "a_values" in state_dict and "b_values" in state_dict:
+            a_values = state_dict["a_values"].to(dtype=torch.float32).clone()
+            b_values = state_dict["b_values"].to(dtype=torch.float32).clone()
+        else:
+            a_values = self.config.a_values
+            b_values = self.config.b_values
 
         self.agent = NeuralUCBAgent(
             state_dim=state_dim,
@@ -85,6 +92,10 @@ class A2SFModel:
         if state_dict is not None:
             self.agent.load_state_dict(state_dict)
             self.agent.eval()
+            # Keep config in sync with what was actually loaded so downstream
+            # code (env.run_with_action, logging, etc.) sees the right space.
+            self.config.a_values = a_values
+            self.config.b_values = b_values
 
     @torch.no_grad()
     def generate(
