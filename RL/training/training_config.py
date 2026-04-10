@@ -23,7 +23,7 @@ class TrainingConfig:
 
     # ----- Reproducibility / IO -----
     seed: int = 42
-    save_dir: str = "runs/fix_512_2000"
+    save_dir: str = "runs/a2sf_rl"
     resume: Optional[str] = None
     # 0이면 에폭 중간 체크포인트를 저장하지 않는다. 최종 저장은 run.py에서 policy_final.pt로 수행.
     checkpoint_every_epochs: int = 100
