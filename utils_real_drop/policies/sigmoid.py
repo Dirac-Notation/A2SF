@@ -22,8 +22,7 @@ class SigmoidPolicy(CompressionPolicy):
         exponents = torch.arange(seq_len_q, device=device, dtype=torch.float32)
         a = self.a.to(device=device, dtype=torch.float32).view(-1, 1)
         b = self.b.to(device=device, dtype=torch.float32).view(-1, 1)
-        # 1 / exp(-a * (q - (S - b - 1)))  — preserve original formula.
-        window = 1 / (1 + torch.exp(-a * (self.exponents - (seq_len_q - b - 1.0))))
+        window = 1 / torch.exp(-a * (exponents - (seq_len_q - b - 1.0)))
         self._window = window[0]  # take the first parameter set; matches old behavior
 
     def get_query_weights(self, q_start, q_end, device, dtype):
