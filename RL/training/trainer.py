@@ -43,8 +43,8 @@ class A2SFTrainer:
         self.device = first_layer_device
         self.env.device = first_layer_device
 
-        # State dimension: [seq_length] + [head entropy, head max_pos] per attention head
         state_dim = int(self.env.context_encoder.output_dim)
+        num_heads = int(self.env.context_encoder.num_heads)
         metric_heads = sorted({fn.__name__ for fn in dataset2metric.values()})
 
         self.agent = NeuralUCBAgent(
@@ -52,6 +52,7 @@ class A2SFTrainer:
             a_values=self.model_config.a_values,
             b_values=self.model_config.b_values,
             metric_heads=metric_heads,
+            num_heads=num_heads,
         ).to(self.device)
 
         # Optimizer only includes agent parameters

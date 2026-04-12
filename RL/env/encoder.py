@@ -50,14 +50,14 @@ class AttentionEncoder(nn.Module):
     """
     Metadata encoder for RL state construction.
 
-    Returns a feature vector:
-      [ normalized_sequence_length, normalized_token_budget, per-head entropy, per-head max-position ].
-    where per-head max-position is normalized by sequence length.
+    Returns a feature vector structured as:
+      [ seq_len, token_budget,
+        tova_top1(H), tova_top2(H), tova_top3(H), tova_top4(H),
+        snap_top1(H), snap_top2(H), snap_top3(H), snap_top4(H) ]
 
-    Important: Do NOT register `target_model` or any of its submodules as children of this
-    module. Assigning `self.target_model = ...` would register them and then `.to(device)`
-    would move the *entire* loaded model (or duplicate/move shards), breaking `device_map`
-    and custom Llama wrappers (e.g. kv_llama). We keep plain references via `object.__setattr__`.
+    - snapkv_score: cumulative attention from last 16 queries
+    - tova_score: attention from the last 1 query only
+    - top-k positions are normalized by (seq_len - 1)
     """
 
     def __init__(
@@ -93,9 +93,11 @@ class AttentionEncoder(nn.Module):
         object.__setattr__(self, "k_proj", self.self_attn.k_proj)
         object.__setattr__(self, "embed_tokens", self.target_model.model.embed_tokens)
 
+        self.topk = 4
+
         if self.output_dim <= 0:
-            # [seq_len, token_budget] scalars + [entropy,max_pos] per head
-            self.output_dim = 2 + (2 * self.num_heads)
+            # [seq_len, token_budget] + [tova_topk(4*H), snap_topk(4*H)]
+            self.output_dim = 2 + (2 * self.topk * self.num_heads)
 
     @property
     def _encode_device(self) -> torch.device:
@@ -103,8 +105,16 @@ class AttentionEncoder(nn.Module):
         return self.embed_tokens.weight.device
 
     @staticmethod
-    def _entropy(prob: torch.Tensor) -> torch.Tensor:
-        return -torch.sum(prob * torch.log(prob.clamp_min(1e-12)), dim=-1)
+    def _topk_positions(acc_scores: torch.Tensor, seq_len: int, k: int) -> torch.Tensor:
+        """Return normalized top-k positions from accumulated attention scores [H, T].
+
+        Returns: [top1(H), top2(H), ..., topk(H)] flattened to (k*H,).
+        """
+        actual_k = min(k, acc_scores.size(-1))
+        _, topk_idx = torch.topk(acc_scores, actual_k, dim=-1)  # [H, k]
+        topk_norm = topk_idx.to(dtype=torch.float32) / max(float(seq_len - 1), 1.0)
+        # topk_idx is [H, k] -> transpose to [k, H] then flatten to (k*H,)
+        return topk_norm.t().contiguous().reshape(-1).to(torch.float32)
 
     def _build_first_layer_attention_features(self, input_ids: torch.Tensor) -> torch.Tensor:
         input_ids = input_ids.to(self._encode_device)
@@ -127,31 +137,31 @@ class AttentionEncoder(nn.Module):
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
         k = repeat_kv(k, self.num_key_value_groups)  # [B, num_heads, T, D]
-        q = q[:, :, q_start:, :]
+        q_snap = q[:, :, q_start:, :]  # last num_query_tokens queries
+        q_tova = q[:, :, -1:, :]       # last 1 query only
 
-        # attention score simulation with causal masking (absolute positions)
-        attn_scores = torch.matmul(q, k.transpose(-2, -1)) / (self.head_dim ** 0.5)
-        query_positions = torch.arange(q_start, seq_len, device=attn_scores.device)
-        key_positions = torch.arange(seq_len, device=attn_scores.device)
+        # --- SnapKV score: cumulative attention from last 16 queries ---
+        attn_scores_snap = torch.matmul(q_snap, k.transpose(-2, -1)) / (self.head_dim ** 0.5)
+        snap_query_positions = torch.arange(q_start, seq_len, device=attn_scores_snap.device)
+        key_positions = torch.arange(seq_len, device=attn_scores_snap.device)
+        causal_mask_snap = key_positions.unsqueeze(0) > snap_query_positions.unsqueeze(1)
+        attn_scores_snap = attn_scores_snap.masked_fill(causal_mask_snap.unsqueeze(0).unsqueeze(0), float("-inf"))
+        attn_probs_snap = F.softmax(attn_scores_snap, dim=-1)
+        snapkv_acc = attn_probs_snap.sum(dim=2).squeeze(0)  # [H, T]
 
-        causal_mask = key_positions.unsqueeze(0) > query_positions.unsqueeze(1)  # [Q, T]
-        attn_scores = attn_scores.masked_fill(causal_mask.unsqueeze(0).unsqueeze(0), float("-inf"))
+        # --- TOVA score: attention from the last 1 query ---
+        attn_scores_tova = torch.matmul(q_tova, k.transpose(-2, -1)) / (self.head_dim ** 0.5)
+        tova_query_pos = torch.tensor([seq_len - 1], device=attn_scores_tova.device)
+        causal_mask_tova = key_positions.unsqueeze(0) > tova_query_pos.unsqueeze(1)
+        attn_scores_tova = attn_scores_tova.masked_fill(causal_mask_tova.unsqueeze(0).unsqueeze(0), float("-inf"))
+        attn_probs_tova = F.softmax(attn_scores_tova, dim=-1)
+        tova_acc = attn_probs_tova.sum(dim=2).squeeze(0)  # [H, T]
 
-        attn_probs = F.softmax(attn_scores, dim=-1)  # [1, H, Q, T]
+        tova_topk = self._topk_positions(tova_acc, seq_len, self.topk)    # (4*H,)
+        snap_topk = self._topk_positions(snapkv_acc, seq_len, self.topk)  # (4*H,)
 
-        # H2O-like cumulative attention score over queries
-        acc_scores = attn_probs.sum(dim=2).squeeze(0)  # [H, T]
-        normalized_scores = acc_scores / acc_scores.sum(dim=-1, keepdim=True).clamp_min(1e-12)
-
-        entropies = self._entropy(normalized_scores)  # [H]
-        entropies = entropies / torch.log(
-            torch.tensor(float(seq_len), device=entropies.device, dtype=entropies.dtype).clamp_min(2.0)
-        )
-
-        max_pos = torch.argmax(acc_scores, dim=-1).to(dtype=torch.float32)  # [H]
-        max_pos_norm = max_pos / max(float(seq_len - 1), 1.0)
-
-        return torch.cat([entropies.to(torch.float32), max_pos_norm.to(torch.float32)], dim=-1)
+        # Return: [tova_top1(H)..tova_top4(H), snap_top1(H)..snap_top4(H)]
+        return torch.cat([tova_topk, snap_topk], dim=-1)
 
     def encode_context(
         self,
@@ -192,4 +202,3 @@ class AttentionEncoder(nn.Module):
 
 
 __all__ = ["AttentionEncoder"]
-

@@ -13,20 +13,18 @@ class TrainingConfig:
     lr: float = 1e-1
     ucb_beta_max: float = 1.0
     ucb_beta_min: float = 0.1
-    l2_coef: float = 1e-6
+    l2_coef: float = 1e-5
 
     # ----- Training configuration -----
     epochs: int = 2000
     episodes_per_update: int = 32
-    # 학습에 사용할 token budget (jsonl의 action_*_by_budget 키와 일치해야 함).
     token_budget: int = 512
 
     # ----- Reproducibility / IO -----
     seed: int = 42
     save_dir: str = "runs/a2sf_rl"
     resume: Optional[str] = None
-    # 0이면 에폭 중간 체크포인트를 저장하지 않는다. 최종 저장은 run.py에서 policy_final.pt로 수행.
-    checkpoint_every_epochs: int = 100
+    checkpoint_every_epochs: int = 500
 
     # ----- Dataset paths (fixed splits) -----
     train_data_path: str = "RL/training/data/training_data.jsonl"
@@ -41,6 +39,7 @@ class TrainingConfig:
         parser.add_argument("--train_data_path", type=str, default=default_cfg.train_data_path)
         parser.add_argument("--epochs", type=int, default=default_cfg.epochs)
         parser.add_argument("--episodes_per_update", type=int, default=default_cfg.episodes_per_update)
+        parser.add_argument("--token_budget", type=int, default=default_cfg.token_budget)
         parser.add_argument("--lr", type=float, default=default_cfg.lr)
         parser.add_argument("--ucb_beta_max", type=float, default=default_cfg.ucb_beta_max)
         parser.add_argument("--ucb_beta_min", type=float, default=default_cfg.ucb_beta_min)
@@ -56,6 +55,7 @@ class TrainingConfig:
             l2_coef=args.l2_coef,
             epochs=args.epochs,
             episodes_per_update=args.episodes_per_update,
+            token_budget=args.token_budget,
             seed=args.seed,
             save_dir=args.save_dir,
             resume=args.resume,

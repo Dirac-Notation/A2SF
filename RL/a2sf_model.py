@@ -17,12 +17,10 @@ class ModelConfig:
 
     # ----- Agent Action Space -----
     a_values: torch.Tensor = field(
-        # default_factory=lambda: torch.tensor([0.0, 0.2, 0.4, 0.6, 0.8, 1.0], dtype=torch.float32)
-        default_factory=lambda: torch.tensor([0.0, 0.001, 0.01, 0.1, 1.0], dtype=torch.float32)
+        default_factory=lambda: torch.tensor([0.0, 0.001, 0.0025, 0.005, 0.0075, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0], dtype=torch.float32)
     )
     b_values: torch.Tensor = field(
-        # default_factory=lambda: torch.tensor([1, 16, 128, 1024], dtype=torch.float32)
-        default_factory=lambda: torch.tensor([1, 16, 32, 64, 128, 256, 512], dtype=torch.float32)
+        default_factory=lambda: torch.tensor([0.0], dtype=torch.float32)
     )
 
     # Note: KVLlama internally uses `device_map="auto"`; we still keep a logical device
@@ -67,6 +65,7 @@ class A2SFModel:
 
         # State dim is determined by encoder output.
         state_dim = int(self.env.context_encoder.output_dim)
+        num_heads = int(self.env.context_encoder.num_heads)
 
         # Policy head names must match longbench_eval.dataset2metric fn names.
         metric_heads = sorted({fn.__name__ for fn in dataset2metric.values()})
@@ -87,6 +86,7 @@ class A2SFModel:
             a_values=a_values,
             b_values=b_values,
             metric_heads=metric_heads,
+            num_heads=num_heads,
         ).to(first_layer_device)
 
         if state_dict is not None:

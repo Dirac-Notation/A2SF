@@ -2,44 +2,52 @@
 
 set -e
 
-# 기본값 (CLI에서 덮어쓸 수 있음)
+usage() {
+    echo "Usage: bash script/fast_pred.sh [OPTIONS]"
+    echo ""
+    echo "Options:"
+    echo "  -b, --budget          Token budget (default: 256)"
+    echo "  -m, --model           Model name (default: llama3-1b)"
+    echo "  -t, --method          Compression method (default: snap)"
+    echo "  -w, --window          Window size (default: 16)"
+    echo "  -g, --gpus_per_model  GPUs per model instance (default: 1)"
+    echo "  -h, --help            Show this help message"
+    exit 0
+}
+
 budget=256
-model=llama3-1b
-method=snap
+model="llama3-1b"
+method="snap"
 window=16
 gpus_per_model=1
 
-usage() {
-  echo "Usage: $0 [-b budget] [-m model] [-t method] [-w window] [-g gpus_per_model]"
-  echo "  -b: token budget (default: ${budget})"
-  echo "  -m: model name (default: ${model})"
-  echo "  -t: compression method (default: ${method})"
-  echo "  -w: window size (default: ${window})"
-  echo "  -g: GPUs per model instance (default: ${gpus_per_model})"
-}
-
-while getopts "b:m:t:w:g:h" opt; do
-  case "$opt" in
-    b) budget="$OPTARG" ;;
-    m) model="$OPTARG" ;;
-    t) method="$OPTARG" ;;
-    w) window="$OPTARG" ;;
-    g) gpus_per_model="$OPTARG" ;;
-    h) usage; exit 0 ;;
-    *) usage; exit 1 ;;
-  esac
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help) usage ;;
+        -b|--budget) budget="$2"; shift 2 ;;
+        -m|--model) model="$2"; shift 2 ;;
+        -t|--method) method="$2"; shift 2 ;;
+        -w|--window) window="$2"; shift 2 ;;
+        -g|--gpus_per_model) gpus_per_model="$2"; shift 2 ;;
+        *) echo "Unknown option: $1"; usage ;;
+    esac
 done
 
-echo "Running LongBench prediction with:"
-echo "  model=${model}, method=${method}, window=${window}, budget=${budget}, gpus_per_model=${gpus_per_model}"
+echo "Running LongBench prediction"
+echo "================================="
+echo "Model: $model"
+echo "Method: $method"
+echo "Window: $window"
+echo "Budget: $budget"
+echo "GPUs per model: $gpus_per_model"
 
 # longbench.py 내부에서 보이는 GPU들을 모두 사용해 멀티프로세스로 처리합니다.
 python longbench.py \
-  --model "$model" \
-  --method "$method" \
-  --window "$window" \
-  --budget "$budget" \
-  --gpus_per_model "$gpus_per_model"
+    --model "$model" \
+    --method "$method" \
+    --window "$window" \
+    --budget "$budget" \
+    --gpus_per_model "$gpus_per_model"
 
 echo ""
 echo "All prediction tasks completed. Running evaluation..."

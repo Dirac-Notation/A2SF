@@ -763,10 +763,10 @@ def build_offline_action_cache(
 
             ctx = mp.get_context("spawn")
             task_queue = ctx.Queue()
-            # prefill 토큰 길이(긴 것 먼저) 순.
+            # prefill 토큰 길이(긴 것 먼저), 같으면 generation 길이(긴 것 먼저) 순.
             ordered_samples = sorted(
                 samples,
-                key=lambda s: -int(s.get("length", 0)),
+                key=lambda s: (-int(s.get("length", 0)), -int(s.get("generation_length", 0))),
             )
             # sample → budget 순으로 태스크 큐에 넣음 (각 태스크 안에서 액션 순차 생성).
             for sample in ordered_samples:
@@ -814,23 +814,6 @@ def build_offline_action_cache(
                 pred_acc[key][action_idx] = pred_text
 
                 done_actions_loop += 1
-                elapsed = max(1e-6, time.time() - started_at)
-                rate = done_actions_loop / elapsed
-                eta_sec = (
-                    int((total_pending_actions - done_actions_loop) / rate) if rate > 0 else 0
-                )
-                global_done_actions = completed_sample_budget_units * action_size + done_actions_loop
-                global_pct_actions = (
-                    (100.0 * global_done_actions / total_action_units)
-                    if total_action_units > 0
-                    else 100.0
-                )
-                print(
-                    f"[offline-cache] {global_done_actions}/{total_action_units} "
-                    f"actions ({global_pct_actions:.1f}%) | {rate:.2f} actions/s | "
-                    f"ETA {_format_eta_sec(eta_sec)}",
-                    flush=True,
-                )
 
                 if len(pred_acc[key]) == action_size:
                     preds = [pred_acc[key][i] for i in range(action_size)]
@@ -855,6 +838,24 @@ def build_offline_action_cache(
                     fh.flush()
 
                     try_emit_merged(sample_id)
+
+                elapsed = max(1e-6, time.time() - started_at)
+                rate = done_actions_loop / elapsed
+                global_done_actions = completed_sample_budget_units * action_size + done_actions_loop
+                global_pct_actions = (
+                    (100.0 * global_done_actions / total_action_units)
+                    if total_action_units > 0
+                    else 100.0
+                )
+                cur_sample = samples[sample_id]
+                cur_prompt_len = int(cur_sample.get("length", 0))
+                cur_gen_len = int(cur_sample.get("generation_length", 0))
+                print(
+                    f"[offline-cache] {global_done_actions}/{total_action_units} "
+                    f"actions ({global_pct_actions:.1f}%) | {rate:.2f} actions/s | "
+                    f"prompt={cur_prompt_len} gen={cur_gen_len}",
+                    flush=True,
+                )
 
                 remaining -= 1
 
