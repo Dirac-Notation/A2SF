@@ -25,8 +25,7 @@ def _build_snap(cfg, num_kv):
 
 
 def _build_sigmoid(cfg, num_kv):
-    recent_budget = int(0.125 * cfg.total_budget)
-    return SigmoidPolicy(num_kv, cfg.total_budget, cfg.a, cfg.b, recent_budget=recent_budget)
+    return SigmoidPolicy(num_kv, cfg.total_budget, cfg.a, cfg.b)
 
 
 _REGISTRY = {

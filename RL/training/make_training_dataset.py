@@ -158,68 +158,222 @@ def load_tokenizer(model_name: str):
     return AutoTokenizer.from_pretrained(model_path)
 
 
-MIDDLE_TRIM = 128
-# 문자 길이가 이 값 이하면 중간 4등분 셔플을 적용하지 않는다(샘플 1개만 유지).
-MIN_PROMPT_LEN_FOR_MIDDLE_SHUFFLE = 512
+DATASET2PROMPT_PATH = os.path.join(REPO_ROOT, "config", "dataset2prompt.json")
+with open(DATASET2PROMPT_PATH, "r", encoding="utf-8") as f:
+    DATASET_TO_PROMPT = json.load(f)
+
+# Code Complete 데이터셋은 셔플하지 않는다.
+_NO_SHUFFLE_DATASETS = {"lcc", "repobench-p"}
+
+# Passage N: 형태의 구분자를 사용하는 데이터셋 (Multi-doc QA)
+_PASSAGE_DELIM_DATASETS = {"hotpotqa", "2wikimqa", "musique", "dureader"}
+
+# Paragraph N 형태의 구분자를 사용하는 데이터셋 (Passage Retrieval/Count)
+_PARAGRAPH_DELIM_DATASETS = {"passage_retrieval_en", "passage_retrieval_zh", "passage_count"}
+
+import re as _re
 
 
-def augment_prompt_middle_quarter_shuffle_variants(
+def _extract_context_from_prompt(prompt: str, dataset: str) -> Tuple[str, str, str]:
+    """프롬프트에서 (head, context, tail)을 분리한다.
+
+    dataset2prompt.json의 템플릿에서 {context} 앞뒤 고정 문자열을 이용해 역파싱.
+    분리 실패 시 (prompt, "", "")을 반환 (셔플 불가 → 원본 유지).
+    """
+    template = DATASET_TO_PROMPT.get(dataset, "")
+    if not template or "{context}" not in template:
+        return prompt, "", ""
+
+    # {context} 기준으로 앞뒤 분리
+    parts = template.split("{context}", 1)
+    head_tmpl = parts[0]
+    tail_tmpl = parts[1]
+
+    # tail_tmpl에 {input}이 있으면 그 앞부분까지만 매칭에 사용
+    if "{input}" in tail_tmpl:
+        tail_match_str = tail_tmpl.split("{input}", 1)[0]
+    else:
+        tail_match_str = tail_tmpl
+
+    # head_tmpl은 고정 문자열이므로 그대로 매칭
+    if not prompt.startswith(head_tmpl):
+        return prompt, "", ""
+
+    # tail_match_str로 context 끝 위치 찾기 (뒤에서부터 검색)
+    if tail_match_str:
+        tail_pos = prompt.rfind(tail_match_str, len(head_tmpl))
+        if tail_pos < 0:
+            return prompt, "", ""
+        head = prompt[:len(head_tmpl)]
+        context = prompt[len(head_tmpl):tail_pos]
+        tail = prompt[tail_pos:]
+    else:
+        head = prompt[:len(head_tmpl)]
+        context = prompt[len(head_tmpl):]
+        tail = ""
+
+    return head, context, tail
+
+
+def _split_by_passage_markers(context: str) -> List[str]:
+    """'Passage N:' 또는 '段落N' 형태의 마커로 분리."""
+    parts = _re.split(r"(?=Passage \d+[:\n])", context)
+    if len(parts) <= 1:
+        # 중국어 형태 시도
+        parts = _re.split(r"(?=段落\d+)", context)
+    return [p for p in parts if p.strip()]
+
+
+def _split_by_paragraph_markers(context: str) -> List[str]:
+    """'Paragraph N' 형태의 마커로 분리."""
+    parts = _re.split(r"(?=Paragraph \d+)", context)
+    if len(parts) <= 1:
+        parts = _re.split(r"(?=段落\d+)", context)
+    return [p for p in parts if p.strip()]
+
+
+def _split_by_double_newline(context: str) -> List[str]:
+    """Few-shot 예시 단위로 분리.
+
+    \\n\\n이 있으면 그 기준, 없으면 \\r\\n\\r\\n, 그래도 없으면
+    'Passage:' / 'Question:' / 'Dialogue:' 등의 마커로 분리한다.
+    """
+    if "\n\n" in context:
+        return context.split("\n\n")
+    if "\r\n\r\n" in context:
+        return context.split("\r\n\r\n")
+    # Few-shot 예시가 Passage:/Question:/Dialogue: 등으로 시작하는 경우
+    parts = _re.split(r"(?=(?:Passage|Question|Dialogue|Example)[:\s])", context)
+    if len(parts) > 1:
+        return parts
+    # 최후 fallback: \n 기준
+    return context.split("\n")
+
+
+def _split_by_sentence(context: str) -> List[str]:
+    """문장 단위로 분리. Single-doc QA, Summarization 용.
+
+    줄바꿈(\\n)이 충분히 있으면 줄바꿈 기준으로 분리하고,
+    그렇지 않으면 마침표/물음표/느낌표 뒤에서 분리한다.
+    빈 줄은 인접한 비어있지 않은 줄에 붙여서 보존한다.
+    """
+    lines = context.split("\n")
+    non_empty = [l for l in lines if l.strip()]
+    if len(non_empty) >= 4:
+        # 빈 줄은 다음 비어있지 않은 줄에 붙여서 블록 단위로 그룹핑
+        blocks: List[str] = []
+        buf: List[str] = []
+        for line in lines:
+            buf.append(line)
+            if line.strip():
+                blocks.append("\n".join(buf))
+                buf = []
+        if buf:
+            # 끝에 남은 빈 줄들은 마지막 블록에 붙임
+            if blocks:
+                blocks[-1] += "\n" + "\n".join(buf)
+            else:
+                blocks.append("\n".join(buf))
+        return blocks
+    # 줄바꿈이 부족하면 문장 단위
+    sentences = _re.split(r"(?<=[.!?])\s+(?=[A-Z\u4e00-\u9fff])", context)
+    return [s for s in sentences if s.strip()]
+
+
+def _shuffle_parts(parts: List[str], rng: random.Random) -> List[str]:
+    """리스트를 셔플하여 반환 (원본 변경 없음)."""
+    shuffled = list(parts)
+    rng.shuffle(shuffled)
+    return shuffled
+
+
+def augment_prompt_context_shuffle(
     prompt: str,
+    dataset: str,
     rng: random.Random,
     num_augment: int = 4,
 ) -> List[str]:
-    """
-    `prompt[128:-128]` 구간을 4등분한 뒤, 청크 1~4가 모두 한 번씩 쓰이도록 순서를 바꾼 프롬프트들을 만든다.
-    - `num_augment == 1`: 원래 순서 (1→2→3→4)만.
-    - `num_augment >= 2`: 위 1개 + 랜덤 순열을 `num_augment - 1`개 추가(가능하면 서로 다른 순열).
-    앞 128자·뒤 128자는 그대로 둔다.
-    `len(prompt) <= MIN_PROMPT_LEN_FOR_MIDDLE_SHUFFLE`이면 셔플을 하지 않고 `[prompt]` 한 개만 반환한다.
+    """데이터셋 유형에 따라 context 내부를 의미 단위로 셔플하여 augment 변형을 생성한다.
+
+    - Code Complete: 셔플 안 함
+    - Multi-doc QA: Passage 단위
+    - Passage Retrieval/Count: Paragraph 단위
+    - Few Shot: \\n\\n 단위 (예시별)
+    - Single-doc QA, Summarization: 문장 단위
+
+    Returns: [원본, 셔플변형1, ...] 최대 num_augment개
     """
     if num_augment < 1:
         raise ValueError(f"num_augment must be >= 1, got {num_augment}")
 
-    if len(prompt) <= MIN_PROMPT_LEN_FOR_MIDDLE_SHUFFLE:
+    # Code Complete → 셔플 안 함
+    if dataset in _NO_SHUFFLE_DATASETS:
         return [prompt]
 
-    head = prompt[:MIDDLE_TRIM]
-    tail = prompt[-MIDDLE_TRIM:]
-    middle = prompt[MIDDLE_TRIM:-MIDDLE_TRIM]
-    n = len(middle)
-    if n < 4:
+    head, context, tail = _extract_context_from_prompt(prompt, dataset)
+    if not context:
         return [prompt]
 
-    q, r = divmod(n, 4)
-    sizes = [q + (1 if i < r else 0) for i in range(4)]
-    parts: List[str] = []
-    pos = 0
-    for sz in sizes:
-        parts.append(middle[pos : pos + sz])
-        pos += sz
+    # 데이터셋별 분리 방식 선택
+    if dataset in _PASSAGE_DELIM_DATASETS:
+        parts = _split_by_passage_markers(context)
+    elif dataset in _PARAGRAPH_DELIM_DATASETS:
+        parts = _split_by_paragraph_markers(context)
+    elif DATASET_TO_TASK.get(dataset) == "Few Shot":
+        parts = _split_by_double_newline(context)
+    else:
+        # Single-doc QA, Summarization 등
+        parts = _split_by_sentence(context)
 
-    def assemble(order: List[int]) -> str:
-        return head + "".join(parts[i] for i in order) + tail
+    # 내용이 있는 파트만 셔플 대상으로, 빈 파트는 위치 고정
+    content_indices = [i for i, p in enumerate(parts) if p.strip()]
+    if len(content_indices) < 2:
+        return [prompt]
 
-    identity = (0, 1, 2, 3)
-    orders: List[Tuple[int, ...]] = [identity]
+    # 원본 구분자 복원을 위해 join 문자열 결정
+    if dataset in _PASSAGE_DELIM_DATASETS or dataset in _PARAGRAPH_DELIM_DATASETS:
+        joiner = ""
+    elif DATASET_TO_TASK.get(dataset) == "Few Shot":
+        # split 방식에 맞춘 joiner
+        if "\n\n" in context:
+            joiner = "\n\n"
+        elif "\r\n\r\n" in context:
+            joiner = "\r\n\r\n"
+        elif len(_re.split(r"(?=(?:Passage|Question|Dialogue|Example)[:\s])", context)) > 1:
+            joiner = ""
+        else:
+            joiner = "\n"
+    else:
+        # 줄바꿈 기반이면 "\n", 문장 기반이면 " "
+        lines = context.split("\n")
+        non_empty = [l for l in lines if l.strip()]
+        joiner = "\n" if len(non_empty) >= 4 else " "
+
+    def _assemble_shuffled(shuffled_content: List[str]) -> str:
+        """빈 파트 위치를 유지하면서 내용 파트만 교체하여 재조립."""
+        result = list(parts)
+        for slot, new_val in zip(content_indices, shuffled_content):
+            result[slot] = new_val
+        return head + joiner.join(result) + tail
+
+    results = [prompt]  # 첫 번째는 항상 원본
+
     if num_augment == 1:
-        return [assemble(list(identity))]
+        return results
 
-    seen = {identity}
+    content_parts = [parts[i] for i in content_indices]
     for _ in range(num_augment - 1):
         for _attempt in range(500):
-            perm = [0, 1, 2, 3]
-            rng.shuffle(perm)
-            t = tuple(perm)
-            if t not in seen:
-                seen.add(t)
-                orders.append(t)
+            shuffled = _shuffle_parts(content_parts, rng)
+            new_prompt = _assemble_shuffled(shuffled)
+            if new_prompt != prompt:
+                results.append(new_prompt)
                 break
         else:
-            perm = [0, 1, 2, 3]
-            rng.shuffle(perm)
-            orders.append(tuple(perm))
+            shuffled = _shuffle_parts(content_parts, rng)
+            results.append(_assemble_shuffled(shuffled))
 
-    return [assemble(list(o)) for o in orders[:num_augment]]
+    return results[:num_augment]
 
 
 def truncate_middle_by_max_length(prompt: str, tokenizer, max_input_length: int) -> str:
@@ -933,10 +1087,11 @@ def main(args):
 
     expanded: List[Dict[str, Any]] = []
     for idx, sample in enumerate(train_samples):
-        rng = random.Random(stable_seed_from_name(args.seed, f"middle_shuffle_{idx}"))
-        variants = augment_prompt_middle_quarter_shuffle_variants(
+        rng = random.Random(stable_seed_from_name(args.seed, f"context_shuffle_{idx}"))
+        variants = augment_prompt_context_shuffle(
             sample["input_prompt"],
-            rng,
+            dataset=sample.get("dataset", ""),
+            rng=rng,
             num_augment=int(args.num_augment),
         )
         for aug_i, p in enumerate(variants):
