@@ -8,16 +8,20 @@ training_progress jsonl -> training_progress.png
 import argparse
 import json
 import os
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+
+NUM_BEST = 4
+BEST_LABELS = [f"best{i+1}" for i in range(NUM_BEST)]
+BEST_COLORS = ["#4C72B0", "#DD8452", "#55A868", "#C44E52"]
 
 
 def _load_training_progress(
     jsonl_path: str,
-) -> Tuple[List[int], List[float], List[float], Optional[float]]:
+) -> Tuple[List[int], Dict[str, List[float]], List[float], Optional[float]]:
     iterations: List[int] = []
-    best1_avg_rewards: List[float] = []
+    best_rewards: Dict[str, List[float]] = {label: [] for label in BEST_LABELS}
     total_losses: List[float] = []
     real_best_reference_avg: Optional[float] = None
 
@@ -27,17 +31,14 @@ def _load_training_progress(
                 continue
             row = json.loads(line)
             iterations.append(int(row["iteration"]))
-            best1_avg_rewards.append(float(row["best1_avg_reward"]))
+            for label in BEST_LABELS:
+                key = f"{label}_avg_reward"
+                best_rewards[label].append(float(row.get(key, 0.0)))
             total_losses.append(float(row["total_loss"]))
             if real_best_reference_avg is None and "real_best_reference_avg_reward" in row:
                 real_best_reference_avg = float(row["real_best_reference_avg_reward"])
 
-    return (
-        iterations,
-        best1_avg_rewards,
-        total_losses,
-        real_best_reference_avg,
-    )
+    return iterations, best_rewards, total_losses, real_best_reference_avg
 
 
 def _load_epoch_mrr(jsonl_path: str) -> Tuple[List[int], List[float]]:
@@ -80,12 +81,8 @@ def plot_training_progress(
     if not os.path.exists(train_file):
         print(f"[plot] training_progress.jsonl not found: {train_file}")
         return
-    (
-        iterations,
-        best1_avg_rewards,
-        total_losses,
-        real_best_reference_avg,
-    ) = _load_training_progress(train_file)
+
+    iterations, best_rewards, total_losses, real_best_reference_avg = _load_training_progress(train_file)
     if len(iterations) == 0:
         print("[plot] training_progress.jsonl is empty")
         return
@@ -97,7 +94,6 @@ def plot_training_progress(
     else:
         window_size = 1
 
-    y_best1_reward = np.array(best1_avg_rewards, dtype=np.float64)
     y_loss = np.array(total_losses, dtype=np.float64)
     has_epoch_mrr = os.path.exists(epoch_metric_file)
     mrr_epochs: List[int] = []
@@ -105,7 +101,6 @@ def plot_training_progress(
     if has_epoch_mrr:
         mrr_epochs, mrr_values = _load_epoch_mrr(epoch_metric_file)
 
-    # matplotlib은 플로팅이 필요할 때만 import
     import matplotlib.pyplot as plt
 
     plt.rcParams.update(
@@ -125,23 +120,24 @@ def plot_training_progress(
         }
     )
 
-    x_epoch, y_best1_reward_s = _smooth_chunk(y_best1_reward, window_size)
-    _, y_loss_s = _smooth_chunk(y_loss, window_size)
-
     fig, (ax_reward, ax_loss, ax_mrr) = plt.subplots(
         3, 1, constrained_layout=True, figsize=(14, 16)
     )
 
-    ax_reward.plot(
-        x_epoch,
-        y_best1_reward_s,
-        marker="o",
-        linewidth=3,
-        markersize=6,
-        color="#4C72B0",
-        label="Best1 Avg Reward",
-        zorder=5,
-    )
+    for label, color in zip(BEST_LABELS, BEST_COLORS):
+        y_arr = np.array(best_rewards[label], dtype=np.float64)
+        x_epoch, y_smoothed = _smooth_chunk(y_arr, window_size)
+        ax_reward.plot(
+            x_epoch,
+            y_smoothed,
+            marker="o",
+            linewidth=3,
+            markersize=6,
+            color=color,
+            label=f"{label.capitalize()} Avg Reward",
+            zorder=5,
+        )
+
     if real_best_reference_avg is not None:
         ax_reward.axhline(
             y=float(real_best_reference_avg),
@@ -152,15 +148,16 @@ def plot_training_progress(
             zorder=4,
         )
 
-    ax_reward.set_title("Reward Curve", pad=20)
+    ax_reward.set_title("Reward Curves (Best1~4)", pad=20)
     ax_reward.set_xlabel("Epoch")
     ax_reward.set_ylabel("Reward")
     ax_reward.grid(axis="y", linestyle="--", linewidth=1.0, alpha=0.5)
     ax_reward.legend(frameon=False, loc="best")
     ax_reward.margins(x=0.02)
 
+    x_epoch_loss, y_loss_s = _smooth_chunk(y_loss, window_size)
     ax_loss.plot(
-        x_epoch,
+        x_epoch_loss,
         y_loss_s,
         marker="o",
         linewidth=3,
