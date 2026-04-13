@@ -7,10 +7,9 @@ selection indices the policy decided to keep (or `None` if no compression).
 
 Two paths:
   * Fast path (no policy or policy already prefilled): SDPA with `is_causal`.
-  * Score-accumulating path: K-tiled online softmax (true flash-attention style),
-    so the [B,H,qb,Sk] score tensor is never materialized. A second K-tiled pass
-    reconstructs probabilities from the saved (m, l) state to feed the policy's
-    per-query weights, accumulating directly in KV-head space.
+  * Score-accumulating path: Q-tiled single-pass. Only the Q dimension is
+    chunked; K/V are kept whole so softmax is exact per block and both output
+    and compression scores are computed in a single pass over K.
 """
 import math
 from typing import Optional, Tuple
@@ -30,7 +29,6 @@ def compressed_attention(
     attn_mask: Optional[torch.Tensor],
     head_dim: int,
     q_block_size: int = 128,
-    k_block_size: int = 1024,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     """Run attention. Returns (output, selected_indices).
 
@@ -53,7 +51,7 @@ def compressed_attention(
         )
         return out, None
 
-    # Score-accumulating path.
+    # Score-accumulating path (single-pass, Q-tiled only).
     policy.prepare_prefill(seq_len_q, device, query.dtype)
 
     num_kv = policy.num_key_value_heads
@@ -63,14 +61,13 @@ def compressed_attention(
         num_kv = num_heads
         group = 1
 
-    # Issue #2: accumulate directly in KV-head space.
     acc_scores = torch.zeros(
         (batch_size, num_kv, seq_len_k), dtype=torch.float32, device=device
     )
     output = torch.empty_like(query)
 
-    k_pos_full = torch.arange(seq_len_k, device=device)
-    q_offset = seq_len_k - seq_len_q  # new tokens occupy the last seq_len_q slots
+    k_pos = torch.arange(seq_len_k, device=device)
+    q_offset = seq_len_k - seq_len_q
 
     for q_start in range(0, seq_len_q, q_block_size):
         q_end = min(q_start + q_block_size, seq_len_q)
@@ -78,74 +75,39 @@ def compressed_attention(
         q_chunk = query[:, :, q_start:q_end, :]
         q_pos = torch.arange(q_start + q_offset, q_end + q_offset, device=device)
 
-        # Online-softmax running state. Only [B,H,qb,*] — never grows with Sk.
-        m_i = torch.full(
-            (batch_size, num_heads, qb, 1), float("-inf"),
-            device=device, dtype=torch.float32,
+        # [B, H, qb, Sk] — qb is small, so this is memory-efficient.
+        s = torch.matmul(q_chunk, key.transpose(2, 3)) * sm_scale
+        s = s.to(torch.float32)
+
+        # Causal mask
+        causal = k_pos.view(1, seq_len_k) > q_pos.view(qb, 1)
+        s.masked_fill_(causal.view(1, 1, qb, seq_len_k), float("-inf"))
+
+        if attn_mask is not None:
+            s = s + attn_mask[:, :, q_start:q_end, :].to(torch.float32)
+
+        # Softmax is exact since K is not chunked.
+        probs = F.softmax(s, dim=-1)  # [B, H, qb, Sk]
+
+        # Attention output
+        output[:, :, q_start:q_end, :] = torch.matmul(
+            probs.to(value.dtype), value
         )
-        l_i = torch.zeros(
-            (batch_size, num_heads, qb, 1), device=device, dtype=torch.float32
-        )
-        o_i = torch.zeros(
-            (batch_size, num_heads, qb, head_dim), device=device, dtype=torch.float32
-        )
 
-        # ---- Pass 1: streaming online softmax over K blocks. ----
-        for k_start in range(0, seq_len_k, k_block_size):
-            k_end = min(k_start + k_block_size, seq_len_k)
-            kb = k_end - k_start
-            k_chunk = key[:, :, k_start:k_end, :]
-            v_chunk = value[:, :, k_start:k_end, :]
-
-            s = torch.matmul(q_chunk, k_chunk.transpose(2, 3)) * sm_scale
-            s = s.to(torch.float32)
-
-            # Issue #6: causal mask built on the fly, only [qb, kb].
-            kp = k_pos_full[k_start:k_end]
-            causal = kp.view(1, kb) > q_pos.view(qb, 1)
-            s.masked_fill_(causal.view(1, 1, qb, kb), float("-inf"))
-
-            if attn_mask is not None:
-                s = s + attn_mask[:, :, q_start:q_end, k_start:k_end].to(torch.float32)
-
-            m_block = s.amax(dim=-1, keepdim=True)
-            m_new = torch.maximum(m_i, m_block)
-            alpha = torch.exp(m_i - m_new)
-            p = torch.exp(s - m_new)
-            l_i = l_i * alpha + p.sum(dim=-1, keepdim=True)
-            o_i = o_i * alpha + torch.matmul(p, v_chunk.to(torch.float32))
-            m_i = m_new
-
-        output[:, :, q_start:q_end, :] = (o_i / l_i).to(query.dtype)
-
-        # Per-query forgetting weights for this q-block (issue #3: no temporaries).
+        # Score accumulation
         q_weights = policy.get_query_weights(
             q_start=q_start, q_end=q_end, device=device, dtype=torch.float32,
         )
         if q_weights is None:
             continue
 
-        # ---- Pass 2: re-stream K blocks, materialize probs only block-by-block. ----
-        for k_start in range(0, seq_len_k, k_block_size):
-            k_end = min(k_start + k_block_size, seq_len_k)
-            kb = k_end - k_start
-            k_chunk = key[:, :, k_start:k_end, :]
+        if group > 1:
+            probs_kv = probs.view(batch_size, num_kv, group, qb, seq_len_k).sum(dim=2)
+        else:
+            probs_kv = probs
 
-            s = torch.matmul(q_chunk, k_chunk.transpose(2, 3)) * sm_scale
-            s = s.to(torch.float32)
-            kp = k_pos_full[k_start:k_end]
-            causal = kp.view(1, kb) > q_pos.view(qb, 1)
-            s.masked_fill_(causal.view(1, 1, qb, kb), float("-inf"))
-            if attn_mask is not None:
-                s = s + attn_mask[:, :, q_start:q_end, k_start:k_end].to(torch.float32)
-
-            probs = torch.exp(s - m_i) / l_i  # [B, H, qb, kb]
-
-            if group > 1:
-                probs = probs.view(batch_size, num_kv, group, qb, kb).sum(dim=2)
-
-            contrib = torch.einsum("q,bhqk->bhk", q_weights, probs)
-            acc_scores[:, :, k_start:k_end].add_(contrib)
+        contrib = torch.einsum("q,bhqk->bhk", q_weights, probs_kv)
+        acc_scores.add_(contrib)
 
     selected = policy.select(acc_scores, seq_len_k=seq_len_k)
     policy.finalize_prefill()
