@@ -15,12 +15,9 @@ import numpy as np
 
 def _load_training_progress(
     jsonl_path: str,
-) -> Tuple[List[int], List[float], List[float], List[float], List[float], List[float], Optional[float]]:
+) -> Tuple[List[int], List[float], List[float], Optional[float]]:
     iterations: List[int] = []
     best1_avg_rewards: List[float] = []
-    best2_avg_rewards: List[float] = []
-    worst1_avg_rewards: List[float] = []
-    worst2_avg_rewards: List[float] = []
     total_losses: List[float] = []
     real_best_reference_avg: Optional[float] = None
 
@@ -31,9 +28,6 @@ def _load_training_progress(
             row = json.loads(line)
             iterations.append(int(row["iteration"]))
             best1_avg_rewards.append(float(row["best1_avg_reward"]))
-            best2_avg_rewards.append(float(row["best2_avg_reward"]))
-            worst1_avg_rewards.append(float(row["worst1_avg_reward"]))
-            worst2_avg_rewards.append(float(row["worst2_avg_reward"]))
             total_losses.append(float(row["total_loss"]))
             if real_best_reference_avg is None and "real_best_reference_avg_reward" in row:
                 real_best_reference_avg = float(row["real_best_reference_avg_reward"])
@@ -41,9 +35,6 @@ def _load_training_progress(
     return (
         iterations,
         best1_avg_rewards,
-        best2_avg_rewards,
-        worst1_avg_rewards,
-        worst2_avg_rewards,
         total_losses,
         real_best_reference_avg,
     )
@@ -92,9 +83,6 @@ def plot_training_progress(
     (
         iterations,
         best1_avg_rewards,
-        best2_avg_rewards,
-        worst1_avg_rewards,
-        worst2_avg_rewards,
         total_losses,
         real_best_reference_avg,
     ) = _load_training_progress(train_file)
@@ -110,9 +98,6 @@ def plot_training_progress(
         window_size = 1
 
     y_best1_reward = np.array(best1_avg_rewards, dtype=np.float64)
-    y_best2_reward = np.array(best2_avg_rewards, dtype=np.float64)
-    y_worst1_reward = np.array(worst1_avg_rewards, dtype=np.float64)
-    y_worst2_reward = np.array(worst2_avg_rewards, dtype=np.float64)
     y_loss = np.array(total_losses, dtype=np.float64)
     has_epoch_mrr = os.path.exists(epoch_metric_file)
     mrr_epochs: List[int] = []
@@ -141,9 +126,6 @@ def plot_training_progress(
     )
 
     x_epoch, y_best1_reward_s = _smooth_chunk(y_best1_reward, window_size)
-    x_epoch_b2, y_best2_reward_s = _smooth_chunk(y_best2_reward, window_size)
-    x_epoch_w1, y_worst1_reward_s = _smooth_chunk(y_worst1_reward, window_size)
-    x_epoch_w2, y_worst2_reward_s = _smooth_chunk(y_worst2_reward, window_size)
     _, y_loss_s = _smooth_chunk(y_loss, window_size)
 
     fig, (ax_reward, ax_loss, ax_mrr) = plt.subplots(
@@ -160,36 +142,6 @@ def plot_training_progress(
         label="Best1 Avg Reward",
         zorder=5,
     )
-    ax_reward.plot(
-        x_epoch_b2,
-        y_best2_reward_s,
-        marker="o",
-        linewidth=3,
-        markersize=6,
-        color="#DD8452",
-        label="Best2 Avg Reward",
-        zorder=5,
-    )
-    ax_reward.plot(
-        x_epoch_w2,
-        y_worst2_reward_s,
-        marker="o",
-        linewidth=3,
-        markersize=6,
-        color="#C44E52",
-        label="Worst2 Avg Reward",
-        zorder=5,
-    )
-    ax_reward.plot(
-        x_epoch_w1,
-        y_worst1_reward_s,
-        marker="o",
-        linewidth=3,
-        markersize=6,
-        color="#55A868",
-        label="Worst1 Avg Reward",
-        zorder=5,
-    )
     if real_best_reference_avg is not None:
         ax_reward.axhline(
             y=float(real_best_reference_avg),
@@ -200,7 +152,7 @@ def plot_training_progress(
             zorder=4,
         )
 
-    ax_reward.set_title("Reward Curves (Best/Worst)", pad=20)
+    ax_reward.set_title("Reward Curve", pad=20)
     ax_reward.set_xlabel("Epoch")
     ax_reward.set_ylabel("Reward")
     ax_reward.grid(axis="y", linestyle="--", linewidth=1.0, alpha=0.5)

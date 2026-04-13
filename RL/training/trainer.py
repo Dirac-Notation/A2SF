@@ -392,16 +392,13 @@ class A2SFTrainer:
             current_beta = self._get_ucb_beta(epoch, total_epochs)
 
             for batch in self.train_loader:
-                label_order = ["best1", "best2", "worst1", "worst2"]
-                per_label_data: Dict[str, Dict[str, List[Any]]] = {
-                    label: {
-                        "rewards": [],
-                        "actions_a": [],
-                        "actions_b": [],
-                        "reward_pairs": [],
-                    }
-                    for label in label_order
+                best1_data: Dict[str, List[Any]] = {
+                    "rewards": [],
+                    "actions_a": [],
+                    "actions_b": [],
+                    "reward_pairs": [],
                 }
+                real_best_reward_pairs: List[Tuple[float, float]] = []
                 common_input_seq_lengths: List[int] = []
                 common_task_types: List[str] = []
                 update_samples = []
@@ -441,45 +438,24 @@ class A2SFTrainer:
                         )
                         ucb_scores = ucb_scores[0]
 
-                        desc_idx = torch.argsort(ucb_scores, descending=True)
-                        asc_idx = torch.argsort(ucb_scores, descending=False)
-                        best1_idx = int(desc_idx[0].item())
-                        best2_idx = int(desc_idx[1].item()) if desc_idx.numel() > 1 else best1_idx
-                        worst1_idx = int(asc_idx[0].item())
-                        worst2_idx = int(asc_idx[1].item()) if asc_idx.numel() > 1 else worst1_idx
-                        # Requested order: best1, best2, worst1, worst2
-                        selected_indices = torch.tensor(
-                            [best1_idx, best2_idx, worst1_idx, worst2_idx],
-                            device=ucb_scores.device,
-                            dtype=torch.long,
-                        )
-
-                        a_idx = selected_indices // self.agent.num_b_values
-                        b_idx = selected_indices % self.agent.num_b_values
+                        best1_idx = int(torch.argmax(ucb_scores).item())
+                        a_idx = best1_idx // self.agent.num_b_values
+                        b_idx = best1_idx % self.agent.num_b_values
                         selected_a = self.agent.a_values[a_idx].to(self.device)
                         selected_b = self.agent.b_values[b_idx].to(self.device)
-                    selected_rewards: List[float] = []
-                    for local_idx in range(selected_indices.numel()):
-                        action_idx = int(selected_indices[local_idx].item())
-                        selected_rewards.append(self._reward_for_action_index(action_scores, action_idx))
-                    selected_rewards_t = torch.tensor(
-                        selected_rewards, device=self.device, dtype=torch.float32
-                    ).view(-1)
 
-                    for local_idx, label in enumerate(label_order):
-                        action = (
-                            selected_a[local_idx].view(1),
-                            selected_b[local_idx].view(1),
-                        )
-                        reward_val = selected_rewards_t[local_idx]
-                        update_samples.append((state, action, reward_val, metric_type))
-                        selected_idx = int(selected_indices[local_idx].item())
-                        gt_reward_val = float(reward_val.item())
-                        pred_reward_val = float(reward_pred_all[selected_idx].item())
-                        per_label_data[label]["rewards"].append(gt_reward_val)
-                        per_label_data[label]["actions_a"].append(round(float(selected_a[local_idx].item()), 4))
-                        per_label_data[label]["actions_b"].append(int(selected_b[local_idx].item()))
-                        per_label_data[label]["reward_pairs"].append((gt_reward_val, pred_reward_val))
+                    reward_val = self._reward_for_action_index(action_scores, best1_idx)
+                    reward_t = torch.tensor(reward_val, device=self.device, dtype=torch.float32)
+
+                    action = (selected_a.view(1), selected_b.view(1))
+                    update_samples.append((state, action, reward_t, metric_type))
+
+                    gt_reward_val = float(reward_val)
+                    pred_reward_val = float(reward_pred_all[best1_idx].item())
+                    best1_data["rewards"].append(gt_reward_val)
+                    best1_data["actions_a"].append(round(float(selected_a.item()), 4))
+                    best1_data["actions_b"].append(int(selected_b.item()))
+                    best1_data["reward_pairs"].append((gt_reward_val, pred_reward_val))
 
                     # Real best: 로깅 전용 (손실/역전파에는 넣지 않음).
                     real_best_idx = int(self._best_action_index_from_scores(action_scores))
@@ -487,10 +463,7 @@ class A2SFTrainer:
                         self._reward_for_action_index(action_scores, real_best_idx)
                     )
                     pred_real_best_reward = float(reward_pred_all[real_best_idx].item())
-                    per_label_data.setdefault("real_best", {}).setdefault("reward_pairs", [])
-                    per_label_data["real_best"]["reward_pairs"].append(
-                        (gt_real_best_reward, pred_real_best_reward)
-                    )
+                    real_best_reward_pairs.append((gt_real_best_reward, pred_real_best_reward))
 
                     common_input_seq_lengths.append(input_seq_len)
                     common_task_types.append(task_type_str)
@@ -503,34 +476,26 @@ class A2SFTrainer:
                     config=self.training_config,
                     optimizer=self.optimizer,
                 )
-                best_rewards = per_label_data["best1"]["rewards"]
-                best2_rewards = per_label_data["best2"]["rewards"]
-                worst1_rewards = per_label_data["worst1"]["rewards"]
-                worst2_rewards = per_label_data["worst2"]["rewards"]
                 self._log_progress_common(
                     iteration=global_iteration,
                     loss_stats=avg_loss_stats,
-                    best_iteration_rewards=best_rewards,
-                    best2_iteration_rewards=best2_rewards,
-                    worst1_iteration_rewards=worst1_rewards,
-                    worst2_iteration_rewards=worst2_rewards,
+                    best_iteration_rewards=best1_data["rewards"],
                     iteration_input_seq_lengths=common_input_seq_lengths,
                     iteration_task_types=common_task_types,
                     current_beta=current_beta,
-                    real_best_reward_pairs=per_label_data.get("real_best", {}).get("reward_pairs", []),
+                    real_best_reward_pairs=real_best_reward_pairs,
                 )
                 self._log_real_best_status(
                     iteration=global_iteration,
-                    reward_pairs=per_label_data.get("real_best", {}).get("reward_pairs", []),
+                    reward_pairs=real_best_reward_pairs,
                 )
-                for label in label_order:
-                    self._log_progress_action_detail(
-                        iteration=global_iteration,
-                        iteration_actions_a=per_label_data[label]["actions_a"],
-                        iteration_actions_b=per_label_data[label]["actions_b"],
-                        iteration_reward_pairs=per_label_data[label]["reward_pairs"],
-                        log_filename=f"training_progress_{label}.jsonl",
-                    )
+                self._log_progress_action_detail(
+                    iteration=global_iteration,
+                    iteration_actions_a=best1_data["actions_a"],
+                    iteration_actions_b=best1_data["actions_b"],
+                    iteration_reward_pairs=best1_data["reward_pairs"],
+                    log_filename="training_progress_best1.jsonl",
+                )
                 global_iteration += 1
 
             self.scheduler.step()
@@ -564,9 +529,6 @@ class A2SFTrainer:
         iteration: int,
         loss_stats: Dict[str, float],
         best_iteration_rewards: List,
-        best2_iteration_rewards: List,
-        worst1_iteration_rewards: List,
-        worst2_iteration_rewards: List,
         iteration_input_seq_lengths: List[int],
         iteration_task_types: List[str],
         current_beta: float,
@@ -574,15 +536,6 @@ class A2SFTrainer:
     ):
         best_avg_reward = (
             sum(best_iteration_rewards) / len(best_iteration_rewards) if best_iteration_rewards else 0.0
-        )
-        best2_avg_reward = (
-            sum(best2_iteration_rewards) / len(best2_iteration_rewards) if best2_iteration_rewards else 0.0
-        )
-        worst1_avg_reward = (
-            sum(worst1_iteration_rewards) / len(worst1_iteration_rewards) if worst1_iteration_rewards else 0.0
-        )
-        worst2_avg_reward = (
-            sum(worst2_iteration_rewards) / len(worst2_iteration_rewards) if worst2_iteration_rewards else 0.0
         )
 
         pred_rmse = loss_stats.get("prediction_rmse", loss_stats.get("prediction_loss", 0.0))
@@ -601,11 +554,8 @@ class A2SFTrainer:
             else 0.0
         )
 
-        print(f"Iteration {iteration} (COMMON):")
+        print(f"Iteration {iteration}:")
         print(f"  Best1 Avg Reward:  {best_avg_reward:.4f}")
-        print(f"  Best2 Avg Reward:  {best2_avg_reward:.4f}")
-        print(f"  Worst2 Avg Reward: {worst2_avg_reward:.4f}")
-        print(f"  Worst1 Avg Reward: {worst1_avg_reward:.4f}")
         print(f"  Prediction RMSE:   {prediction_rmse:.4f}")
         print(f"  L2 Loss:           {l2_loss:.4f}")
         print(f"  Total Loss:        {total_loss:.4f}")
@@ -621,15 +571,6 @@ class A2SFTrainer:
             "iteration": iteration,
             "best1_avg_reward": (
                 best_avg_reward.item() if isinstance(best_avg_reward, torch.Tensor) else best_avg_reward
-            ),
-            "best2_avg_reward": (
-                best2_avg_reward.item() if isinstance(best2_avg_reward, torch.Tensor) else best2_avg_reward
-            ),
-            "worst1_avg_reward": (
-                worst1_avg_reward.item() if isinstance(worst1_avg_reward, torch.Tensor) else worst1_avg_reward
-            ),
-            "worst2_avg_reward": (
-                worst2_avg_reward.item() if isinstance(worst2_avg_reward, torch.Tensor) else worst2_avg_reward
             ),
             "prediction_rmse": prediction_rmse,
             "l2_loss": l2_loss,
@@ -647,9 +588,6 @@ class A2SFTrainer:
             progress_data,
             digits_map={
                 "best1_avg_reward": 4,
-                "best2_avg_reward": 4,
-                "worst1_avg_reward": 4,
-                "worst2_avg_reward": 4,
                 "prediction_rmse": 4,
                 "l2_loss": 4,
                 "total_loss": 4,
