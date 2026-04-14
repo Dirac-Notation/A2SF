@@ -7,38 +7,21 @@ from typing import Dict, List, Tuple, Union
 EPS = 1e-6
 
 
-class MLPResidualBlock(nn.Module):
-    """Residual MLP block with ReLU activations."""
-
-    def __init__(self, dim: int, hidden_dim: int, dropout: float = 0.1):
-        super().__init__()
-        self.fc1 = nn.Linear(dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, dim)
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        residual = x
-        x = torch.relu(self.fc1(x))
-        x = self.dropout(x)
-        x = self.fc2(x)
-        x = self.dropout(x)
-        return residual + x
-
-
 class NeuralUCBAgent(nn.Module):
     """
     NeuralUCB agent network for Sigmoid Cache RL (single-step / bandit).
 
-    State vector layout: [seq_len, token_budget,
+    State vector layout: [seq_len, task_type_one_hot(T),
                           tova_top1(H)..tova_top4(H),
                           snap_top1(H)..snap_top4(H)]
 
-    Three embedding channels:
-      1. meta_embed: (seq_len, token_budget) -> embed_dim
-      2. tova_embed: (tova_top1..top4 per head, 4H) -> embed_dim
-      3. snap_embed: (snap_top1..top4 per head, 4H) -> embed_dim
-
-    Averaged -> shared backbone -> per-metric reward heads.
+    Shared embedding (3 channels averaged) -> per-metric (backbone + reward head).
+      1. meta_embed:  (seq_len, task_type_one_hot) -> feature_dim
+      2. tova_embed:  (tova_top1..top4 per head, 4H) -> feature_dim
+      3. snap_embed:  (snap_top1..top4 per head, 4H) -> feature_dim
+      Averaged -> per-metric Linear(feature_dim -> hidden_dim) -> ReLU
+               -> per-metric Linear(hidden_dim -> num_actions) -> sigmoid
+    UCB uncertainty uses the per-metric hidden (post-ReLU) as feature_vector.
     """
 
     def __init__(
@@ -72,48 +55,51 @@ class NeuralUCBAgent(nn.Module):
         self.metric_name_to_idx = {name: i for i, name in enumerate(self.metric_heads)}
 
         # Embedding dimensions
-        self.feature_dim = 512
+        self.feature_dim = 256
+        self.hidden_dim = 256
         self.topk = 4
         meta_dim = 1 + self.num_task_types  # (seq_len, task_type_one_hot)
         tova_dim = self.topk * self.num_heads  # (top1..top4 per head)
         snap_dim = self.topk * self.num_heads  # (top1..top4 per head)
 
-        # Three separate embedding projections
+        # Three separate embedding projections (shared across metrics)
         self.meta_embed = nn.Sequential(
-            nn.Linear(meta_dim, 256),
+            nn.Linear(meta_dim, 128),
             nn.ReLU(),
-            nn.Linear(256, self.feature_dim),
+            nn.Linear(128, self.feature_dim),
             nn.ReLU(),
         )
         self.tova_embed = nn.Sequential(
-            nn.Linear(tova_dim, 256),
+            nn.Linear(tova_dim, 128),
             nn.ReLU(),
-            nn.Linear(256, self.feature_dim),
+            nn.Linear(128, self.feature_dim),
             nn.ReLU(),
         )
         self.snap_embed = nn.Sequential(
-            nn.Linear(snap_dim, 256),
+            nn.Linear(snap_dim, 128),
             nn.ReLU(),
-            nn.Linear(256, self.feature_dim),
+            nn.Linear(128, self.feature_dim),
             nn.ReLU(),
         )
 
-        # Shared backbone
-        self.backbone = nn.Sequential(
-            MLPResidualBlock(dim=self.feature_dim, hidden_dim=1024, dropout=0.1),
-            MLPResidualBlock(dim=self.feature_dim, hidden_dim=1024, dropout=0.1),
+        # Per-metric backbone + reward head (fused). Input: feature_dim, output: num_actions.
+        # Intermediate hidden_dim serves as the per-metric feature_vector used by UCB covariance.
+        self.metric_body = nn.ModuleDict(
+            {
+                metric_name: nn.Linear(self.feature_dim, self.hidden_dim)
+                for metric_name in self.metric_heads
+            }
         )
-
-        # Per-metric reward heads
         self.reward_heads = nn.ModuleDict(
             {
-                metric_name: nn.Linear(self.feature_dim, self.num_actions)
+                metric_name: nn.Linear(self.hidden_dim, self.num_actions)
                 for metric_name in self.metric_heads
             }
         )
 
         # Per-metric, per-action inverse covariance (Neural-Linear uncertainty).
-        eye = torch.eye(self.feature_dim, device=a_values.device)
+        # Uses hidden_dim since per-metric feature_vector is hidden_dim.
+        eye = torch.eye(self.hidden_dim, device=a_values.device)
         inv0 = eye.unsqueeze(0).repeat(self.num_actions, 1, 1) / self.lambda_reg
         self.register_buffer(
             "inverse_lambdas",
@@ -189,20 +175,25 @@ class NeuralUCBAgent(nn.Module):
         if state.size(-1) != self.state_dim:
             raise ValueError(f"Expected state last dim {self.state_dim}, got {state.size(-1)}")
 
-        # Shared embedding + backbone
+        # Shared embedding
         embedded = self._embed_state(state)   # (B, feature_dim)
-        h = self.backbone(embedded)           # (B, feature_dim)
 
-        # Per-metric reward heads
+        # Per-metric backbone + head
         metric_types = self._resolve_metric_type_for_batch(metric_type, state.size(0))
         reward_rows: List[torch.Tensor] = []
+        feature_rows: List[torch.Tensor] = []
         for row_idx, mname in enumerate(metric_types):
-            head = self.reward_heads[self._head_key(mname)]
-            logits = head(h[row_idx:row_idx + 1])
+            key = self._head_key(mname)
+            body = self.metric_body[key]
+            head = self.reward_heads[key]
+            h = torch.relu(body(embedded[row_idx:row_idx + 1]))  # (1, hidden_dim)
+            logits = head(h)
             reward_rows.append(torch.sigmoid(logits))
+            feature_rows.append(h)
         reward_pred = torch.cat(reward_rows, dim=0)
+        feature_vector = torch.cat(feature_rows, dim=0)
 
-        return {"reward_pred": reward_pred, "feature_vector": h}
+        return {"reward_pred": reward_pred, "feature_vector": feature_vector}
 
     def _select_action_from_scores(
         self, scores: torch.Tensor
