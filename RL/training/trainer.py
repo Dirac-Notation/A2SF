@@ -62,10 +62,22 @@ class A2SFTrainer:
 
         # Load pre-split data generated under `RL/training/data/`.
         training_data_list = self.load_training_data()
+
+        # 모든 action의 reward가 0인 샘플 제외
+        bkey = str(int(self.training_config.token_budget))
+        before_count = len(training_data_list)
+        training_data_list = [
+            s for s in training_data_list
+            if any(float(v) > 0 for v in s.get("action_scores_by_budget", {}).get(bkey, [0]))
+        ]
+        skipped = before_count - len(training_data_list)
+        if skipped > 0:
+            print(f"Filtered out {skipped}/{before_count} samples with all-zero rewards (budget={bkey})")
+
         self.real_best_reference_avg = self._compute_real_best_reference_avg(
             training_data_list, int(self.training_config.token_budget)
         )
-        print(f"RealBest Reference Avg (incl. 0.0): {self.real_best_reference_avg:.4f}")
+        print(f"RealBest Reference Avg (excl. all-zero): {self.real_best_reference_avg:.4f}")
 
         # Create datasets (precompute all encoder states before RL optimization loop).
         self.training_dataset = RLDataset(
