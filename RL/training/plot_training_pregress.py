@@ -68,12 +68,15 @@ def _smooth_chunk(vals: np.ndarray, w: int) -> Tuple[np.ndarray, np.ndarray]:
     return np.array(epoch_idx, dtype=np.int64), np.array(smoothed_vals, dtype=np.float64)
 
 
-def _collect_overall(rows: List[Dict[str, Any]]) -> Tuple[Dict[str, np.ndarray], np.ndarray, np.ndarray, Optional[float]]:
-    """Batch-level 요약값 (best{k}_avg_reward, total_loss, batch_size)."""
+def _collect_overall(
+    rows: List[Dict[str, Any]],
+) -> Tuple[Dict[str, np.ndarray], np.ndarray, np.ndarray, Optional[float], Dict[str, float]]:
+    """Batch-level 요약값 (best{k}_avg_reward, total_loss, batch_size, real_best refs)."""
     best_rewards: Dict[str, List[float]] = {label: [] for label in BEST_LABELS}
     total_losses: List[float] = []
     batch_sizes: List[int] = []
     ref: Optional[float] = None
+    ref_by_task: Dict[str, float] = {}
     for row in rows:
         for label in BEST_LABELS:
             best_rewards[label].append(float(row.get(f"{label}_avg_reward", 0.0)))
@@ -82,11 +85,16 @@ def _collect_overall(rows: List[Dict[str, Any]]) -> Tuple[Dict[str, np.ndarray],
         batch_sizes.append(int(len(seq_lens)) if isinstance(seq_lens, list) else 1)
         if ref is None and "real_best_reference_avg_reward" in row:
             ref = float(row["real_best_reference_avg_reward"])
+        if not ref_by_task:
+            rbt = row.get("real_best_reference_avg_by_task")
+            if isinstance(rbt, dict):
+                ref_by_task = {str(k): float(v) for k, v in rbt.items()}
     return (
         {k: np.array(v, dtype=np.float64) for k, v in best_rewards.items()},
         np.array(total_losses, dtype=np.float64),
         np.array(batch_sizes, dtype=np.float64),
         ref,
+        ref_by_task,
     )
 
 
@@ -154,7 +162,7 @@ def plot_training_progress(
         print("[plot] training_progress.jsonl is empty")
         return
 
-    best_rewards, y_loss, w_arr, real_best_reference_avg = _collect_overall(rows)
+    best_rewards, y_loss, w_arr, real_best_reference_avg, real_best_by_task = _collect_overall(rows)
     task_types, per_task_avg, per_task_cnt = _collect_per_task(rows)
 
     if iterations_per_epoch is not None:
@@ -211,6 +219,13 @@ def plot_training_progress(
                 x_epoch, y_smoothed,
                 marker="o", linewidth=2.5, markersize=5, color=color,
                 label=f"{label.capitalize()}", zorder=5,
+            )
+        task_ref = real_best_by_task.get(task)
+        if task_ref is not None:
+            ax.axhline(
+                y=float(task_ref),
+                linestyle="--", linewidth=2.0, color="#222222",
+                label=f"RealBest Avg ({task_ref:.3f})", zorder=4,
             )
         ax.set_title(f"Reward Curves — {task}", pad=12)
         ax.set_xlabel("Epoch")

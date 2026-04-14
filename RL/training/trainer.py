@@ -84,7 +84,12 @@ class A2SFTrainer:
         self.real_best_reference_avg = self._compute_real_best_reference_avg(
             training_data_list, int(self.training_config.token_budget)
         )
+        self.real_best_reference_avg_by_task = self._compute_real_best_reference_avg_by_task(
+            training_data_list, int(self.training_config.token_budget)
+        )
         print(f"RealBest Reference Avg (excl. all-zero): {self.real_best_reference_avg:.4f}")
+        for t, v in sorted(self.real_best_reference_avg_by_task.items()):
+            print(f"  {t}: {v:.4f}")
 
         # Create datasets (precompute all encoder states before RL optimization loop).
         self.training_dataset = RLDataset(
@@ -241,6 +246,25 @@ class A2SFTrainer:
         if not values:
             return 0.0
         return float(sum(values) / len(values))
+
+    @staticmethod
+    def _compute_real_best_reference_avg_by_task(
+        samples: List[Dict[str, Any]], token_budget: int
+    ) -> Dict[str, float]:
+        bkey = str(int(token_budget))
+        per_task: Dict[str, List[float]] = {}
+        for sample in samples:
+            scores_by_budget = sample.get("action_scores_by_budget", {})
+            if not isinstance(scores_by_budget, dict):
+                continue
+            scores = scores_by_budget.get(bkey, [])
+            if not isinstance(scores, list) or len(scores) == 0:
+                continue
+            task = str(sample.get("task_type") or "unknown")
+            best_idx = A2SFTrainer._best_action_index_from_scores(scores)
+            if 0 <= best_idx < len(scores):
+                per_task.setdefault(task, []).append(float(scores[best_idx]))
+        return {t: float(sum(v) / len(v)) for t, v in per_task.items() if v}
 
     @staticmethod
     def _best_action_index_from_scores(scores: List[Any]) -> int:
@@ -623,6 +647,9 @@ class A2SFTrainer:
             "real_best_avg_gt_reward": real_best_avg_gt,
             "real_best_avg_pred_reward": real_best_avg_pred,
             "real_best_reference_avg_reward": float(self.real_best_reference_avg),
+            "real_best_reference_avg_by_task": {
+                t: round(float(v), 4) for t, v in self.real_best_reference_avg_by_task.items()
+            },
             "input_seq_lengths": iteration_input_seq_lengths,
             "task_types": iteration_task_types,
         })
