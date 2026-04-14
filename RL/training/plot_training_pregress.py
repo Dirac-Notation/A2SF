@@ -8,7 +8,7 @@ training_progress jsonl -> training_progress.png
 import argparse
 import json
 import os
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -17,38 +17,19 @@ BEST_LABELS = [f"best{i+1}" for i in range(NUM_BEST)]
 BEST_COLORS = ["#4C72B0", "#DD8452", "#55A868", "#C44E52"]
 
 
-def _load_training_progress(
-    jsonl_path: str,
-) -> Tuple[List[int], Dict[str, List[float]], List[float], List[int], Optional[float]]:
-    iterations: List[int] = []
-    best_rewards: Dict[str, List[float]] = {label: [] for label in BEST_LABELS}
-    total_losses: List[float] = []
-    batch_sizes: List[int] = []
-    real_best_reference_avg: Optional[float] = None
-
+def _load_training_progress(jsonl_path: str) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
     with open(jsonl_path, "r", encoding="utf-8") as f:
         for line in f:
             if not line.strip():
                 continue
-            row = json.loads(line)
-            iterations.append(int(row["iteration"]))
-            for label in BEST_LABELS:
-                key = f"{label}_avg_reward"
-                best_rewards[label].append(float(row.get(key, 0.0)))
-            total_losses.append(float(row["total_loss"]))
-            # batch size는 input_seq_lengths의 길이
-            seq_lens = row.get("input_seq_lengths", [])
-            batch_sizes.append(int(len(seq_lens)) if isinstance(seq_lens, list) else 1)
-            if real_best_reference_avg is None and "real_best_reference_avg_reward" in row:
-                real_best_reference_avg = float(row["real_best_reference_avg_reward"])
-
-    return iterations, best_rewards, total_losses, batch_sizes, real_best_reference_avg
+            rows.append(json.loads(line))
+    return rows
 
 
 def _load_epoch_mrr(jsonl_path: str) -> Tuple[List[int], List[float]]:
     epochs: List[int] = []
     mrr_values: List[float] = []
-
     with open(jsonl_path, "r", encoding="utf-8") as f:
         for line in f:
             if not line.strip():
@@ -56,8 +37,25 @@ def _load_epoch_mrr(jsonl_path: str) -> Tuple[List[int], List[float]]:
             row = json.loads(line)
             epochs.append(int(row["epoch"]))
             mrr_values.append(float(row["mrr"]))
-
     return epochs, mrr_values
+
+
+def _weighted_chunk(
+    vals: np.ndarray, weights: np.ndarray, w: int
+) -> Tuple[np.ndarray, np.ndarray]:
+    """청크 단위 가중평균. weights=0 이면 해당 iter은 skip."""
+    smoothed_vals = []
+    epoch_idx = []
+    for chunk_id, i in enumerate(range(0, len(vals), w), start=1):
+        chunk_vals = vals[i : i + w]
+        chunk_w = weights[i : i + w]
+        total_w = float(np.sum(chunk_w))
+        if total_w <= 0:
+            smoothed_vals.append(float("nan"))
+        else:
+            smoothed_vals.append(float(np.sum(chunk_vals * chunk_w) / total_w))
+        epoch_idx.append(chunk_id)
+    return np.array(epoch_idx, dtype=np.int64), np.array(smoothed_vals, dtype=np.float64)
 
 
 def _smooth_chunk(vals: np.ndarray, w: int) -> Tuple[np.ndarray, np.ndarray]:
@@ -70,22 +68,69 @@ def _smooth_chunk(vals: np.ndarray, w: int) -> Tuple[np.ndarray, np.ndarray]:
     return np.array(epoch_idx, dtype=np.int64), np.array(smoothed_vals, dtype=np.float64)
 
 
-def _weighted_chunk(
-    vals: np.ndarray, weights: np.ndarray, w: int
-) -> Tuple[np.ndarray, np.ndarray]:
-    """청크 단위 가중평균. 각 iteration의 batch_size로 가중."""
-    smoothed_vals = []
-    epoch_idx = []
-    for chunk_id, i in enumerate(range(0, len(vals), w), start=1):
-        chunk_vals = vals[i : i + w]
-        chunk_w = weights[i : i + w]
-        total_w = float(np.sum(chunk_w))
-        if total_w <= 0:
-            smoothed_vals.append(float(np.mean(chunk_vals)))
-        else:
-            smoothed_vals.append(float(np.sum(chunk_vals * chunk_w) / total_w))
-        epoch_idx.append(chunk_id)
-    return np.array(epoch_idx, dtype=np.int64), np.array(smoothed_vals, dtype=np.float64)
+def _collect_overall(rows: List[Dict[str, Any]]) -> Tuple[Dict[str, np.ndarray], np.ndarray, np.ndarray, Optional[float]]:
+    """Batch-level 요약값 (best{k}_avg_reward, total_loss, batch_size)."""
+    best_rewards: Dict[str, List[float]] = {label: [] for label in BEST_LABELS}
+    total_losses: List[float] = []
+    batch_sizes: List[int] = []
+    ref: Optional[float] = None
+    for row in rows:
+        for label in BEST_LABELS:
+            best_rewards[label].append(float(row.get(f"{label}_avg_reward", 0.0)))
+        total_losses.append(float(row.get("total_loss", 0.0)))
+        seq_lens = row.get("input_seq_lengths", [])
+        batch_sizes.append(int(len(seq_lens)) if isinstance(seq_lens, list) else 1)
+        if ref is None and "real_best_reference_avg_reward" in row:
+            ref = float(row["real_best_reference_avg_reward"])
+    return (
+        {k: np.array(v, dtype=np.float64) for k, v in best_rewards.items()},
+        np.array(total_losses, dtype=np.float64),
+        np.array(batch_sizes, dtype=np.float64),
+        ref,
+    )
+
+
+def _collect_per_task(
+    rows: List[Dict[str, Any]],
+) -> Tuple[List[str], Dict[str, Dict[str, np.ndarray]], Dict[str, np.ndarray]]:
+    """Task별 per-iteration 가중평균 reward와 샘플 수를 수집.
+
+    Returns:
+      task_types: 등장한 task 종류 리스트
+      per_task_avg: {task: {best_k: np.ndarray(per-iter weighted avg)}}
+      per_task_cnt: {task: np.ndarray(per-iter sample count)}
+    """
+    task_set = set()
+    for row in rows:
+        for t in row.get("task_types", []) or []:
+            task_set.add(str(t))
+    task_types = sorted(task_set)
+
+    n_iter = len(rows)
+    per_task_avg: Dict[str, Dict[str, np.ndarray]] = {
+        t: {label: np.zeros(n_iter, dtype=np.float64) for label in BEST_LABELS}
+        for t in task_types
+    }
+    per_task_cnt: Dict[str, np.ndarray] = {
+        t: np.zeros(n_iter, dtype=np.float64) for t in task_types
+    }
+
+    for i, row in enumerate(rows):
+        row_tasks = row.get("task_types", []) or []
+        for label in BEST_LABELS:
+            rewards = row.get(f"{label}_rewards")
+            if not isinstance(rewards, list) or len(rewards) != len(row_tasks):
+                continue
+            # group by task
+            for t in task_types:
+                mask = [j for j, tt in enumerate(row_tasks) if str(tt) == t]
+                if not mask:
+                    continue
+                vals = [float(rewards[j]) for j in mask]
+                per_task_avg[t][label][i] = sum(vals) / len(vals)
+                per_task_cnt[t][i] = float(len(vals))
+
+    return task_types, per_task_avg, per_task_cnt
 
 
 def plot_training_progress(
@@ -104,20 +149,21 @@ def plot_training_progress(
         print(f"[plot] training_progress.jsonl not found: {train_file}")
         return
 
-    iterations, best_rewards, total_losses, batch_sizes, real_best_reference_avg = _load_training_progress(train_file)
-    if len(iterations) == 0:
+    rows = _load_training_progress(train_file)
+    if not rows:
         print("[plot] training_progress.jsonl is empty")
         return
+
+    best_rewards, y_loss, w_arr, real_best_reference_avg = _collect_overall(rows)
+    task_types, per_task_avg, per_task_cnt = _collect_per_task(rows)
 
     if iterations_per_epoch is not None:
         window_size = max(1, int(iterations_per_epoch))
     elif epochs is not None and epochs > 0:
-        window_size = max(1, len(iterations) // int(epochs))
+        window_size = max(1, len(rows) // int(epochs))
     else:
         window_size = 1
 
-    y_loss = np.array(total_losses, dtype=np.float64)
-    w_arr = np.array(batch_sizes, dtype=np.float64)
     has_epoch_mrr = os.path.exists(epoch_metric_file)
     mrr_epochs: List[int] = []
     mrr_values: List[float] = []
@@ -129,97 +175,80 @@ def plot_training_progress(
     plt.rcParams.update(
         {
             "font.family": "serif",
-            "figure.figsize": (14, 14),
             "figure.dpi": 150,
-            "font.size": 22,
-            "axes.labelsize": 26,
-            "axes.titlesize": 28,
-            "xtick.labelsize": 22,
-            "ytick.labelsize": 22,
-            "legend.fontsize": 22,
+            "font.size": 16,
+            "axes.labelsize": 18,
+            "axes.titlesize": 20,
+            "xtick.labelsize": 14,
+            "ytick.labelsize": 14,
+            "legend.fontsize": 14,
             "axes.spines.top": False,
             "axes.spines.right": False,
             "axes.linewidth": 1.5,
         }
     )
 
-    fig, (ax_reward, ax_loss, ax_mrr) = plt.subplots(
-        3, 1, constrained_layout=True, figsize=(14, 16)
-    )
+    # Layout: [per-task rewards ...], loss, mrr
+    num_task_axes = len(task_types)
+    num_rows = num_task_axes + 2  # per-task + loss + mrr
+    fig_height = max(14, 4 * num_rows)
+    fig, axes = plt.subplots(num_rows, 1, constrained_layout=True, figsize=(14, fig_height))
+    if num_rows == 1:
+        axes = [axes]
 
-    for label, color in zip(BEST_LABELS, BEST_COLORS):
-        y_arr = np.array(best_rewards[label], dtype=np.float64)
-        x_epoch, y_smoothed = _weighted_chunk(y_arr, w_arr, window_size)
-        ax_reward.plot(
-            x_epoch,
-            y_smoothed,
-            marker="o",
-            linewidth=3,
-            markersize=6,
-            color=color,
-            label=f"{label.capitalize()} Avg Reward",
-            zorder=5,
-        )
+    task_axes = axes[:num_task_axes]
+    ax_loss = axes[num_task_axes]
+    ax_mrr = axes[num_task_axes + 1]
 
-    if real_best_reference_avg is not None:
-        ax_reward.axhline(
-            y=float(real_best_reference_avg),
-            linestyle="--",
-            linewidth=2.5,
-            color="#222222",
-            label="RealBest Avg (Global)",
-            zorder=4,
-        )
+    # --- Per-task rewards ---
+    for ax, task in zip(task_axes, task_types):
+        cnt = per_task_cnt[task]
+        for label, color in zip(BEST_LABELS, BEST_COLORS):
+            x_epoch, y_smoothed = _weighted_chunk(
+                per_task_avg[task][label], cnt, window_size
+            )
+            ax.plot(
+                x_epoch, y_smoothed,
+                marker="o", linewidth=2.5, markersize=5, color=color,
+                label=f"{label.capitalize()}", zorder=5,
+            )
+        ax.set_title(f"Reward Curves — {task}", pad=12)
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Reward")
+        ax.grid(axis="y", linestyle="--", linewidth=1.0, alpha=0.5)
+        ax.legend(frameon=False, loc="best")
+        ax.margins(x=0.02)
 
-    ax_reward.set_title("Reward Curves (Best1~4)", pad=20)
-    ax_reward.set_xlabel("Epoch")
-    ax_reward.set_ylabel("Reward")
-    ax_reward.grid(axis="y", linestyle="--", linewidth=1.0, alpha=0.5)
-    ax_reward.legend(frameon=False, loc="best")
-    ax_reward.margins(x=0.02)
-
+    # --- Loss ---
     x_epoch_loss, y_loss_s = _smooth_chunk(y_loss, window_size)
     ax_loss.plot(
-        x_epoch_loss,
-        y_loss_s,
-        marker="o",
-        linewidth=3,
-        markersize=6,
-        color="#8172B3",
-        label="Total Loss",
-        zorder=5,
+        x_epoch_loss, y_loss_s,
+        marker="o", linewidth=2.5, markersize=5, color="#8172B3",
+        label="Total Loss", zorder=5,
     )
-    ax_loss.set_title("Loss Curve", pad=20)
+    ax_loss.set_title("Loss Curve", pad=12)
     ax_loss.set_xlabel("Epoch")
     ax_loss.set_ylabel("Loss")
     ax_loss.grid(axis="y", linestyle="--", linewidth=1.0, alpha=0.5)
     ax_loss.legend(frameon=False, loc="best")
     ax_loss.margins(x=0.02)
 
+    # --- MRR ---
     if len(mrr_epochs) > 0:
         ax_mrr.plot(
             np.array(mrr_epochs, dtype=np.int64),
             np.array(mrr_values, dtype=np.float64),
-            marker="o",
-            linewidth=3,
-            markersize=6,
-            color="#64B5CD",
-            label="Epoch MRR",
-            zorder=5,
+            marker="o", linewidth=2.5, markersize=5, color="#64B5CD",
+            label="Epoch MRR", zorder=5,
         )
         ax_mrr.legend(frameon=False, loc="best")
     else:
         ax_mrr.text(
-            0.5,
-            0.5,
-            "No epoch MRR data yet",
-            horizontalalignment="center",
-            verticalalignment="center",
-            transform=ax_mrr.transAxes,
-            fontsize=18,
-            alpha=0.8,
+            0.5, 0.5, "No epoch MRR data yet",
+            horizontalalignment="center", verticalalignment="center",
+            transform=ax_mrr.transAxes, fontsize=16, alpha=0.8,
         )
-    ax_mrr.set_title("MRR Curve", pad=20)
+    ax_mrr.set_title("MRR Curve", pad=12)
     ax_mrr.set_xlabel("Epoch")
     ax_mrr.set_ylabel("MRR")
     ax_mrr.grid(axis="y", linestyle="--", linewidth=1.0, alpha=0.5)

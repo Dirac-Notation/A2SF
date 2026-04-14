@@ -608,6 +608,11 @@ class A2SFTrainer:
             progress_data[key] = avg.item() if isinstance(avg, torch.Tensor) else avg
             digits_map[key] = 4
 
+        # per-sample rewards for each best label (aligned with task_types)
+        for label, rewards in per_label_rewards.items():
+            key = f"{label}_rewards"
+            progress_data[key] = [round(float(r), 4) for r in rewards]
+
         progress_data.update({
             "prediction_rmse": prediction_rmse,
             "l2_loss": l2_loss,
