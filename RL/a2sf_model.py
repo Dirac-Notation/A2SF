@@ -66,9 +66,18 @@ class A2SFModel:
         # State dim is determined by encoder output.
         state_dim = int(self.env.context_encoder.output_dim)
         num_heads = int(self.env.context_encoder.num_heads)
+        num_task_types = int(self.env.context_encoder.num_task_types)
 
-        # Policy head names must match longbench_eval.dataset2metric fn names.
-        metric_heads = sorted({fn.__name__ for fn in dataset2metric.values()})
+        # Policy head names: if checkpoint has reward_heads, use exactly those names.
+        # Otherwise fall back to all metrics (legacy behavior).
+        if state_dict is not None:
+            head_names = sorted({
+                k.split(".")[1] for k in state_dict.keys()
+                if k.startswith("reward_heads.")
+            })
+            metric_heads = head_names if head_names else sorted({fn.__name__ for fn in dataset2metric.values()})
+        else:
+            metric_heads = sorted({fn.__name__ for fn in dataset2metric.values()})
 
         # When loading a checkpoint, the action space (a_values / b_values) is
         # baked into the saved state_dict as parameters. Rebuild the agent using
@@ -87,6 +96,7 @@ class A2SFModel:
             b_values=b_values,
             metric_heads=metric_heads,
             num_heads=num_heads,
+            num_task_types=num_task_types,
         ).to(first_layer_device)
 
         if state_dict is not None:

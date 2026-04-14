@@ -19,10 +19,11 @@ BEST_COLORS = ["#4C72B0", "#DD8452", "#55A868", "#C44E52"]
 
 def _load_training_progress(
     jsonl_path: str,
-) -> Tuple[List[int], Dict[str, List[float]], List[float], Optional[float]]:
+) -> Tuple[List[int], Dict[str, List[float]], List[float], List[int], Optional[float]]:
     iterations: List[int] = []
     best_rewards: Dict[str, List[float]] = {label: [] for label in BEST_LABELS}
     total_losses: List[float] = []
+    batch_sizes: List[int] = []
     real_best_reference_avg: Optional[float] = None
 
     with open(jsonl_path, "r", encoding="utf-8") as f:
@@ -35,10 +36,13 @@ def _load_training_progress(
                 key = f"{label}_avg_reward"
                 best_rewards[label].append(float(row.get(key, 0.0)))
             total_losses.append(float(row["total_loss"]))
+            # batch size는 input_seq_lengths의 길이
+            seq_lens = row.get("input_seq_lengths", [])
+            batch_sizes.append(int(len(seq_lens)) if isinstance(seq_lens, list) else 1)
             if real_best_reference_avg is None and "real_best_reference_avg_reward" in row:
                 real_best_reference_avg = float(row["real_best_reference_avg_reward"])
 
-    return iterations, best_rewards, total_losses, real_best_reference_avg
+    return iterations, best_rewards, total_losses, batch_sizes, real_best_reference_avg
 
 
 def _load_epoch_mrr(jsonl_path: str) -> Tuple[List[int], List[float]]:
@@ -66,6 +70,24 @@ def _smooth_chunk(vals: np.ndarray, w: int) -> Tuple[np.ndarray, np.ndarray]:
     return np.array(epoch_idx, dtype=np.int64), np.array(smoothed_vals, dtype=np.float64)
 
 
+def _weighted_chunk(
+    vals: np.ndarray, weights: np.ndarray, w: int
+) -> Tuple[np.ndarray, np.ndarray]:
+    """청크 단위 가중평균. 각 iteration의 batch_size로 가중."""
+    smoothed_vals = []
+    epoch_idx = []
+    for chunk_id, i in enumerate(range(0, len(vals), w), start=1):
+        chunk_vals = vals[i : i + w]
+        chunk_w = weights[i : i + w]
+        total_w = float(np.sum(chunk_w))
+        if total_w <= 0:
+            smoothed_vals.append(float(np.mean(chunk_vals)))
+        else:
+            smoothed_vals.append(float(np.sum(chunk_vals * chunk_w) / total_w))
+        epoch_idx.append(chunk_id)
+    return np.array(epoch_idx, dtype=np.int64), np.array(smoothed_vals, dtype=np.float64)
+
+
 def plot_training_progress(
     save_dir: str,
     output_path: Optional[str] = None,
@@ -82,7 +104,7 @@ def plot_training_progress(
         print(f"[plot] training_progress.jsonl not found: {train_file}")
         return
 
-    iterations, best_rewards, total_losses, real_best_reference_avg = _load_training_progress(train_file)
+    iterations, best_rewards, total_losses, batch_sizes, real_best_reference_avg = _load_training_progress(train_file)
     if len(iterations) == 0:
         print("[plot] training_progress.jsonl is empty")
         return
@@ -95,6 +117,7 @@ def plot_training_progress(
         window_size = 1
 
     y_loss = np.array(total_losses, dtype=np.float64)
+    w_arr = np.array(batch_sizes, dtype=np.float64)
     has_epoch_mrr = os.path.exists(epoch_metric_file)
     mrr_epochs: List[int] = []
     mrr_values: List[float] = []
@@ -126,7 +149,7 @@ def plot_training_progress(
 
     for label, color in zip(BEST_LABELS, BEST_COLORS):
         y_arr = np.array(best_rewards[label], dtype=np.float64)
-        x_epoch, y_smoothed = _smooth_chunk(y_arr, window_size)
+        x_epoch, y_smoothed = _weighted_chunk(y_arr, w_arr, window_size)
         ax_reward.plot(
             x_epoch,
             y_smoothed,

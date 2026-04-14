@@ -84,12 +84,14 @@ def load_rl_agent(checkpoint_path, device, target_model, target_tokenizer):
 
     state_dim = int(context_encoder.output_dim)
     num_heads = int(context_encoder.num_heads)
+    num_task_types = int(context_encoder.num_task_types)
     agent = NeuralUCBAgent(
         state_dim=state_dim,
         a_values=config.a_values,
         b_values=config.b_values,
         metric_heads=METRIC_HEADS,
         num_heads=num_heads,
+        num_task_types=num_task_types,
     ).to(device)
 
     # Load agent weights (supports legacy policy_state_dict checkpoints)

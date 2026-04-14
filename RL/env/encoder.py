@@ -51,13 +51,14 @@ class AttentionEncoder(nn.Module):
     Metadata encoder for RL state construction.
 
     Returns a feature vector structured as:
-      [ seq_len, token_budget,
+      [ seq_len, task_type_one_hot(T),
         tova_top1(H), tova_top2(H), tova_top3(H), tova_top4(H),
         snap_top1(H), snap_top2(H), snap_top3(H), snap_top4(H) ]
 
     - snapkv_score: cumulative attention from last 16 queries
     - tova_score: attention from the last 1 query only
     - top-k positions are normalized by (seq_len - 1)
+    - task_type_one_hot: one-hot over TASK_TYPE_ORDER (T categories incl. "unknown")
     """
 
     def __init__(
@@ -94,10 +95,11 @@ class AttentionEncoder(nn.Module):
         object.__setattr__(self, "embed_tokens", self.target_model.model.embed_tokens)
 
         self.topk = 4
+        self.num_task_types = int(len(TASK_TYPE_ORDER))
 
         if self.output_dim <= 0:
-            # [seq_len, token_budget] + [tova_topk(4*H), snap_topk(4*H)]
-            self.output_dim = 2 + (2 * self.topk * self.num_heads)
+            # [seq_len(1) + task_type_one_hot(T)] + [tova_topk(4H), snap_topk(4H)]
+            self.output_dim = 1 + self.num_task_types + (2 * self.topk * self.num_heads)
 
     @property
     def _encode_device(self) -> torch.device:
@@ -171,8 +173,8 @@ class AttentionEncoder(nn.Module):
         task_type: Optional[str] = None,
         dataset: Optional[str] = None,
     ) -> torch.Tensor:
-        # generation_length / task_type / dataset are currently kept only for API compatibility.
-        del generation_length, task_type, dataset
+        # generation_length / token_budget are kept for API compatibility.
+        del generation_length, token_budget
 
         tokenized = self.target_tokenizer(
             text,
@@ -185,13 +187,17 @@ class AttentionEncoder(nn.Module):
 
         seq_len = int(input_ids.size(1))
         seq_len_feature = min(float(seq_len), self.max_seq_length) / self.max_seq_length
-        token_budget_feature = max(0.0, min(float(token_budget) / 4096.0, 1.0))
+
+        task_idx = task_type_to_index(task_type=task_type, dataset=dataset)
+        task_one_hot = torch.zeros(self.num_task_types, device=enc_dev, dtype=torch.float32)
+        task_one_hot[task_idx] = 1.0
+
         attention_features = self._build_first_layer_attention_features(input_ids)
 
         features = torch.cat(
             [
                 torch.tensor([seq_len_feature], device=enc_dev, dtype=torch.float32),
-                torch.tensor([token_budget_feature], device=enc_dev, dtype=torch.float32),
+                task_one_hot,
                 attention_features.to(dtype=torch.float32),
             ],
             dim=-1,
