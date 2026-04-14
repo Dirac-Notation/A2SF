@@ -43,23 +43,6 @@ class A2SFTrainer:
         self.device = first_layer_device
         self.env.device = first_layer_device
 
-        state_dim = int(self.env.context_encoder.output_dim)
-        num_heads = int(self.env.context_encoder.num_heads)
-        metric_heads = sorted({fn.__name__ for fn in dataset2metric.values()})
-
-        self.agent = NeuralUCBAgent(
-            state_dim=state_dim,
-            a_values=self.model_config.a_values,
-            b_values=self.model_config.b_values,
-            metric_heads=metric_heads,
-            num_heads=num_heads,
-        ).to(self.device)
-
-        # Optimizer only includes agent parameters
-        # Context encoder is metadata-based and frozen
-        all_params = list(self.agent.parameters())
-        self.optimizer = optim.SGD(all_params, lr=self.training_config.lr)
-
         # Load pre-split data generated under `RL/training/data/`.
         training_data_list = self.load_training_data()
 
@@ -73,6 +56,30 @@ class A2SFTrainer:
         skipped = before_count - len(training_data_list)
         if skipped > 0:
             print(f"Filtered out {skipped}/{before_count} samples with all-zero rewards (budget={bkey})")
+
+        state_dim = int(self.env.context_encoder.output_dim)
+        num_heads = int(self.env.context_encoder.num_heads)
+        num_task_types = int(self.env.context_encoder.num_task_types)
+
+        # 실제 학습 데이터에 등장하는 metric만 head로 생성
+        metric_heads = sorted({str(s["metric_type"]) for s in training_data_list if "metric_type" in s})
+        if not metric_heads:
+            metric_heads = ["qa_f1_score"]
+        print(f"Metric heads: {metric_heads}")
+
+        self.agent = NeuralUCBAgent(
+            state_dim=state_dim,
+            a_values=self.model_config.a_values,
+            b_values=self.model_config.b_values,
+            metric_heads=metric_heads,
+            num_heads=num_heads,
+            num_task_types=num_task_types,
+        ).to(self.device)
+
+        # Optimizer only includes agent parameters
+        # Context encoder is metadata-based and frozen
+        all_params = list(self.agent.parameters())
+        self.optimizer = optim.SGD(all_params, lr=self.training_config.lr)
 
         self.real_best_reference_avg = self._compute_real_best_reference_avg(
             training_data_list, int(self.training_config.token_budget)

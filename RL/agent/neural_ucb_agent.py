@@ -48,6 +48,7 @@ class NeuralUCBAgent(nn.Module):
         b_values: torch.Tensor,
         metric_heads: List[str] = None,
         num_heads: int = 32,
+        num_task_types: int = 7,
     ):
         super().__init__()
         # Discrete action space: (a, b) pairs for sigmoid cache
@@ -60,6 +61,7 @@ class NeuralUCBAgent(nn.Module):
         self.lambda_reg = 5 * self.num_actions
         self.state_dim = int(state_dim)
         self.num_heads = int(num_heads)
+        self.num_task_types = int(num_task_types)
         if self.state_dim < 1:
             raise ValueError(f"state_dim must be >= 1, got {self.state_dim}")
 
@@ -72,7 +74,7 @@ class NeuralUCBAgent(nn.Module):
         # Embedding dimensions
         self.feature_dim = 512
         self.topk = 4
-        meta_dim = 2                       # (seq_len, token_budget)
+        meta_dim = 1 + self.num_task_types  # (seq_len, task_type_one_hot)
         tova_dim = self.topk * self.num_heads  # (top1..top4 per head)
         snap_dim = self.topk * self.num_heads  # (top1..top4 per head)
 
@@ -134,9 +136,10 @@ class NeuralUCBAgent(nn.Module):
     def _split_state(self, state: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Split flat state vector into (meta, tova_topk, snap_topk) components."""
         kH = self.topk * self.num_heads
-        meta = state[:, :2]                    # (B, 2)
-        tova = state[:, 2:2 + kH]             # (B, 4H)
-        snap = state[:, 2 + kH:2 + 2 * kH]   # (B, 4H)
+        meta_dim = 1 + self.num_task_types
+        meta = state[:, :meta_dim]                       # (B, 1+T)
+        tova = state[:, meta_dim:meta_dim + kH]         # (B, 4H)
+        snap = state[:, meta_dim + kH:meta_dim + 2 * kH]  # (B, 4H)
         return meta, tova, snap
 
     def _embed_state(self, state: torch.Tensor) -> torch.Tensor:
