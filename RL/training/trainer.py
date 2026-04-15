@@ -59,7 +59,7 @@ class A2SFTrainer:
 
         state_dim = int(self.env.context_encoder.output_dim)
         num_heads = int(self.env.context_encoder.num_heads)
-        num_task_types = int(self.env.context_encoder.num_task_types)
+        num_metric_types = int(self.env.context_encoder.num_metric_types)
 
         # 실제 학습 데이터에 등장하는 metric만 head로 생성
         metric_heads = sorted({str(s["metric_type"]) for s in training_data_list if "metric_type" in s})
@@ -73,7 +73,7 @@ class A2SFTrainer:
             b_values=self.model_config.b_values,
             metric_heads=metric_heads,
             num_heads=num_heads,
-            num_task_types=num_task_types,
+            num_metric_types=num_metric_types,
         ).to(self.device)
 
         # Optimizer only includes agent parameters

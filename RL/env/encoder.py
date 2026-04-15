@@ -46,19 +46,43 @@ def task_type_to_index(task_type: Optional[str] = None, dataset: Optional[str] =
     return int(TASK_TYPE_TO_INDEX.get(resolved, TASK_TYPE_TO_INDEX["unknown"]))
 
 
+# Metric type ordering for one-hot encoding. "unknown" always last.
+# longbench_eval.dataset2metric의 함수 이름들과 일치해야 한다.
+METRIC_TYPE_ORDER = [
+    "qa_f1_score",
+    "qa_f1_zh_score",
+    "rouge_score",
+    "rouge_zh_score",
+    "classification_score",
+    "retrieval_score",
+    "retrieval_zh_score",
+    "count_score",
+    "code_sim_score",
+    "unknown",
+]
+METRIC_TYPE_TO_INDEX = {name: idx for idx, name in enumerate(METRIC_TYPE_ORDER)}
+
+
+def metric_type_to_index(metric_type: Optional[str]) -> int:
+    if metric_type is None:
+        return int(METRIC_TYPE_TO_INDEX["unknown"])
+    key = str(metric_type).strip()
+    return int(METRIC_TYPE_TO_INDEX.get(key, METRIC_TYPE_TO_INDEX["unknown"]))
+
+
 class AttentionEncoder(nn.Module):
     """
     Metadata encoder for RL state construction.
 
     Returns a feature vector structured as:
-      [ seq_len, task_type_one_hot(T),
+      [ seq_len, metric_type_one_hot(M),
         tova_top1(H), tova_top2(H), tova_top3(H), tova_top4(H),
         snap_top1(H), snap_top2(H), snap_top3(H), snap_top4(H) ]
 
     - snapkv_score: cumulative attention from last 16 queries
     - tova_score: attention from the last 1 query only
     - top-k positions are normalized by (seq_len - 1)
-    - task_type_one_hot: one-hot over TASK_TYPE_ORDER (T categories incl. "unknown")
+    - metric_type_one_hot: one-hot over METRIC_TYPE_ORDER (M categories incl. "unknown")
     """
 
     def __init__(
@@ -95,11 +119,11 @@ class AttentionEncoder(nn.Module):
         object.__setattr__(self, "embed_tokens", self.target_model.model.embed_tokens)
 
         self.topk = 4
-        self.num_task_types = int(len(TASK_TYPE_ORDER))
+        self.num_metric_types = int(len(METRIC_TYPE_ORDER))
 
         if self.output_dim <= 0:
-            # [seq_len(1) + task_type_one_hot(T)] + [tova_topk(4H), snap_topk(4H)]
-            self.output_dim = 1 + self.num_task_types + (2 * self.topk * self.num_heads)
+            # [seq_len(1) + metric_type_one_hot(M)] + [tova_topk(4H), snap_topk(4H)]
+            self.output_dim = 1 + self.num_metric_types + (2 * self.topk * self.num_heads)
 
     @property
     def _encode_device(self) -> torch.device:
@@ -170,11 +194,12 @@ class AttentionEncoder(nn.Module):
         text: str,
         generation_length: int,
         token_budget: int,
+        metric_type: Optional[str] = None,
         task_type: Optional[str] = None,
         dataset: Optional[str] = None,
     ) -> torch.Tensor:
-        # generation_length / token_budget are kept for API compatibility.
-        del generation_length, token_budget
+        # generation_length / token_budget / task_type / dataset are kept for API compatibility.
+        del generation_length, token_budget, task_type, dataset
 
         tokenized = self.target_tokenizer(
             text,
@@ -188,16 +213,16 @@ class AttentionEncoder(nn.Module):
         seq_len = int(input_ids.size(1))
         seq_len_feature = min(float(seq_len), self.max_seq_length) / self.max_seq_length
 
-        task_idx = task_type_to_index(task_type=task_type, dataset=dataset)
-        task_one_hot = torch.zeros(self.num_task_types, device=enc_dev, dtype=torch.float32)
-        task_one_hot[task_idx] = 1.0
+        metric_idx = metric_type_to_index(metric_type)
+        metric_one_hot = torch.zeros(self.num_metric_types, device=enc_dev, dtype=torch.float32)
+        metric_one_hot[metric_idx] = 1.0
 
         attention_features = self._build_first_layer_attention_features(input_ids)
 
         features = torch.cat(
             [
                 torch.tensor([seq_len_feature], device=enc_dev, dtype=torch.float32),
-                task_one_hot,
+                metric_one_hot,
                 attention_features.to(dtype=torch.float32),
             ],
             dim=-1,
