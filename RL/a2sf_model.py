@@ -66,7 +66,7 @@ class A2SFModel:
         # State dim is determined by encoder output.
         state_dim = int(self.env.context_encoder.output_dim)
         num_heads = int(self.env.context_encoder.num_heads)
-        num_task_types = int(self.env.context_encoder.num_task_types)
+        num_metric_types = int(self.env.context_encoder.num_metric_types)
 
         # Policy head names: if checkpoint has reward_heads, use exactly those names.
         # Otherwise fall back to all metrics (legacy behavior).
@@ -96,7 +96,7 @@ class A2SFModel:
             b_values=b_values,
             metric_heads=metric_heads,
             num_heads=num_heads,
-            num_task_types=num_task_types,
+            num_metric_types=num_metric_types,
         ).to(first_layer_device)
 
         if state_dict is not None:

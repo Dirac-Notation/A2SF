@@ -7,22 +7,54 @@ from typing import Dict, List, Tuple, Union
 EPS = 1e-6
 
 
+class MLPResidualBlock(nn.Module):
+    """Residual MLP block with ReLU activations."""
+
+    def __init__(self, dim: int, hidden_dim: int, dropout: float = 0.1):
+        super().__init__()
+        self.fc1 = nn.Linear(dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, dim)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        residual = x
+        x = torch.relu(self.fc1(x))
+        x = self.dropout(x)
+        x = self.fc2(x)
+        x = self.dropout(x)
+        return residual + x
+
+
 class NeuralUCBAgent(nn.Module):
     """
     NeuralUCB agent network for Sigmoid Cache RL (single-step / bandit).
 
-    State vector layout: [seq_len, task_type_one_hot(T),
+    State vector layout: [seq_len, metric_type_one_hot(M),
                           tova_top1(H)..tova_top4(H),
                           snap_top1(H)..snap_top4(H)]
 
-    Shared embedding (3 channels averaged) -> per-metric (backbone + reward head).
-      1. meta_embed:  (seq_len, task_type_one_hot) -> feature_dim
-      2. tova_embed:  (tova_top1..top4 per head, 4H) -> feature_dim
-      3. snap_embed:  (snap_top1..top4 per head, 4H) -> feature_dim
-      Averaged -> per-metric Linear(feature_dim -> hidden_dim) -> ReLU
-               -> per-metric Linear(hidden_dim -> num_actions) -> sigmoid
-    UCB uncertainty uses the per-metric hidden (post-ReLU) as feature_vector.
+    Three embedding channels:
+      1. meta_embed: (seq_len, metric_type_one_hot) -> embed_dim
+      2. tova_embed: (tova_top1..top4 per head, 4H) -> embed_dim
+      3. snap_embed: (snap_top1..top4 per head, 4H) -> embed_dim
+
+    Averaged -> shared backbone -> per-metric reward heads with per-metric sigmoid slopes.
     """
+
+    # 채점 metric의 특성에 따른 초기 sigmoid slope.
+    # 이산적(0/1에 가까운) metric은 큰 slope로 예측이 빠르게 saturate되도록,
+    # 연속적 metric은 slope=1.0으로 표준 sigmoid.
+    DEFAULT_SIGMOID_SLOPES: Dict[str, float] = {
+        "qa_f1_score": 1.0,
+        "qa_f1_zh_score": 1.0,
+        "rouge_score": 1.0,
+        "rouge_zh_score": 1.0,
+        "code_sim_score": 1.0,
+        "classification_score": 3.0,
+        "retrieval_score": 3.0,
+        "retrieval_zh_score": 3.0,
+        "count_score": 3.0,
+    }
 
     def __init__(
         self,
@@ -31,7 +63,8 @@ class NeuralUCBAgent(nn.Module):
         b_values: torch.Tensor,
         metric_heads: List[str] = None,
         num_heads: int = 32,
-        num_task_types: int = 7,
+        num_metric_types: int = 10,
+        sigmoid_slopes: Dict[str, float] = None,
     ):
         super().__init__()
         # Discrete action space: (a, b) pairs for sigmoid cache
@@ -44,7 +77,7 @@ class NeuralUCBAgent(nn.Module):
         self.lambda_reg = 5 * self.num_actions
         self.state_dim = int(state_dim)
         self.num_heads = int(num_heads)
-        self.num_task_types = int(num_task_types)
+        self.num_metric_types = int(num_metric_types)
         if self.state_dim < 1:
             raise ValueError(f"state_dim must be >= 1, got {self.state_dim}")
 
@@ -55,51 +88,64 @@ class NeuralUCBAgent(nn.Module):
         self.metric_name_to_idx = {name: i for i, name in enumerate(self.metric_heads)}
 
         # Embedding dimensions
-        self.feature_dim = 256
-        self.hidden_dim = 256
+        self.feature_dim = 512
         self.topk = 4
-        meta_dim = 1 + self.num_task_types  # (seq_len, task_type_one_hot)
+        meta_dim = 1 + self.num_metric_types  # (seq_len, metric_type_one_hot)
         tova_dim = self.topk * self.num_heads  # (top1..top4 per head)
         snap_dim = self.topk * self.num_heads  # (top1..top4 per head)
 
-        # Three separate embedding projections (shared across metrics)
+        # Three separate embedding projections
         self.meta_embed = nn.Sequential(
-            nn.Linear(meta_dim, 128),
+            nn.Linear(meta_dim, 256),
             nn.ReLU(),
-            nn.Linear(128, self.feature_dim),
+            nn.Linear(256, self.feature_dim),
             nn.ReLU(),
         )
         self.tova_embed = nn.Sequential(
-            nn.Linear(tova_dim, 128),
+            nn.Linear(tova_dim, 256),
             nn.ReLU(),
-            nn.Linear(128, self.feature_dim),
+            nn.Linear(256, self.feature_dim),
             nn.ReLU(),
         )
         self.snap_embed = nn.Sequential(
-            nn.Linear(snap_dim, 128),
+            nn.Linear(snap_dim, 256),
             nn.ReLU(),
-            nn.Linear(128, self.feature_dim),
+            nn.Linear(256, self.feature_dim),
             nn.ReLU(),
         )
 
-        # Per-metric backbone + reward head (fused). Input: feature_dim, output: num_actions.
-        # Intermediate hidden_dim serves as the per-metric feature_vector used by UCB covariance.
-        self.metric_body = nn.ModuleDict(
+        # Shared backbone
+        self.backbone = nn.Sequential(
+            MLPResidualBlock(dim=self.feature_dim, hidden_dim=1024, dropout=0.1),
+            MLPResidualBlock(dim=self.feature_dim, hidden_dim=1024, dropout=0.1),
+        )
+
+        # Per-metric reward heads
+        self.reward_heads = nn.ModuleDict(
             {
-                metric_name: nn.Linear(self.feature_dim, self.hidden_dim)
+                metric_name: nn.Linear(self.feature_dim, self.num_actions)
                 for metric_name in self.metric_heads
             }
         )
-        self.reward_heads = nn.ModuleDict(
+
+        # Per-metric sigmoid slope (learnable). Initial values from DEFAULT_SIGMOID_SLOPES
+        # or overridden by `sigmoid_slopes` argument. Larger slope = sharper (more binary)
+        # predictions, suitable for discrete metrics like classification/retrieval.
+        merged_slopes: Dict[str, float] = dict(self.DEFAULT_SIGMOID_SLOPES)
+        if sigmoid_slopes:
+            for k, v in sigmoid_slopes.items():
+                merged_slopes[str(k)] = float(v)
+        self.sigmoid_slopes = nn.ParameterDict(
             {
-                metric_name: nn.Linear(self.hidden_dim, self.num_actions)
+                metric_name: nn.Parameter(
+                    torch.tensor(float(merged_slopes.get(metric_name, 1.0)), dtype=torch.float32)
+                )
                 for metric_name in self.metric_heads
             }
         )
 
         # Per-metric, per-action inverse covariance (Neural-Linear uncertainty).
-        # Uses hidden_dim since per-metric feature_vector is hidden_dim.
-        eye = torch.eye(self.hidden_dim, device=a_values.device)
+        eye = torch.eye(self.feature_dim, device=a_values.device)
         inv0 = eye.unsqueeze(0).repeat(self.num_actions, 1, 1) / self.lambda_reg
         self.register_buffer(
             "inverse_lambdas",
@@ -122,8 +168,8 @@ class NeuralUCBAgent(nn.Module):
     def _split_state(self, state: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Split flat state vector into (meta, tova_topk, snap_topk) components."""
         kH = self.topk * self.num_heads
-        meta_dim = 1 + self.num_task_types
-        meta = state[:, :meta_dim]                       # (B, 1+T)
+        meta_dim = 1 + self.num_metric_types
+        meta = state[:, :meta_dim]                       # (B, 1+M)
         tova = state[:, meta_dim:meta_dim + kH]         # (B, 4H)
         snap = state[:, meta_dim + kH:meta_dim + 2 * kH]  # (B, 4H)
         return meta, tova, snap
@@ -175,25 +221,22 @@ class NeuralUCBAgent(nn.Module):
         if state.size(-1) != self.state_dim:
             raise ValueError(f"Expected state last dim {self.state_dim}, got {state.size(-1)}")
 
-        # Shared embedding
+        # Shared embedding + backbone
         embedded = self._embed_state(state)   # (B, feature_dim)
+        h = self.backbone(embedded)           # (B, feature_dim)
 
-        # Per-metric backbone + head
+        # Per-metric reward heads with per-metric sigmoid slopes
         metric_types = self._resolve_metric_type_for_batch(metric_type, state.size(0))
         reward_rows: List[torch.Tensor] = []
-        feature_rows: List[torch.Tensor] = []
         for row_idx, mname in enumerate(metric_types):
             key = self._head_key(mname)
-            body = self.metric_body[key]
             head = self.reward_heads[key]
-            h = torch.relu(body(embedded[row_idx:row_idx + 1]))  # (1, hidden_dim)
-            logits = head(h)
-            reward_rows.append(torch.sigmoid(logits))
-            feature_rows.append(h)
+            slope = self.sigmoid_slopes[key]
+            logits = head(h[row_idx:row_idx + 1])
+            reward_rows.append(torch.sigmoid(slope * logits))
         reward_pred = torch.cat(reward_rows, dim=0)
-        feature_vector = torch.cat(feature_rows, dim=0)
 
-        return {"reward_pred": reward_pred, "feature_vector": feature_vector}
+        return {"reward_pred": reward_pred, "feature_vector": h}
 
     def _select_action_from_scores(
         self, scores: torch.Tensor

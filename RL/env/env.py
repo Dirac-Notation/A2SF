@@ -74,6 +74,7 @@ class A2SFEnv:
             prompt,
             generation_length,
             token_budget,
+            metric_type=self.current_metric_type,
             task_type=task_type,
             dataset=dataset,
         ).to(self.device, dtype=torch.float32)
