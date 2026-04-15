@@ -719,13 +719,39 @@ class A2SFTrainer:
         ) as f:
             f.write(json.dumps(detail_data) + "\n")
 
+    def _build_arch_config(self) -> Dict[str, Any]:
+        """체크포인트에서 agent를 재구성할 때 필요한 모든 아키텍처 파라미터."""
+        return {
+            "state_dim": int(self.agent.state_dim),
+            "num_heads": int(self.agent.num_heads),
+            "num_metric_types": int(self.agent.num_metric_types),
+            "feature_dim": int(self.agent.feature_dim),
+            "topk": int(self.agent.topk),
+            "num_actions": int(self.agent.num_actions),
+            "num_a_values": int(self.agent.num_a_values),
+            "num_b_values": int(self.agent.num_b_values),
+            "metric_heads": list(self.agent.metric_heads),
+            "a_values": self.agent.a_values.detach().cpu(),
+            "b_values": self.agent.b_values.detach().cpu(),
+        }
+
+    def _agent_weights_only(self) -> Dict[str, torch.Tensor]:
+        """추론에 필요한 weight만 추출 (inverse_lambdas, action_counts 등 제외)."""
+        full = self.agent.state_dict()
+        # Exclude large/training-only buffers.
+        exclude_prefixes = ("inverse_lambdas", "action_counts")
+        return {
+            k: v for k, v in full.items()
+            if not any(k.startswith(p) for p in exclude_prefixes)
+        }
+
     def _save_checkpoint(self, iteration: int, epoch: int):
         checkpoint_path = os.path.join(self.training_config.save_dir, f"policy_epoch_{epoch}.pt")
         checkpoint_data = {
             "iteration": iteration,
             "epoch": epoch,
             "agent_state_dict": self.agent.state_dict(),
-            "attention_encoder_state_dict": {},
+            "arch_config": self._build_arch_config(),
             "optimizer_state_dict": self.optimizer.state_dict(),
             "model_config": self.model_config,
             "training_config": self.training_config,
@@ -733,6 +759,18 @@ class A2SFTrainer:
         }
         torch.save(checkpoint_data, checkpoint_path)
         print(f"Saved checkpoint: {checkpoint_path}")
+
+    def save_final_checkpoint(self, iteration: int) -> str:
+        """추론 전용 최소 체크포인트. Optimizer/Scheduler/대형 buffer 제외."""
+        final_path = os.path.join(self.training_config.save_dir, "policy_final.pt")
+        payload = {
+            "iteration": iteration,
+            "agent_state_dict": self._agent_weights_only(),
+            "arch_config": self._build_arch_config(),
+        }
+        torch.save(payload, final_path)
+        print(f"Saved final checkpoint (inference-only): {final_path}")
+        return final_path
 
     def _log_epoch_mrr(self, epoch: int, epoch_mrr: float) -> None:
         print(f"Epoch {epoch} MRR: {epoch_mrr:.4f}")
@@ -760,9 +798,13 @@ class A2SFTrainer:
             state_dict = checkpoint.get("policy_state_dict")
         if state_dict is None:
             raise ValueError("Checkpoint missing 'agent_state_dict' (and legacy 'policy_state_dict').")
-        self.agent.load_state_dict(state_dict)
+        # Final checkpoint은 buffer 일부가 빠져 있을 수 있어 strict=False.
+        missing, unexpected = self.agent.load_state_dict(state_dict, strict=False)
+        if unexpected:
+            print(f"[load_checkpoint] unexpected keys: {unexpected}")
 
-        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        if "optimizer_state_dict" in checkpoint:
+            self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
         if "scheduler_state_dict" in checkpoint:
             self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])

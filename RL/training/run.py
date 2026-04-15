@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import os
-import torch
 
 from RL.a2sf_model import ModelConfig
 from .training_config import TrainingConfig
@@ -42,20 +40,7 @@ def main(argv=None):
 
     final_iteration = trainer.train(num_epochs=training_cfg.epochs)
 
-    # Save final model with the same structure as periodic checkpoints.
-    final_checkpoint_path = os.path.join(training_cfg.save_dir, "policy_final.pt")
-    torch.save(
-        {
-            "iteration": final_iteration,
-            "agent_state_dict": trainer.agent.state_dict(),
-            "attention_encoder_state_dict": {},
-            "optimizer_state_dict": trainer.optimizer.state_dict(),
-            "model_config": trainer.model_config,
-            "training_config": trainer.training_config,
-            "scheduler_state_dict": trainer.scheduler.state_dict(),
-        },
-        final_checkpoint_path,
-    )
+    final_checkpoint_path = trainer.save_final_checkpoint(final_iteration)
     print(f"Training completed. Final model saved to: {final_checkpoint_path}")
 
 
