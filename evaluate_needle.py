@@ -82,23 +82,36 @@ def load_rl_agent(checkpoint_path, device, target_model, target_tokenizer):
         num_query_tokens=16,
     ).to(device)
 
-    state_dim = int(context_encoder.output_dim)
-    num_heads = int(context_encoder.num_heads)
-    num_metric_types = int(context_encoder.num_metric_types)
+    arch_config = checkpoint.get("arch_config")
+    if arch_config is not None:
+        state_dim = int(arch_config["state_dim"])
+        num_heads = int(arch_config["num_heads"])
+        num_metric_types = int(arch_config["num_metric_types"])
+        metric_heads = list(arch_config["metric_heads"])
+        a_values = arch_config["a_values"].to(dtype=torch.float32).clone()
+        b_values = arch_config["b_values"].to(dtype=torch.float32).clone()
+    else:
+        state_dim = int(context_encoder.output_dim)
+        num_heads = int(context_encoder.num_heads)
+        num_metric_types = int(context_encoder.num_metric_types)
+        metric_heads = METRIC_HEADS
+        a_values = config.a_values
+        b_values = config.b_values
+
     agent = NeuralUCBAgent(
         state_dim=state_dim,
-        a_values=config.a_values,
-        b_values=config.b_values,
-        metric_heads=METRIC_HEADS,
+        a_values=a_values,
+        b_values=b_values,
+        metric_heads=metric_heads,
         num_heads=num_heads,
         num_metric_types=num_metric_types,
     ).to(device)
 
     # Load agent weights (supports legacy policy_state_dict checkpoints)
     if "agent_state_dict" in checkpoint:
-        agent.load_state_dict(checkpoint["agent_state_dict"])
+        agent.load_state_dict(checkpoint["agent_state_dict"], strict=False)
     elif "policy_state_dict" in checkpoint:
-        agent.load_state_dict(checkpoint["policy_state_dict"])
+        agent.load_state_dict(checkpoint["policy_state_dict"], strict=False)
     else:
         raise ValueError("Checkpoint missing agent_state_dict (and legacy policy_state_dict).")
 

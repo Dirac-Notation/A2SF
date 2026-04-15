@@ -49,6 +49,7 @@ class A2SFModel:
         self,
         config: Optional[ModelConfig] = None,
         state_dict: Optional[Dict[str, torch.Tensor]] = None,
+        arch_config: Optional[Dict[str, Any]] = None,
     ):
         if config is None:
             config = ModelConfig()
@@ -63,32 +64,33 @@ class A2SFModel:
         self.env.device = first_layer_device
         self._agent_device = first_layer_device
 
-        # State dim is determined by encoder output.
-        state_dim = int(self.env.context_encoder.output_dim)
-        num_heads = int(self.env.context_encoder.num_heads)
-        num_metric_types = int(self.env.context_encoder.num_metric_types)
-
-        # Policy head names: if checkpoint has reward_heads, use exactly those names.
-        # Otherwise fall back to all metrics (legacy behavior).
-        if state_dict is not None:
-            head_names = sorted({
-                k.split(".")[1] for k in state_dict.keys()
-                if k.startswith("reward_heads.")
-            })
-            metric_heads = head_names if head_names else sorted({fn.__name__ for fn in dataset2metric.values()})
+        if arch_config is not None:
+            # 체크포인트의 arch_config를 단일 정보원(source of truth)으로 사용.
+            state_dim = int(arch_config["state_dim"])
+            num_heads = int(arch_config["num_heads"])
+            num_metric_types = int(arch_config["num_metric_types"])
+            metric_heads = list(arch_config["metric_heads"])
+            a_values = arch_config["a_values"].to(dtype=torch.float32).clone()
+            b_values = arch_config["b_values"].to(dtype=torch.float32).clone()
         else:
-            metric_heads = sorted({fn.__name__ for fn in dataset2metric.values()})
-
-        # When loading a checkpoint, the action space (a_values / b_values) is
-        # baked into the saved state_dict as parameters. Rebuild the agent using
-        # those shapes so old checkpoints stay loadable even after ModelConfig
-        # defaults change.
-        if state_dict is not None and "a_values" in state_dict and "b_values" in state_dict:
-            a_values = state_dict["a_values"].to(dtype=torch.float32).clone()
-            b_values = state_dict["b_values"].to(dtype=torch.float32).clone()
-        else:
-            a_values = self.config.a_values
-            b_values = self.config.b_values
+            # Legacy path: encoder로부터 차원 유도 + state_dict에서 힌트 추출.
+            state_dim = int(self.env.context_encoder.output_dim)
+            num_heads = int(self.env.context_encoder.num_heads)
+            num_metric_types = int(self.env.context_encoder.num_metric_types)
+            if state_dict is not None:
+                head_names = sorted({
+                    k.split(".")[1] for k in state_dict.keys()
+                    if k.startswith("reward_heads.")
+                })
+                metric_heads = head_names if head_names else sorted({fn.__name__ for fn in dataset2metric.values()})
+            else:
+                metric_heads = sorted({fn.__name__ for fn in dataset2metric.values()})
+            if state_dict is not None and "a_values" in state_dict and "b_values" in state_dict:
+                a_values = state_dict["a_values"].to(dtype=torch.float32).clone()
+                b_values = state_dict["b_values"].to(dtype=torch.float32).clone()
+            else:
+                a_values = self.config.a_values
+                b_values = self.config.b_values
 
         self.agent = NeuralUCBAgent(
             state_dim=state_dim,
@@ -100,10 +102,12 @@ class A2SFModel:
         ).to(first_layer_device)
 
         if state_dict is not None:
-            self.agent.load_state_dict(state_dict)
+            # Final checkpoint은 inverse_lambdas/action_counts 버퍼가 빠져 있을 수 있으므로 strict=False.
+            missing, unexpected = self.agent.load_state_dict(state_dict, strict=False)
+            if unexpected:
+                print(f"[A2SFModel] unexpected keys in state_dict: {unexpected}")
             self.agent.eval()
-            # Keep config in sync with what was actually loaded so downstream
-            # code (env.run_with_action, logging, etc.) sees the right space.
+            # Keep config in sync with what was actually loaded so downstream code sees the right space.
             self.config.a_values = a_values
             self.config.b_values = b_values
 

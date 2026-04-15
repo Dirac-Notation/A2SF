@@ -56,11 +56,13 @@ def _load_rl_model(model_name: str, checkpoint_path: str) -> A2SFModel:
         state_dict = checkpoint.get("policy_state_dict")
     if state_dict is None:
         raise ValueError("Checkpoint missing 'agent_state_dict' (and legacy 'policy_state_dict').")
+    arch_config = checkpoint.get("arch_config")
 
     model_cfg = ModelConfig(model=model_name)
     model = A2SFModel(
         config=model_cfg,
         state_dict=state_dict,
+        arch_config=arch_config,
     )
     return model
 
