@@ -57,8 +57,22 @@ class CompressionPolicy:
     def _topk_with_recent(self, scores: torch.Tensor, seq_len_k: int) -> Optional[torch.Tensor]:
         if seq_len_k <= self.total_budget:
             return None
-        scores = scores.clone()
-        scores[:, :, -self.recent_budget:] = scores.max()
-        indices = scores.topk(self.total_budget, dim=-1).indices.sort().values
+        batch, heads, _ = scores.shape
+        head_len = seq_len_k - self.recent_budget
+        if self.select_budget > 0:
+            head_idx = scores[:, :, :head_len].topk(
+                self.select_budget, dim=-1
+            ).indices.sort(dim=-1).values
+        else:
+            head_idx = torch.empty(
+                (batch, heads, 0), dtype=torch.long, device=scores.device
+            )
+        if self.recent_budget > 0:
+            tail_idx = torch.arange(
+                head_len, seq_len_k, device=scores.device, dtype=torch.long
+            ).expand(batch, heads, self.recent_budget)
+            indices = torch.cat([head_idx, tail_idx], dim=-1)
+        else:
+            indices = head_idx
         self.selected_indices = indices
         return indices

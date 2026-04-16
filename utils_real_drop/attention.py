@@ -76,18 +76,18 @@ def compressed_attention(
         q_pos = torch.arange(q_start + q_offset, q_end + q_offset, device=device)
 
         # [B, H, qb, Sk] — qb is small, so this is memory-efficient.
+        # Keep s in q_chunk's dtype; F.softmax upcasts internally for accumulation.
         s = torch.matmul(q_chunk, key.transpose(2, 3)) * sm_scale
-        s = s.to(torch.float32)
 
         # Causal mask
         causal = k_pos.view(1, seq_len_k) > q_pos.view(qb, 1)
         s.masked_fill_(causal.view(1, 1, qb, seq_len_k), float("-inf"))
 
         if attn_mask is not None:
-            s = s + attn_mask[:, :, q_start:q_end, :].to(torch.float32)
+            s = s + attn_mask[:, :, q_start:q_end, :].to(s.dtype)
 
         # Softmax is exact since K is not chunked.
-        probs = F.softmax(s, dim=-1)  # [B, H, qb, Sk]
+        probs = F.softmax(s, dim=-1)  # [B, H, qb, Sk] in s.dtype
 
         # Attention output
         output[:, :, q_start:q_end, :] = torch.matmul(
@@ -96,18 +96,22 @@ def compressed_attention(
 
         # Score accumulation
         q_weights = policy.get_query_weights(
-            q_start=q_start, q_end=q_end, device=device, dtype=torch.float32,
+            q_start=q_start, q_end=q_end, device=device, dtype=probs.dtype,
         )
         if q_weights is None:
             continue
 
+        # Fuse q-weighting with group reduction: (probs * q_w) then sum over
+        # the group and qb dims in one shot, avoiding a [B, num_kv, qb, Sk]
+        # intermediate. Cast to fp32 only at the final (smaller) contrib.
+        weighted = probs * q_weights.view(1, 1, qb, 1)
         if group > 1:
-            probs_kv = probs.view(batch_size, num_kv, group, qb, seq_len_k).sum(dim=2)
+            contrib = weighted.view(
+                batch_size, num_kv, group, qb, seq_len_k
+            ).sum(dim=(2, 3))
         else:
-            probs_kv = probs
-
-        contrib = torch.einsum("q,bhqk->bhk", q_weights, probs_kv)
-        acc_scores.add_(contrib)
+            contrib = weighted.sum(dim=2)
+        acc_scores.add_(contrib.to(torch.float32))
 
     selected = policy.select(acc_scores, seq_len_k=seq_len_k)
     policy.finalize_prefill()

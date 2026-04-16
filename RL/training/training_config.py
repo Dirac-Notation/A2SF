@@ -20,6 +20,12 @@ class TrainingConfig:
     episodes_per_update: int = 128
     token_budget: int = 512
 
+    # ----- Train-time state noise (data augmentation) -----
+    # 학습 중 state vector에 추가하는 노이즈 크기(원시 토큰 단위).
+    # 0이면 노이즈 비활성.
+    seq_len_noise_tokens: int = 256
+    top_pos_noise_tokens: int = 16
+
     # ----- Reproducibility / IO -----
     seed: int = 42
     save_dir: str = "runs/a2sf_rl"
@@ -46,6 +52,10 @@ class TrainingConfig:
         parser.add_argument("--l2_coef", type=float, default=default_cfg.l2_coef)
         parser.add_argument("--seed", type=int, default=default_cfg.seed)
         parser.add_argument("--checkpoint_every_epochs", type=int, default=default_cfg.checkpoint_every_epochs, help="N 에폭마다 policy_epoch_{N}.pt 저장. 0이면 에폭 중 저장 안 함.")
+        parser.add_argument("--seq_len_noise_tokens", type=int, default=default_cfg.seq_len_noise_tokens,
+                            help="학습 중 seq_len feature에 추가하는 ± 토큰 노이즈. 0이면 비활성.")
+        parser.add_argument("--top_pos_noise_tokens", type=int, default=default_cfg.top_pos_noise_tokens,
+                            help="학습 중 top-k position feature에 추가하는 ± 토큰 노이즈. 0이면 비활성.")
 
         args = parser.parse_args(argv)
         return cls(
@@ -61,5 +71,7 @@ class TrainingConfig:
             resume=args.resume,
             train_data_path=args.train_data_path,
             checkpoint_every_epochs=args.checkpoint_every_epochs,
+            seq_len_noise_tokens=args.seq_len_noise_tokens,
+            top_pos_noise_tokens=args.top_pos_noise_tokens,
         )
 
