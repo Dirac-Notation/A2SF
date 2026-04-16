@@ -12,9 +12,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-NUM_BEST = 4
+NUM_BEST = 1
 BEST_LABELS = [f"best{i+1}" for i in range(NUM_BEST)]
-BEST_COLORS = ["#4C72B0", "#DD8452", "#55A868", "#C44E52"]
+BEST_COLORS = ["#4C72B0", "#DD8452", "#55A868", "#C44E52"][:NUM_BEST]
 
 
 def _load_training_progress(jsonl_path: str) -> List[Dict[str, Any]]:
@@ -81,8 +81,12 @@ def _collect_overall(
         for label in BEST_LABELS:
             best_rewards[label].append(float(row.get(f"{label}_avg_reward", 0.0)))
         total_losses.append(float(row.get("total_loss", 0.0)))
-        seq_lens = row.get("input_seq_lengths", [])
-        batch_sizes.append(int(len(seq_lens)) if isinstance(seq_lens, list) else 1)
+        # batch_size: prefer explicit field, fallback to legacy input_seq_lengths list
+        if "batch_size" in row:
+            batch_sizes.append(int(row.get("batch_size", 1)))
+        else:
+            seq_lens = row.get("input_seq_lengths", [])
+            batch_sizes.append(int(len(seq_lens)) if isinstance(seq_lens, list) else 1)
         if ref is None and "real_best_reference_avg_reward" in row:
             ref = float(row["real_best_reference_avg_reward"])
         if not ref_by_task:
@@ -101,15 +105,21 @@ def _collect_overall(
 def _collect_per_task(
     rows: List[Dict[str, Any]],
 ) -> Tuple[List[str], Dict[str, Dict[str, np.ndarray]], Dict[str, np.ndarray]]:
-    """Task별 per-iteration 가중평균 reward와 샘플 수를 수집.
+    """Task별 per-iteration reward와 샘플 수를 수집.
 
-    Returns:
-      task_types: 등장한 task 종류 리스트
-      per_task_avg: {task: {best_k: np.ndarray(per-iter weighted avg)}}
-      per_task_cnt: {task: np.ndarray(per-iter sample count)}
+    우선순위:
+      1. `best{k}_avg_by_task` (simplified log) + `task_counts`
+      2. 구버전 fallback: `best{k}_rewards` + `task_types` per-sample
     """
     task_set = set()
     for row in rows:
+        # new format
+        tc = row.get("task_counts")
+        if isinstance(tc, dict):
+            for t in tc.keys():
+                task_set.add(str(t))
+            continue
+        # legacy format
         for t in row.get("task_types", []) or []:
             task_set.add(str(t))
     task_types = sorted(task_set)
@@ -124,12 +134,28 @@ def _collect_per_task(
     }
 
     for i, row in enumerate(rows):
+        tc = row.get("task_counts")
+        if isinstance(tc, dict):
+            # new simplified log
+            for t in task_types:
+                cnt = int(tc.get(t, 0) or 0)
+                if cnt > 0:
+                    per_task_cnt[t][i] = float(cnt)
+            for label in BEST_LABELS:
+                avg_by_task = row.get(f"{label}_avg_by_task") or {}
+                if not isinstance(avg_by_task, dict):
+                    continue
+                for t in task_types:
+                    if t in avg_by_task:
+                        per_task_avg[t][label][i] = float(avg_by_task[t])
+            continue
+
+        # legacy per-sample format
         row_tasks = row.get("task_types", []) or []
         for label in BEST_LABELS:
             rewards = row.get(f"{label}_rewards")
             if not isinstance(rewards, list) or len(rewards) != len(row_tasks):
                 continue
-            # group by task
             for t in task_types:
                 mask = [j for j, tt in enumerate(row_tasks) if str(tt) == t]
                 if not mask:

@@ -266,6 +266,7 @@ class A2SFTrainer:
         H = int(self.env.context_encoder.num_heads)
         meta_end = 1 + num_metric_types
         kH = topk * H
+        side = (topk + 1) * H  # top-k positions + entropy per head
 
         if seq_noise > 0:
             noise_tokens = (torch.rand(out.size(0), device=out.device) * 2 - 1) * float(seq_noise)
@@ -273,12 +274,14 @@ class A2SFTrainer:
             out[:, 0] = torch.clamp(out[:, 0] + noise_norm, 0.0, 1.0)
 
         if pos_noise > 0:
-            # tova_topk + snap_topk 영역 전체 (2 * 4H)
-            pos_slice = slice(meta_end, meta_end + 2 * kH)
-            shape = out[:, pos_slice].shape
-            noise_tokens = (torch.rand(shape, device=out.device) * 2 - 1) * float(pos_noise)
-            noise_norm = noise_tokens / denom_pos
-            out[:, pos_slice] = torch.clamp(out[:, pos_slice] + noise_norm, 0.0, 1.0)
+            # tova_topk + snap_topk 위치만 노이즈 추가 (entropy는 건드리지 않음)
+            # layout: [tova_topk(4H), tova_ent(H), snap_topk(4H), snap_ent(H)]
+            noise_scale = float(pos_noise) / denom_pos
+            for start in (meta_end, meta_end + side):
+                topk_slice = slice(start, start + kH)
+                shape = out[:, topk_slice].shape
+                noise = (torch.rand(shape, device=out.device) * 2 - 1) * noise_scale
+                out[:, topk_slice] = torch.clamp(out[:, topk_slice] + noise, 0.0, 1.0)
 
         return out
 
@@ -526,7 +529,7 @@ class A2SFTrainer:
             current_beta = self._get_ucb_beta(epoch, total_epochs)
 
             for batch in self.train_loader:
-                num_best = 4
+                num_best = 1
                 label_order = [f"best{i+1}" for i in range(num_best)]
                 per_label_data: Dict[str, Dict[str, List[Any]]] = {
                     label: {
@@ -669,7 +672,10 @@ class A2SFTrainer:
                 self._save_checkpoint(iteration=last_iter, epoch=epoch + 1)
             epoch_mrr = self._compute_epoch_mrr()
             self._log_epoch_mrr(epoch=epoch + 1, epoch_mrr=epoch_mrr)
-            self._plot_training_progress()
+            pe = int(getattr(self.training_config, "plot_every_epochs", 0) or 0)
+            is_last_epoch = (epoch + 1) == num_epochs
+            if pe > 0 and ((epoch + 1) % pe == 0 or is_last_epoch):
+                self._plot_training_progress()
 
         return self.last_iteration
 
@@ -731,17 +737,42 @@ class A2SFTrainer:
 
         current_lr = self.optimizer.param_groups[0]["lr"]
 
-        progress_data: Dict[str, Any] = {"iteration": iteration}
+        # 배치 내 task 분포 요약 (전체 리스트 대신 카운트)
+        task_counts: Dict[str, int] = {}
+        for t in iteration_task_types:
+            task_counts[t] = task_counts.get(t, 0) + 1
+        batch_size = int(len(iteration_task_types))
+
+        # task별 best{k} 평균 reward (per-sample 리스트 대신 task별 평균만 저장)
+        per_label_avg_by_task: Dict[str, Dict[str, float]] = {}
+        for label, rewards in per_label_rewards.items():
+            sums: Dict[str, float] = {}
+            cnts: Dict[str, int] = {}
+            for i, r in enumerate(rewards):
+                if i >= batch_size:
+                    break
+                t = iteration_task_types[i]
+                sums[t] = sums.get(t, 0.0) + float(r)
+                cnts[t] = cnts.get(t, 0) + 1
+            per_label_avg_by_task[label] = {
+                t: round(sums[t] / cnts[t], 4) for t in sums
+            }
+
+        # seq_len 요약
+        if iteration_input_seq_lengths:
+            seq_min = int(min(iteration_input_seq_lengths))
+            seq_max = int(max(iteration_input_seq_lengths))
+            seq_avg = int(sum(iteration_input_seq_lengths) / len(iteration_input_seq_lengths))
+        else:
+            seq_min = seq_max = seq_avg = 0
+
+        progress_data: Dict[str, Any] = {"iteration": iteration, "batch_size": batch_size}
         digits_map: Dict[str, int] = {}
         for label, avg in avg_rewards.items():
             key = f"{label}_avg_reward"
             progress_data[key] = avg.item() if isinstance(avg, torch.Tensor) else avg
             digits_map[key] = 4
-
-        # per-sample rewards for each best label (aligned with task_types)
-        for label, rewards in per_label_rewards.items():
-            key = f"{label}_rewards"
-            progress_data[key] = [round(float(r), 4) for r in rewards]
+            progress_data[f"{label}_avg_by_task"] = per_label_avg_by_task.get(label, {})
 
         progress_data.update({
             "prediction_rmse": prediction_rmse,
@@ -756,8 +787,10 @@ class A2SFTrainer:
             "real_best_reference_avg_by_task": {
                 t: round(float(v), 4) for t, v in self.real_best_reference_avg_by_task.items()
             },
-            "input_seq_lengths": iteration_input_seq_lengths,
-            "task_types": iteration_task_types,
+            "task_counts": task_counts,
+            "seq_len_min": seq_min,
+            "seq_len_max": seq_max,
+            "seq_len_avg": seq_avg,
         })
         digits_map.update({
             "prediction_rmse": 4,

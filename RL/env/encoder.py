@@ -76,12 +76,13 @@ class AttentionEncoder(nn.Module):
 
     Returns a feature vector structured as:
       [ seq_len, metric_type_one_hot(M),
-        tova_top1(H), tova_top2(H), tova_top3(H), tova_top4(H),
-        snap_top1(H), snap_top2(H), snap_top3(H), snap_top4(H) ]
+        tova_top1(H), tova_top2(H), tova_top3(H), tova_top4(H), tova_entropy(H),
+        snap_top1(H), snap_top2(H), snap_top3(H), snap_top4(H), snap_entropy(H) ]
 
     - snapkv_score: cumulative attention from last 16 queries
     - tova_score: attention from the last 1 query only
     - top-k positions are normalized by (seq_len - 1)
+    - entropy는 정규화된 점수 분포의 엔트로피를 log(seq_len)으로 나눈 [0, 1] 값
     - metric_type_one_hot: one-hot over METRIC_TYPE_ORDER (M categories incl. "unknown")
     """
 
@@ -120,10 +121,14 @@ class AttentionEncoder(nn.Module):
 
         self.topk = 4
         self.num_metric_types = int(len(METRIC_TYPE_ORDER))
+        # tova/snap feature dim: (topk + 1)*H  -- top1~4 positions + entropy
+        self.side_feat_per_head = self.topk + 1
 
         if self.output_dim <= 0:
-            # [seq_len(1) + metric_type_one_hot(M)] + [tova_topk(4H), snap_topk(4H)]
-            self.output_dim = 1 + self.num_metric_types + (2 * self.topk * self.num_heads)
+            # [seq_len(1) + metric_type_one_hot(M)] + [tova((topk+1)H), snap((topk+1)H)]
+            self.output_dim = (
+                1 + self.num_metric_types + 2 * self.side_feat_per_head * self.num_heads
+            )
 
     @property
     def _encode_device(self) -> torch.device:
@@ -141,6 +146,16 @@ class AttentionEncoder(nn.Module):
         topk_norm = topk_idx.to(dtype=torch.float32) / max(float(seq_len - 1), 1.0)
         # topk_idx is [H, k] -> transpose to [k, H] then flatten to (k*H,)
         return topk_norm.t().contiguous().reshape(-1).to(torch.float32)
+
+    @staticmethod
+    def _entropy_per_head(acc_scores: torch.Tensor, seq_len: int) -> torch.Tensor:
+        """누적 attention score 분포의 정규화 엔트로피 per-head. [H] → log(seq_len)으로 나눠 [0, 1]."""
+        prob = acc_scores / acc_scores.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+        ent = -torch.sum(prob * torch.log(prob.clamp_min(1e-12)), dim=-1)  # [H]
+        denom = torch.log(
+            torch.tensor(float(seq_len), device=ent.device, dtype=ent.dtype).clamp_min(2.0)
+        )
+        return (ent / denom).to(torch.float32)
 
     def _build_first_layer_attention_features(self, input_ids: torch.Tensor) -> torch.Tensor:
         input_ids = input_ids.to(self._encode_device)
@@ -185,9 +200,11 @@ class AttentionEncoder(nn.Module):
 
         tova_topk = self._topk_positions(tova_acc, seq_len, self.topk)    # (4*H,)
         snap_topk = self._topk_positions(snapkv_acc, seq_len, self.topk)  # (4*H,)
+        tova_ent = self._entropy_per_head(tova_acc, seq_len)              # (H,)
+        snap_ent = self._entropy_per_head(snapkv_acc, seq_len)            # (H,)
 
-        # Return: [tova_top1(H)..tova_top4(H), snap_top1(H)..snap_top4(H)]
-        return torch.cat([tova_topk, snap_topk], dim=-1)
+        # Return: [tova_top1..4(4H), tova_entropy(H), snap_top1..4(4H), snap_entropy(H)]
+        return torch.cat([tova_topk, tova_ent, snap_topk, snap_ent], dim=-1)
 
     def encode_context(
         self,
