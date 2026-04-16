@@ -52,10 +52,8 @@ class TrainingConfig:
         parser.add_argument("--l2_coef", type=float, default=default_cfg.l2_coef)
         parser.add_argument("--seed", type=int, default=default_cfg.seed)
         parser.add_argument("--checkpoint_every_epochs", type=int, default=default_cfg.checkpoint_every_epochs, help="N 에폭마다 policy_epoch_{N}.pt 저장. 0이면 에폭 중 저장 안 함.")
-        parser.add_argument("--seq_len_noise_tokens", type=int, default=default_cfg.seq_len_noise_tokens,
-                            help="학습 중 seq_len feature에 추가하는 ± 토큰 노이즈. 0이면 비활성.")
-        parser.add_argument("--top_pos_noise_tokens", type=int, default=default_cfg.top_pos_noise_tokens,
-                            help="학습 중 top-k position feature에 추가하는 ± 토큰 노이즈. 0이면 비활성.")
+        parser.add_argument("--seq_len_noise_tokens", type=int, default=default_cfg.seq_len_noise_tokens, help="학습 중 seq_len feature에 추가하는 ± 토큰 노이즈. 0이면 비활성.")
+        parser.add_argument("--top_pos_noise_tokens", type=int, default=default_cfg.top_pos_noise_tokens, help="학습 중 top-k position feature에 추가하는 ± 토큰 노이즈. 0이면 비활성.")
 
         args = parser.parse_args(argv)
         return cls(
