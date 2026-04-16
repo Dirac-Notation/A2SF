@@ -242,6 +242,46 @@ class A2SFTrainer:
         # Backward-compat fallback if cached states are missing.
         return self._build_state_for_sample(sample, token_budget).to(self.device, dtype=torch.float32)
 
+    def _apply_state_noise(self, state: torch.Tensor, sample: Dict[str, Any]) -> torch.Tensor:
+        """학습 중에만 state에 랜덤 노이즈를 추가.
+
+        - seq_len feature: ± seq_len_noise_tokens 토큰
+        - top-k position feature(tova/snap): ± top_pos_noise_tokens 토큰 (샘플 seq_len 기준으로 정규화)
+        normalize/denormalize는 encoder의 max_seq_length, 샘플의 input_seq_len 기준.
+        """
+        seq_noise = int(self.training_config.seq_len_noise_tokens)
+        pos_noise = int(self.training_config.top_pos_noise_tokens)
+        if seq_noise <= 0 and pos_noise <= 0:
+            return state
+
+        if state.ndim == 1:
+            state = state.unsqueeze(0)
+        out = state.clone()
+        max_seq_length = float(self.env.context_encoder.max_seq_length)
+        sample_seq_len = int(sample.get("input_seq_len", 0)) or 1
+        denom_pos = max(float(sample_seq_len - 1), 1.0)
+
+        num_metric_types = int(self.env.context_encoder.num_metric_types)
+        topk = int(self.env.context_encoder.topk)
+        H = int(self.env.context_encoder.num_heads)
+        meta_end = 1 + num_metric_types
+        kH = topk * H
+
+        if seq_noise > 0:
+            noise_tokens = (torch.rand(out.size(0), device=out.device) * 2 - 1) * float(seq_noise)
+            noise_norm = noise_tokens / max_seq_length
+            out[:, 0] = torch.clamp(out[:, 0] + noise_norm, 0.0, 1.0)
+
+        if pos_noise > 0:
+            # tova_topk + snap_topk 영역 전체 (2 * 4H)
+            pos_slice = slice(meta_end, meta_end + 2 * kH)
+            shape = out[:, pos_slice].shape
+            noise_tokens = (torch.rand(shape, device=out.device) * 2 - 1) * float(pos_noise)
+            noise_norm = noise_tokens / denom_pos
+            out[:, pos_slice] = torch.clamp(out[:, pos_slice] + noise_norm, 0.0, 1.0)
+
+        return out
+
     @staticmethod
     def _compute_real_best_reference_avg(samples: List[Dict[str, Any]], token_budget: int) -> float:
         if not samples:
@@ -530,6 +570,7 @@ class A2SFTrainer:
                     state = self._get_cached_state(episode_data, token_budget=token_budget)
                     if state.ndim == 1:
                         state = state.unsqueeze(0)
+                    state = self._apply_state_noise(state, episode_data)
                     states_list.append(state)
                     batch_action_scores.append([float(v) for v in action_scores])
                     batch_metric_types.append(metric_type)

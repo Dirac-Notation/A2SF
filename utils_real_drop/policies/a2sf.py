@@ -12,9 +12,10 @@ class A2SFPolicy(CompressionPolicy):
         self._window: torch.Tensor = None  # [seq_len_q] fp32
 
     def prepare_prefill(self, seq_len_q, device, dtype):
-        exponents = torch.arange(seq_len_q, device=device, dtype=torch.float32)
-        # window[q] = forgetting_factor ** (max - q); newest token has weight 1.
-        self._window = self.forgetting_factor ** (exponents.max() - exponents)
+        # window[q] = forgetting_factor ** (seq_len_q - 1 - q); newest token has weight 1.
+        # Use a constant upper bound to avoid a device->host sync from exponents.max().
+        rev = torch.arange(seq_len_q - 1, -1, -1, device=device, dtype=torch.float32)
+        self._window = self.forgetting_factor ** rev
 
     def get_query_weights(self, q_start, q_end, device, dtype):
         return self._window[q_start:q_end].to(device=device, dtype=torch.float32)
