@@ -31,6 +31,7 @@ class TrainingConfig:
     save_dir: str = "runs/a2sf_rl"
     resume: Optional[str] = None
     checkpoint_every_epochs: int = 500
+    plot_every_epochs: int = 50  # N 에폭마다 training_progress.png 갱신. 0이면 비활성.
 
     # ----- Dataset paths (fixed splits) -----
     train_data_path: str = "RL/training/data/training_data.jsonl"
@@ -52,6 +53,7 @@ class TrainingConfig:
         parser.add_argument("--l2_coef", type=float, default=default_cfg.l2_coef)
         parser.add_argument("--seed", type=int, default=default_cfg.seed)
         parser.add_argument("--checkpoint_every_epochs", type=int, default=default_cfg.checkpoint_every_epochs, help="N 에폭마다 policy_epoch_{N}.pt 저장. 0이면 에폭 중 저장 안 함.")
+        parser.add_argument("--plot_every_epochs", type=int, default=default_cfg.plot_every_epochs, help="N 에폭마다 training_progress.png 갱신. 0이면 비활성.")
         parser.add_argument("--seq_len_noise_tokens", type=int, default=default_cfg.seq_len_noise_tokens, help="학습 중 seq_len feature에 추가하는 ± 토큰 노이즈. 0이면 비활성.")
         parser.add_argument("--top_pos_noise_tokens", type=int, default=default_cfg.top_pos_noise_tokens, help="학습 중 top-k position feature에 추가하는 ± 토큰 노이즈. 0이면 비활성.")
 
@@ -69,6 +71,7 @@ class TrainingConfig:
             resume=args.resume,
             train_data_path=args.train_data_path,
             checkpoint_every_epochs=args.checkpoint_every_epochs,
+            plot_every_epochs=args.plot_every_epochs,
             seq_len_noise_tokens=args.seq_len_noise_tokens,
             top_pos_noise_tokens=args.top_pos_noise_tokens,
         )

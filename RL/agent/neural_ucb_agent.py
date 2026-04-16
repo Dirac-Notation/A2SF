@@ -74,9 +74,11 @@ class NeuralUCBAgent(nn.Module):
         # Embedding dimensions
         self.feature_dim = 512
         self.topk = 4
+        # side feature per head: top1~4 positions + entropy = topk + 1
+        self.side_feat_per_head = self.topk + 1
         meta_dim = 1 + self.num_metric_types  # (seq_len, metric_type_one_hot)
-        tova_dim = self.topk * self.num_heads  # (top1..top4 per head)
-        snap_dim = self.topk * self.num_heads  # (top1..top4 per head)
+        tova_dim = self.side_feat_per_head * self.num_heads  # (top1..top4 + entropy per head)
+        snap_dim = self.side_feat_per_head * self.num_heads  # (top1..top4 + entropy per head)
 
         # Three separate embedding projections
         self.meta_embed = nn.Sequential(
@@ -134,12 +136,15 @@ class NeuralUCBAgent(nn.Module):
                 nn.init.constant_(m.bias, 0.0)
 
     def _split_state(self, state: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Split flat state vector into (meta, tova_topk, snap_topk) components."""
-        kH = self.topk * self.num_heads
+        """Split flat state vector into (meta, tova_side, snap_side) components.
+
+        side = top-k positions (kH) + entropy (H) = (k+1)*H.
+        """
+        side = self.side_feat_per_head * self.num_heads
         meta_dim = 1 + self.num_metric_types
-        meta = state[:, :meta_dim]                       # (B, 1+M)
-        tova = state[:, meta_dim:meta_dim + kH]         # (B, 4H)
-        snap = state[:, meta_dim + kH:meta_dim + 2 * kH]  # (B, 4H)
+        meta = state[:, :meta_dim]                             # (B, 1+M)
+        tova = state[:, meta_dim:meta_dim + side]              # (B, (k+1)H)
+        snap = state[:, meta_dim + side:meta_dim + 2 * side]   # (B, (k+1)H)
         return meta, tova, snap
 
     def _embed_state(self, state: torch.Tensor) -> torch.Tensor:
