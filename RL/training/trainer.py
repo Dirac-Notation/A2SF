@@ -428,6 +428,7 @@ class A2SFTrainer:
         print(f"Starting training for {num_epochs} epochs")
 
         global_iteration = 0
+        self.last_iteration = 0
         total_epochs = max(1, int(num_epochs))
 
         for epoch in range(num_epochs):
@@ -554,10 +555,11 @@ class A2SFTrainer:
                         log_filename=f"training_progress_{label}.jsonl",
                     )
                 global_iteration += 1
+                self.last_iteration = max(0, global_iteration - 1)
 
             self.scheduler.step()
 
-            last_iter = max(0, global_iteration - 1)
+            last_iter = self.last_iteration
             ce = int(getattr(self.training_config, "checkpoint_every_epochs", 100) or 0)
             if ce > 0 and (epoch + 1) % ce == 0:
                 self._save_checkpoint(iteration=last_iter, epoch=epoch + 1)
@@ -565,7 +567,7 @@ class A2SFTrainer:
             self._log_epoch_mrr(epoch=epoch + 1, epoch_mrr=epoch_mrr)
             self._plot_training_progress()
 
-        return max(0, global_iteration - 1)
+        return self.last_iteration
 
     def _plot_training_progress(self) -> None:
         try:
