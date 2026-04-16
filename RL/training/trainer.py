@@ -46,16 +46,31 @@ class A2SFTrainer:
         # Load pre-split data generated under `RL/training/data/`.
         training_data_list = self.load_training_data()
 
-        # 모든 action의 reward가 0인 샘플 제외
+        # 모든 action의 reward가 0인 샘플 제외 (데이터셋별 통계 함께 출력)
         bkey = str(int(self.training_config.token_budget))
         before_count = len(training_data_list)
-        training_data_list = [
-            s for s in training_data_list
-            if any(float(v) > 0 for v in s.get("action_scores_by_budget", {}).get(bkey, [0]))
-        ]
+        per_dataset_before: Dict[str, int] = {}
+        per_dataset_removed: Dict[str, int] = {}
+        kept: List[Dict[str, Any]] = []
+        for s in training_data_list:
+            ds = str(s.get("dataset") or "unknown")
+            per_dataset_before[ds] = per_dataset_before.get(ds, 0) + 1
+            scores = s.get("action_scores_by_budget", {}).get(bkey, [0])
+            if any(float(v) > 0 for v in scores):
+                kept.append(s)
+            else:
+                per_dataset_removed[ds] = per_dataset_removed.get(ds, 0) + 1
+        training_data_list = kept
         skipped = before_count - len(training_data_list)
-        if skipped > 0:
-            print(f"Filtered out {skipped}/{before_count} samples with all-zero rewards (budget={bkey})")
+
+        print(f"[filter all-zero] budget={bkey}: removed {skipped}/{before_count} "
+              f"({before_count - skipped} remaining)")
+        print(f"{'dataset':<25} {'before':>8} {'removed':>8} {'kept':>8}")
+        print("-" * 53)
+        for ds in sorted(per_dataset_before.keys()):
+            before = per_dataset_before[ds]
+            removed = per_dataset_removed.get(ds, 0)
+            print(f"{ds:<25} {before:>8} {removed:>8} {before - removed:>8}")
 
         state_dim = int(self.env.context_encoder.output_dim)
         num_heads = int(self.env.context_encoder.num_heads)
@@ -285,7 +300,6 @@ class A2SFTrainer:
 
     def _compute_epoch_mrr(self) -> float:
         """모델 순위 대비 지상 최고 `action_scores` 집합(복수 정답은 점수에 이미 반영됨). 동점이면 최소 rank 사용."""
-        reciprocal_ranks: List[float] = []
         score_eps = self.REAL_BEST_SCORE_EPS
         token_budget = int(self.training_config.token_budget)
         budget_key = str(token_budget)
@@ -293,38 +307,61 @@ class A2SFTrainer:
         self.agent.eval()
         self.env.context_encoder.eval()
 
+        states_list: List[torch.Tensor] = []
+        metric_types: List[str] = []
+        optimal_indices_list: List[List[int]] = []
+
+        for sample in self.training_dataset.data:
+            outputs_by_budget = sample.get("action_outputs_by_budget", {})
+            scores_by_budget = sample.get("action_scores_by_budget", {})
+            action_outputs = outputs_by_budget.get(budget_key)
+            if not isinstance(action_outputs, list) or len(action_outputs) == 0:
+                continue
+            action_scores = scores_by_budget.get(budget_key)
+            if not isinstance(action_scores, list) or len(action_scores) != len(action_outputs):
+                continue
+
+            scores_f = [float(s) for s in action_scores]
+            max_score = max(scores_f)
+            optimal_indices = [
+                i for i, s in enumerate(scores_f) if s >= max_score - score_eps
+            ]
+            state = self._get_cached_state(sample, token_budget=token_budget)
+            if state.ndim == 1:
+                state = state.unsqueeze(0)
+            states_list.append(state)
+            metric_types.append(str(sample["metric_type"]))
+            optimal_indices_list.append(optimal_indices)
+
+        if not states_list:
+            return 0.0
+
+        states = torch.cat(states_list, dim=0).to(self.device, dtype=torch.float32)
+
+        # 메모리 절약을 위해 마이크로배치로 추론
+        chunk = max(1, int(self.training_config.episodes_per_update))
+        reward_pred_all: List[torch.Tensor] = []
         with torch.no_grad():
-            for sample in self.training_dataset.data:
-                outputs_by_budget = sample.get("action_outputs_by_budget", {})
-                scores_by_budget = sample.get("action_scores_by_budget", {})
-                metric_type = str(sample["metric_type"])
+            for i in range(0, states.size(0), chunk):
+                sub_states = states[i:i + chunk]
+                sub_metrics = metric_types[i:i + chunk]
+                rp = self.agent.forward(sub_states, metric_type=sub_metrics)["reward_pred"]
+                reward_pred_all.append(rp)
+        reward_pred_all_t = torch.cat(reward_pred_all, dim=0)  # (N, num_actions)
 
-                action_outputs = outputs_by_budget.get(budget_key)
-                if not isinstance(action_outputs, list) or len(action_outputs) == 0:
-                    continue
+        # 샘플별 rank 계산
+        ranked = torch.argsort(reward_pred_all_t, descending=True, dim=-1)  # (N, num_actions)
+        num_actions = reward_pred_all_t.size(-1)
+        rank_by_action = torch.empty_like(ranked)
+        positions = torch.arange(1, num_actions + 1, device=ranked.device, dtype=ranked.dtype)
+        rank_by_action.scatter_(-1, ranked, positions.unsqueeze(0).expand_as(ranked))
 
-                action_scores = scores_by_budget.get(budget_key)
-                if not isinstance(action_scores, list) or len(action_scores) != len(action_outputs):
-                    continue
-
-                scores_f = [float(s) for s in action_scores]
-                max_score = max(scores_f)
-
-                optimal_indices = [
-                    i for i, s in enumerate(scores_f) if s >= max_score - score_eps
-                ]
-
-                state = self._get_cached_state(sample, token_budget=token_budget)
-
-                reward_pred = self.agent.forward(state, metric_type=metric_type)["reward_pred"][0]
-                ranked_indices = torch.argsort(reward_pred, descending=True)
-                num_actions = len(scores_f)
-                rank_by_action = torch.empty(num_actions, dtype=torch.long, device=reward_pred.device)
-                for pos in range(num_actions):
-                    rank_by_action[ranked_indices[pos]] = pos + 1
-
-                best_rank = min(int(rank_by_action[i].item()) for i in optimal_indices)
-                reciprocal_ranks.append(1.0 / float(best_rank))
+        reciprocal_ranks: List[float] = []
+        rank_cpu = rank_by_action.detach().cpu().tolist()
+        for i, opt_idx in enumerate(optimal_indices_list):
+            ranks = rank_cpu[i]
+            best_rank = min(int(ranks[j]) for j in opt_idx)
+            reciprocal_ranks.append(1.0 / float(best_rank))
 
         if not reciprocal_ranks:
             return 0.0
@@ -348,39 +385,49 @@ class A2SFTrainer:
         self.agent.train()
         self.env.context_encoder.eval()
 
-        prediction_mse_terms: List[torch.Tensor] = []
-        reward_pairs: List[Tuple[float, float]] = []
-        feature_action_pairs = []
-
+        # 배치 stacking
+        states_list: List[torch.Tensor] = []
+        a_vals: List[torch.Tensor] = []
+        b_vals: List[torch.Tensor] = []
+        rewards_list: List[torch.Tensor] = []
+        metric_types_list: List[str] = []
         for state, action, reward, metric_type in samples:
             if state.ndim == 1:
                 state = state.unsqueeze(0)
+            states_list.append(state)
+            a_vals.append(action[0].view(-1))
+            b_vals.append(action[1].view(-1))
+            rewards_list.append(reward.view(-1))
+            metric_types_list.append(str(metric_type))
 
-            out = self.agent.forward(state, metric_type=metric_type)
-            reward_pred = out["reward_pred"]
-            feature_vector = out["feature_vector"]
+        states = torch.cat(states_list, dim=0)
+        a_batch = torch.cat(a_vals, dim=0)
+        b_batch = torch.cat(b_vals, dim=0)
+        rewards = torch.cat(rewards_list, dim=0)  # (N,)
 
-            action_idx = self.agent._get_action_indices(action)
-            if action_idx.ndim > 0:
-                action_idx = action_idx[0]
+        # 한 번의 forward로 전체 배치 처리
+        out = self.agent.forward(states, metric_type=metric_types_list)
+        reward_pred = out["reward_pred"]       # (N, num_actions)
+        feature_vector = out["feature_vector"] # (N, feature_dim)
 
-            selected_predict = reward_pred[0, action_idx].unsqueeze(0)
-            actual_reward = reward.unsqueeze(0) if reward.ndim == 0 else reward
-            prediction_mse_terms.append(F.mse_loss(selected_predict, actual_reward))
-            reward_pairs.append(
-                (
-                    float(actual_reward.view(-1)[0].detach().item()),
-                    float(selected_predict.view(-1)[0].detach().item()),
-                )
-            )
-            feature_action_pairs.append((feature_vector.detach(), action_idx, str(metric_type)))
+        # Selected action 예측값 gather
+        action_idx_batch = self.agent._get_action_indices((a_batch, b_batch))  # (N,)
+        batch_indices = torch.arange(
+            action_idx_batch.size(0), device=reward_pred.device, dtype=torch.long
+        )
+        selected_predict = reward_pred[batch_indices, action_idx_batch]  # (N,)
+        prediction_rmse = torch.sqrt(F.mse_loss(selected_predict, rewards))
 
-        prediction_rmse = torch.sqrt(torch.stack(prediction_mse_terms).mean())
+        reward_pairs: List[Tuple[float, float]] = []
+        selected_cpu = selected_predict.detach().cpu().tolist()
+        rewards_cpu = rewards.detach().cpu().tolist()
+        for gt, pred in zip(rewards_cpu, selected_cpu):
+            reward_pairs.append((float(gt), float(pred)))
 
         l2_loss = 0.0
         for param in self.agent.parameters():
             if param.requires_grad:
-                l2_loss += torch.sum(param ** 2)
+                l2_loss = l2_loss + torch.sum(param ** 2)
         l2_loss = config.l2_coef * l2_loss
 
         total_loss = prediction_rmse + l2_loss
@@ -396,8 +443,11 @@ class A2SFTrainer:
         optimizer.step()
 
         with torch.no_grad():
-            for feature_vector, action_idx, mt in feature_action_pairs:
-                self.agent._update_inverse_covariances(feature_vector, action_idx, mt)
+            detached_features = feature_vector.detach()
+            for i, mt in enumerate(metric_types_list):
+                self.agent._update_inverse_covariances(
+                    detached_features[i:i + 1], action_idx_batch[i], mt
+                )
 
         return {
             "prediction_rmse": float(prediction_rmse.item()),
@@ -456,6 +506,10 @@ class A2SFTrainer:
 
                 start_time = time.time()
 
+                # --- 배치 전체를 한 번에 forward/UCB로 처리 ---
+                states_list: List[torch.Tensor] = []
+                batch_action_scores: List[List[float]] = []
+                batch_metric_types: List[str] = []
                 for episode_data in batch:
                     input_seq_len = int(episode_data.get("input_seq_len", 0))
                     task_type_str = str(episode_data.get("task_type") or "unknown")
@@ -474,44 +528,56 @@ class A2SFTrainer:
                             f"missing/invalid action_scores_by_budget['{budget_key}'] matching outputs"
                         )
                     state = self._get_cached_state(episode_data, token_budget=token_budget)
+                    if state.ndim == 1:
+                        state = state.unsqueeze(0)
+                    states_list.append(state)
+                    batch_action_scores.append([float(v) for v in action_scores])
+                    batch_metric_types.append(metric_type)
+                    common_input_seq_lengths.append(input_seq_len)
+                    common_task_types.append(task_type_str)
 
-                    with torch.no_grad():
-                        reward_pred_all = self.agent.forward(
-                            state,
-                            metric_type=metric_type,
-                        )["reward_pred"][0]
-                        _, ucb_scores = self.agent._compute_ucb_scores(
-                            state=state,
-                            beta=current_beta,
-                            metric_type=metric_type,
-                        )
-                        ucb_scores = ucb_scores[0]
+                states = torch.cat(states_list, dim=0).to(self.device, dtype=torch.float32)
+                B = states.size(0)
 
-                        desc_idx = torch.argsort(ucb_scores, descending=True)
-                        actual_best = min(num_best, desc_idx.numel())
-                        selected_indices = desc_idx[:actual_best]
-                        if actual_best < num_best:
-                            pad = selected_indices[-1:].expand(num_best - actual_best)
-                            selected_indices = torch.cat([selected_indices, pad])
+                with torch.no_grad():
+                    reward_pred_batch = self.agent.forward(
+                        states, metric_type=batch_metric_types
+                    )["reward_pred"]  # (B, num_actions)
+                    _, ucb_batch = self.agent._compute_ucb_scores(
+                        state=states, beta=current_beta, metric_type=batch_metric_types,
+                    )  # (B, num_actions)
+                    desc_idx_batch = torch.argsort(ucb_batch, descending=True, dim=-1)
+                    actual_best = min(num_best, desc_idx_batch.size(-1))
+                    selected_idx_batch = desc_idx_batch[:, :actual_best]
+                    if actual_best < num_best:
+                        pad = selected_idx_batch[:, -1:].expand(B, num_best - actual_best)
+                        selected_idx_batch = torch.cat([selected_idx_batch, pad], dim=-1)
+                    a_idx_batch = selected_idx_batch // self.agent.num_b_values
+                    b_idx_batch = selected_idx_batch % self.agent.num_b_values
+                    selected_a_batch = self.agent.a_values[a_idx_batch].to(self.device)  # (B, num_best)
+                    selected_b_batch = self.agent.b_values[b_idx_batch].to(self.device)  # (B, num_best)
 
-                        a_idx = selected_indices // self.agent.num_b_values
-                        b_idx = selected_indices % self.agent.num_b_values
-                        selected_a = self.agent.a_values[a_idx].to(self.device)
-                        selected_b = self.agent.b_values[b_idx].to(self.device)
+                for sample_i in range(B):
+                    action_scores = batch_action_scores[sample_i]
+                    metric_type = batch_metric_types[sample_i]
+                    reward_pred_all = reward_pred_batch[sample_i]
+                    state = states[sample_i:sample_i + 1]
 
                     for local_idx, label in enumerate(label_order):
-                        action_idx = int(selected_indices[local_idx].item())
+                        action_idx = int(selected_idx_batch[sample_i, local_idx].item())
                         reward_val = self._reward_for_action_index(action_scores, action_idx)
                         reward_t = torch.tensor(reward_val, device=self.device, dtype=torch.float32)
 
-                        action = (selected_a[local_idx].view(1), selected_b[local_idx].view(1))
+                        a_v = selected_a_batch[sample_i, local_idx]
+                        b_v = selected_b_batch[sample_i, local_idx]
+                        action = (a_v.view(1), b_v.view(1))
                         update_samples.append((state, action, reward_t, metric_type))
 
                         gt_reward_val = float(reward_val)
                         pred_reward_val = float(reward_pred_all[action_idx].item())
                         per_label_data[label]["rewards"].append(gt_reward_val)
-                        per_label_data[label]["actions_a"].append(round(float(selected_a[local_idx].item()), 4))
-                        per_label_data[label]["actions_b"].append(int(selected_b[local_idx].item()))
+                        per_label_data[label]["actions_a"].append(round(float(a_v.item()), 4))
+                        per_label_data[label]["actions_b"].append(int(b_v.item()))
                         per_label_data[label]["reward_pairs"].append((gt_reward_val, pred_reward_val))
 
                     # Real best: 로깅 전용 (손실/역전파에는 넣지 않음).
@@ -521,9 +587,6 @@ class A2SFTrainer:
                     )
                     pred_real_best_reward = float(reward_pred_all[real_best_idx].item())
                     real_best_reward_pairs.append((gt_real_best_reward, pred_real_best_reward))
-
-                    common_input_seq_lengths.append(input_seq_len)
-                    common_task_types.append(task_type_str)
 
                 end_time = time.time()
                 print(f"Time taken for one iteration: {end_time - start_time} seconds")

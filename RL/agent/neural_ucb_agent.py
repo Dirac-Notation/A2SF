@@ -38,23 +38,8 @@ class NeuralUCBAgent(nn.Module):
       2. tova_embed: (tova_top1..top4 per head, 4H) -> embed_dim
       3. snap_embed: (snap_top1..top4 per head, 4H) -> embed_dim
 
-    Averaged -> shared backbone -> per-metric reward heads with per-metric sigmoid slopes.
+    Averaged -> shared backbone -> per-metric reward heads.
     """
-
-    # 채점 metric의 특성에 따른 초기 sigmoid slope.
-    # 이산적(0/1에 가까운) metric은 큰 slope로 예측이 빠르게 saturate되도록,
-    # 연속적 metric은 slope=1.0으로 표준 sigmoid.
-    DEFAULT_SIGMOID_SLOPES: Dict[str, float] = {
-        "qa_f1_score": 1.0,
-        "qa_f1_zh_score": 1.0,
-        "rouge_score": 1.0,
-        "rouge_zh_score": 1.0,
-        "code_sim_score": 1.0,
-        "classification_score": 3.0,
-        "retrieval_score": 3.0,
-        "retrieval_zh_score": 3.0,
-        "count_score": 3.0,
-    }
 
     def __init__(
         self,
@@ -64,7 +49,6 @@ class NeuralUCBAgent(nn.Module):
         metric_heads: List[str] = None,
         num_heads: int = 32,
         num_metric_types: int = 10,
-        sigmoid_slopes: Dict[str, float] = None,
     ):
         super().__init__()
         # Discrete action space: (a, b) pairs for sigmoid cache
@@ -114,32 +98,16 @@ class NeuralUCBAgent(nn.Module):
             nn.ReLU(),
         )
 
-        # Shared backbone
+        # Shared backbone (bandit single-step이라 dropout=0)
         self.backbone = nn.Sequential(
-            MLPResidualBlock(dim=self.feature_dim, hidden_dim=1024, dropout=0.1),
-            MLPResidualBlock(dim=self.feature_dim, hidden_dim=1024, dropout=0.1),
+            MLPResidualBlock(dim=self.feature_dim, hidden_dim=1024, dropout=0.0),
+            MLPResidualBlock(dim=self.feature_dim, hidden_dim=1024, dropout=0.0),
         )
 
         # Per-metric reward heads
         self.reward_heads = nn.ModuleDict(
             {
                 metric_name: nn.Linear(self.feature_dim, self.num_actions)
-                for metric_name in self.metric_heads
-            }
-        )
-
-        # Per-metric sigmoid slope (learnable). Initial values from DEFAULT_SIGMOID_SLOPES
-        # or overridden by `sigmoid_slopes` argument. Larger slope = sharper (more binary)
-        # predictions, suitable for discrete metrics like classification/retrieval.
-        merged_slopes: Dict[str, float] = dict(self.DEFAULT_SIGMOID_SLOPES)
-        if sigmoid_slopes:
-            for k, v in sigmoid_slopes.items():
-                merged_slopes[str(k)] = float(v)
-        self.sigmoid_slopes = nn.ParameterDict(
-            {
-                metric_name: nn.Parameter(
-                    torch.tensor(float(merged_slopes.get(metric_name, 1.0)), dtype=torch.float32)
-                )
                 for metric_name in self.metric_heads
             }
         )
@@ -225,16 +193,18 @@ class NeuralUCBAgent(nn.Module):
         embedded = self._embed_state(state)   # (B, feature_dim)
         h = self.backbone(embedded)           # (B, feature_dim)
 
-        # Per-metric reward heads with per-metric sigmoid slopes
+        # Per-metric reward heads — 같은 metric끼리 묶어서 벡터화 (B개 sample → num_unique_metrics번 matmul)
         metric_types = self._resolve_metric_type_for_batch(metric_type, state.size(0))
-        reward_rows: List[torch.Tensor] = []
-        for row_idx, mname in enumerate(metric_types):
-            key = self._head_key(mname)
-            head = self.reward_heads[key]
-            slope = self.sigmoid_slopes[key]
-            logits = head(h[row_idx:row_idx + 1])
-            reward_rows.append(torch.sigmoid(slope * logits))
-        reward_pred = torch.cat(reward_rows, dim=0)
+        resolved_keys = [self._head_key(m) for m in metric_types]
+
+        reward_pred = torch.empty(
+            state.size(0), self.num_actions, device=h.device, dtype=h.dtype
+        )
+        for mname in set(resolved_keys):
+            mask = [i for i, k in enumerate(resolved_keys) if k == mname]
+            head = self.reward_heads[mname]
+            logits = head(h[mask])  # (len(mask), num_actions)
+            reward_pred[mask] = torch.sigmoid(logits)
 
         return {"reward_pred": reward_pred, "feature_vector": h}
 
@@ -274,18 +244,16 @@ class NeuralUCBAgent(nn.Module):
             reward_pred = reward_pred.unsqueeze(0)
             feature_vector = feature_vector.unsqueeze(0)
 
-        batch_size = reward_pred.size(0)
-        uncertainty = torch.zeros(
-            batch_size,
-            self.num_actions,
-            device=reward_pred.device,
-            dtype=reward_pred.dtype,
+        # 배치 단위 einsum으로 uncertainty 계산 (B개 sample 한 번에).
+        metric_idx_tensor = torch.tensor(
+            [self._metric_idx(m) for m in metric_types],
+            device=feature_vector.device,
+            dtype=torch.long,
         )
-        for b in range(batch_size):
-            m = self._metric_idx(metric_types[b])
-            fv = feature_vector[b : b + 1]
-            inv = self.inverse_lambdas[m]
-            uncertainty[b : b + 1] = torch.einsum("bi,aij,bj->ba", fv, inv, fv)
+        invs = self.inverse_lambdas[metric_idx_tensor]  # (B, num_actions, feat, feat)
+        uncertainty = torch.einsum(
+            "bi,baij,bj->ba", feature_vector, invs, feature_vector
+        )
 
         ucb = reward_pred + beta * torch.sqrt(uncertainty + EPS)
         return reward_pred, ucb
