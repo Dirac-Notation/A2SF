@@ -38,10 +38,16 @@ def main(argv=None):
         start_iteration = trainer.load_checkpoint(training_cfg.resume)
         print(f"Resuming training from iteration {start_iteration}")
 
-    final_iteration = trainer.train(num_epochs=training_cfg.epochs)
+    try:
+        final_iteration = trainer.train(num_epochs=training_cfg.epochs)
+        done_msg = "Training completed."
+    except KeyboardInterrupt:
+        final_iteration = int(getattr(trainer, "last_iteration", 0))
+        done_msg = f"Training interrupted by user at iteration {final_iteration}."
+        print(f"\n[run] {done_msg} Saving final checkpoint...")
 
     final_checkpoint_path = trainer.save_final_checkpoint(final_iteration)
-    print(f"Training completed. Final model saved to: {final_checkpoint_path}")
+    print(f"{done_msg} Final model saved to: {final_checkpoint_path}")
 
 
 if __name__ == "__main__":
