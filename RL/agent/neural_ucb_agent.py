@@ -29,16 +29,11 @@ class NeuralUCBAgent(nn.Module):
     """
     NeuralUCB agent network for Sigmoid Cache RL (single-step / bandit).
 
-    State vector layout: [seq_len, metric_type_one_hot(M),
-                          tova_top1(H)..tova_top4(H),
-                          snap_top1(H)..snap_top4(H)]
+    State vector layout: [seq_len, task_type_one_hot(T),
+                          tova_top1(H)..tova_top4(H), tova_entropy(H),
+                          snap_top1(H)..snap_top4(H), snap_entropy(H)]
 
-    Three embedding channels:
-      1. meta_embed: (seq_len, metric_type_one_hot) -> embed_dim
-      2. tova_embed: (tova_top1..top4 per head, 4H) -> embed_dim
-      3. snap_embed: (snap_top1..top4 per head, 4H) -> embed_dim
-
-    Averaged -> shared backbone -> per-metric reward heads.
+    input_proj -> backbone -> per-metric reward heads.
     """
 
     def __init__(
@@ -48,7 +43,7 @@ class NeuralUCBAgent(nn.Module):
         b_values: torch.Tensor,
         metric_heads: List[str] = None,
         num_heads: int = 32,
-        num_metric_types: int = 10,
+        num_task_types: int = 10,
     ):
         super().__init__()
         # Discrete action space: (a, b) pairs for sigmoid cache
@@ -61,7 +56,7 @@ class NeuralUCBAgent(nn.Module):
         self.lambda_reg = 5 * self.num_actions
         self.state_dim = int(state_dim)
         self.num_heads = int(num_heads)
-        self.num_metric_types = int(num_metric_types)
+        self.num_task_types = int(num_task_types)
         if self.state_dim < 1:
             raise ValueError(f"state_dim must be >= 1, got {self.state_dim}")
 
@@ -74,27 +69,11 @@ class NeuralUCBAgent(nn.Module):
         # Embedding dimensions
         self.feature_dim = 512
         self.topk = 4
-        # side feature per head: top1~4 positions + entropy = topk + 1
         self.side_feat_per_head = self.topk + 1
-        meta_dim = 1 + self.num_metric_types  # (seq_len, metric_type_one_hot)
-        tova_dim = self.side_feat_per_head * self.num_heads  # (top1..top4 + entropy per head)
-        snap_dim = self.side_feat_per_head * self.num_heads  # (top1..top4 + entropy per head)
 
-        # Three separate embedding projections
-        self.meta_embed = nn.Sequential(
-            nn.Linear(meta_dim, 256),
-            nn.ReLU(),
-            nn.Linear(256, self.feature_dim),
-            nn.ReLU(),
-        )
-        self.tova_embed = nn.Sequential(
-            nn.Linear(tova_dim, 256),
-            nn.ReLU(),
-            nn.Linear(256, self.feature_dim),
-            nn.ReLU(),
-        )
-        self.snap_embed = nn.Sequential(
-            nn.Linear(snap_dim, 256),
+        # 입력 전체를 하나의 projection으로 임베딩
+        self.input_proj = nn.Sequential(
+            nn.Linear(self.state_dim, 256),
             nn.ReLU(),
             nn.Linear(256, self.feature_dim),
             nn.ReLU(),
@@ -135,29 +114,8 @@ class NeuralUCBAgent(nn.Module):
                 nn.init.xavier_uniform_(m.weight, gain=1.0)
                 nn.init.constant_(m.bias, 0.0)
 
-    def _split_state(self, state: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Split flat state vector into (meta, tova_side, snap_side) components.
-
-        side = top-k positions (kH) + entropy (H) = (k+1)*H.
-        """
-        side = self.side_feat_per_head * self.num_heads
-        meta_dim = 1 + self.num_metric_types
-        meta = state[:, :meta_dim]                             # (B, 1+M)
-        tova = state[:, meta_dim:meta_dim + side]              # (B, (k+1)H)
-        snap = state[:, meta_dim + side:meta_dim + 2 * side]   # (B, (k+1)H)
-        return meta, tova, snap
-
     def _embed_state(self, state: torch.Tensor) -> torch.Tensor:
-        """Embed and average three channels."""
-        state = state.to(dtype=torch.float32)
-        meta, tova, snap = self._split_state(state)
-
-        e_meta = self.meta_embed(meta)     # (B, feature_dim)
-        e_tova = self.tova_embed(tova)     # (B, feature_dim)
-        e_snap = self.snap_embed(snap)     # (B, feature_dim)
-
-        # Channel-wise average
-        return (e_meta + e_tova + e_snap) / 3.0
+        return self.input_proj(state.to(dtype=torch.float32))
 
     def _resolve_metric_type_for_batch(
         self,

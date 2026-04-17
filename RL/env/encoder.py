@@ -75,7 +75,7 @@ class AttentionEncoder(nn.Module):
     Metadata encoder for RL state construction.
 
     Returns a feature vector structured as:
-      [ seq_len, metric_type_one_hot(M),
+      [ seq_len, task_type_one_hot(T),
         tova_top1(H), tova_top2(H), tova_top3(H), tova_top4(H), tova_entropy(H),
         snap_top1(H), snap_top2(H), snap_top3(H), snap_top4(H), snap_entropy(H) ]
 
@@ -83,7 +83,7 @@ class AttentionEncoder(nn.Module):
     - tova_score: attention from the last 1 query only
     - top-k positions are normalized by (seq_len - 1)
     - entropy는 정규화된 점수 분포의 엔트로피를 log(seq_len)으로 나눈 [0, 1] 값
-    - metric_type_one_hot: one-hot over METRIC_TYPE_ORDER (M categories incl. "unknown")
+    - task_type_one_hot: one-hot over TASK_TYPE_ORDER (T categories incl. "unknown")
     """
 
     def __init__(
@@ -120,14 +120,14 @@ class AttentionEncoder(nn.Module):
         object.__setattr__(self, "embed_tokens", self.target_model.model.embed_tokens)
 
         self.topk = 4
-        self.num_metric_types = int(len(METRIC_TYPE_ORDER))
+        self.num_task_types = int(len(TASK_TYPE_ORDER))
         # tova/snap feature dim: (topk + 1)*H  -- top1~4 positions + entropy
         self.side_feat_per_head = self.topk + 1
 
         if self.output_dim <= 0:
-            # [seq_len(1) + metric_type_one_hot(M)] + [tova((topk+1)H), snap((topk+1)H)]
+            # [seq_len(1) + task_type_one_hot(T)] + [tova((topk+1)H), snap((topk+1)H)]
             self.output_dim = (
-                1 + self.num_metric_types + 2 * self.side_feat_per_head * self.num_heads
+                1 + self.num_task_types + 2 * self.side_feat_per_head * self.num_heads
             )
 
     @property
@@ -215,8 +215,8 @@ class AttentionEncoder(nn.Module):
         task_type: Optional[str] = None,
         dataset: Optional[str] = None,
     ) -> torch.Tensor:
-        # generation_length / token_budget / task_type / dataset are kept for API compatibility.
-        del generation_length, token_budget, task_type, dataset
+        # generation_length / token_budget / metric_type are kept for API compatibility.
+        del generation_length, token_budget, metric_type
 
         tokenized = self.target_tokenizer(
             text,
@@ -230,16 +230,16 @@ class AttentionEncoder(nn.Module):
         seq_len = int(input_ids.size(1))
         seq_len_feature = min(float(seq_len), self.max_seq_length) / self.max_seq_length
 
-        metric_idx = metric_type_to_index(metric_type)
-        metric_one_hot = torch.zeros(self.num_metric_types, device=enc_dev, dtype=torch.float32)
-        metric_one_hot[metric_idx] = 1.0
+        task_idx = task_type_to_index(task_type=task_type, dataset=dataset)
+        task_one_hot = torch.zeros(self.num_task_types, device=enc_dev, dtype=torch.float32)
+        task_one_hot[task_idx] = 1.0
 
         attention_features = self._build_first_layer_attention_features(input_ids)
 
         features = torch.cat(
             [
                 torch.tensor([seq_len_feature], device=enc_dev, dtype=torch.float32),
-                metric_one_hot,
+                task_one_hot,
                 attention_features.to(dtype=torch.float32),
             ],
             dim=-1,
