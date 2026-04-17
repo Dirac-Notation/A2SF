@@ -19,7 +19,7 @@ gpu=0
 save_dir="runs/a2sf_rl"
 token_budget=128
 train_data_path="RL/training/data/training_data.jsonl"
-episodes_per_update=32
+episodes_per_update=16
 model="llama3-1b"
 
 while [[ $# -gt 0 ]]; do

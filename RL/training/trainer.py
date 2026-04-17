@@ -74,7 +74,8 @@ class A2SFTrainer:
 
         state_dim = int(self.env.context_encoder.output_dim)
         num_heads = int(self.env.context_encoder.num_heads)
-        num_task_types = int(self.env.context_encoder.num_task_types)
+        num_metric_types = int(self.env.context_encoder.num_metric_types)
+        side_dim = int(self.env.context_encoder.side_dim)
 
         # 실제 학습 데이터에 등장하는 metric만 head로 생성
         metric_heads = sorted({str(s["metric_type"]) for s in training_data_list if "metric_type" in s})
@@ -88,7 +89,8 @@ class A2SFTrainer:
             b_values=self.model_config.b_values,
             metric_heads=metric_heads,
             num_heads=num_heads,
-            num_task_types=num_task_types,
+            num_metric_types=num_metric_types,
+            side_dim=side_dim,
         ).to(self.device)
 
         # Optimizer only includes agent parameters
@@ -241,49 +243,6 @@ class A2SFTrainer:
             return cached_states[key].to(self.device, dtype=torch.float32)
         # Backward-compat fallback if cached states are missing.
         return self._build_state_for_sample(sample, token_budget).to(self.device, dtype=torch.float32)
-
-    def _apply_state_noise(self, state: torch.Tensor, sample: Dict[str, Any]) -> torch.Tensor:
-        """학습 중에만 state에 랜덤 노이즈를 추가.
-
-        - seq_len feature: ± seq_len_noise_tokens 토큰
-        - top-k position feature(tova/snap): ± top_pos_noise_tokens 토큰 (샘플 seq_len 기준으로 정규화)
-        normalize/denormalize는 encoder의 max_seq_length, 샘플의 input_seq_len 기준.
-        """
-        seq_noise = int(self.training_config.seq_len_noise_tokens)
-        pos_noise = int(self.training_config.top_pos_noise_tokens)
-        if seq_noise <= 0 and pos_noise <= 0:
-            return state
-
-        if state.ndim == 1:
-            state = state.unsqueeze(0)
-        out = state.clone()
-        max_seq_length = float(self.env.context_encoder.max_seq_length)
-        sample_seq_len = int(sample.get("input_seq_len", 0)) or 1
-        denom_pos = max(float(sample_seq_len - 1), 1.0)
-
-        num_task_types = int(self.env.context_encoder.num_task_types)
-        topk = int(self.env.context_encoder.topk)
-        H = int(self.env.context_encoder.num_heads)
-        meta_end = 1 + num_task_types
-        kH = topk * H
-        side = (topk + 1) * H  # top-k positions + entropy per head
-
-        if seq_noise > 0:
-            noise_tokens = (torch.rand(out.size(0), device=out.device) * 2 - 1) * float(seq_noise)
-            noise_norm = noise_tokens / max_seq_length
-            out[:, 0] = torch.clamp(out[:, 0] + noise_norm, 0.0, 1.0)
-
-        if pos_noise > 0:
-            # tova_topk + snap_topk 위치만 노이즈 추가 (entropy는 건드리지 않음)
-            # layout: [tova_topk(4H), tova_ent(H), snap_topk(4H), snap_ent(H)]
-            noise_scale = float(pos_noise) / denom_pos
-            for start in (meta_end, meta_end + side):
-                topk_slice = slice(start, start + kH)
-                shape = out[:, topk_slice].shape
-                noise = (torch.rand(shape, device=out.device) * 2 - 1) * noise_scale
-                out[:, topk_slice] = torch.clamp(out[:, topk_slice] + noise, 0.0, 1.0)
-
-        return out
 
     @staticmethod
     def _compute_real_best_reference_avg(samples: List[Dict[str, Any]], token_budget: int) -> float:
@@ -573,7 +532,6 @@ class A2SFTrainer:
                     state = self._get_cached_state(episode_data, token_budget=token_budget)
                     if state.ndim == 1:
                         state = state.unsqueeze(0)
-                    state = self._apply_state_noise(state, episode_data)
                     states_list.append(state)
                     batch_action_scores.append([float(v) for v in action_scores])
                     batch_metric_types.append(metric_type)
@@ -863,9 +821,9 @@ class A2SFTrainer:
         return {
             "state_dim": int(self.agent.state_dim),
             "num_heads": int(self.agent.num_heads),
-            "num_task_types": int(self.agent.num_task_types),
+            "num_metric_types": int(self.agent.num_metric_types),
+            "side_dim": int(self.agent.side_dim),
             "feature_dim": int(self.agent.feature_dim),
-            "topk": int(self.agent.topk),
             "num_actions": int(self.agent.num_actions),
             "num_a_values": int(self.agent.num_a_values),
             "num_b_values": int(self.agent.num_b_values),

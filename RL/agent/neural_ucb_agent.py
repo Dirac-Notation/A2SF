@@ -29,11 +29,15 @@ class NeuralUCBAgent(nn.Module):
     """
     NeuralUCB agent network for Sigmoid Cache RL (single-step / bandit).
 
-    State vector layout: [seq_len, task_type_one_hot(T),
-                          tova_top1(H)..tova_top4(H), tova_entropy(H),
-                          snap_top1(H)..snap_top4(H), snap_entropy(H)]
+    State vector layout: [seq_len(1), metric_one_hot(M),
+                          tova_binned(side_dim), snap_binned(side_dim)]
 
-    input_proj -> backbone -> per-metric reward heads.
+    Embedding (2-stage):
+      1. tova_proj: Linear(side_dim, 256)
+         snap_proj: Linear(side_dim, 256)
+      2. cat(tova_256, snap_256, seq_len, metric_one_hot) -> Linear(513, 512)
+
+    -> backbone -> per-metric reward heads.
     """
 
     def __init__(
@@ -43,7 +47,8 @@ class NeuralUCBAgent(nn.Module):
         b_values: torch.Tensor,
         metric_heads: List[str] = None,
         num_heads: int = 32,
-        num_task_types: int = 10,
+        num_metric_types: int = 10,
+        side_dim: int = 65536,
     ):
         super().__init__()
         # Discrete action space: (a, b) pairs for sigmoid cache
@@ -56,7 +61,8 @@ class NeuralUCBAgent(nn.Module):
         self.lambda_reg = 5 * self.num_actions
         self.state_dim = int(state_dim)
         self.num_heads = int(num_heads)
-        self.num_task_types = int(num_task_types)
+        self.num_metric_types = int(num_metric_types)
+        self.side_dim = int(side_dim)
         if self.state_dim < 1:
             raise ValueError(f"state_dim must be >= 1, got {self.state_dim}")
 
@@ -67,33 +73,46 @@ class NeuralUCBAgent(nn.Module):
         self.metric_name_to_idx = {name: i for i, name in enumerate(self.metric_heads)}
 
         self.feature_dim = 256
-        self.topk = 4
-        self.side_feat_per_head = self.topk + 1
+        self.head_out_dim = 8  # per-head output after point-wise projection
+        self.num_bins = self.side_dim // self.num_heads
+        meta_dim = 1 + self.num_metric_types  # seq_len + metric_one_hot
 
-        # Embedding: 1-layer linear
-        self.input_proj = nn.Sequential(
-            nn.Linear(self.state_dim, self.feature_dim),
+        # Stage 1: point-wise projection (공유 Linear, 헤드별 독립 적용)
+        # [B, H, num_bins] → shared Linear(num_bins, head_out_dim) → [B, H, head_out_dim]
+        # tova/snap 모두 같은 projection 공유
+        self.head_proj = nn.Linear(self.num_bins, self.head_out_dim)
+
+        # tova/snap 각각: H * head_out_dim = 32 * 8 = 256
+        side_reduced = self.num_heads * self.head_out_dim  # 256
+
+        # Stage 2: cat(tova_256, snap_256, meta) → Linear → 512
+        concat_dim = side_reduced * 2 + meta_dim
+        self.embed_proj = nn.Sequential(
+            nn.Linear(concat_dim, self.feature_dim * 2),
             nn.ReLU(),
         )
 
         # Backbone: 2x (linear + activation)
         self.backbone = nn.Sequential(
-            nn.Linear(self.feature_dim, self.feature_dim),
+            nn.Linear(self.feature_dim * 2, self.feature_dim * 2),
             nn.ReLU(),
-            nn.Linear(self.feature_dim, self.feature_dim),
+            nn.Linear(self.feature_dim * 2, self.feature_dim * 2),
             nn.ReLU(),
         )
+
+        # Backbone output dim
+        self.backbone_out_dim = self.feature_dim * 2  # 512
 
         # Per-metric reward heads: linear 1개씩
         self.reward_heads = nn.ModuleDict(
             {
-                metric_name: nn.Linear(self.feature_dim, self.num_actions)
+                metric_name: nn.Linear(self.backbone_out_dim, self.num_actions)
                 for metric_name in self.metric_heads
             }
         )
 
         # Per-metric, per-action inverse covariance (Neural-Linear uncertainty).
-        eye = torch.eye(self.feature_dim, device=a_values.device)
+        eye = torch.eye(self.backbone_out_dim, device=a_values.device)
         inv0 = eye.unsqueeze(0).repeat(self.num_actions, 1, 1) / self.lambda_reg
         self.register_buffer(
             "inverse_lambdas",
@@ -114,7 +133,22 @@ class NeuralUCBAgent(nn.Module):
                 nn.init.constant_(m.bias, 0.0)
 
     def _embed_state(self, state: torch.Tensor) -> torch.Tensor:
-        return self.input_proj(state.to(dtype=torch.float32))
+        state = state.to(dtype=torch.float32)
+        B = state.size(0)
+        meta_dim = 1 + self.num_metric_types
+        meta = state[:, :meta_dim]                                # (B, 1+M)
+        tova_flat = state[:, meta_dim:meta_dim + self.side_dim]   # (B, H*num_bins)
+        snap_flat = state[:, meta_dim + self.side_dim:]           # (B, H*num_bins)
+
+        # Point-wise projection: 공유 Linear를 헤드별로 독립 적용
+        tova = tova_flat.view(B * self.num_heads, self.num_bins)  # (B*H, num_bins)
+        snap = snap_flat.view(B * self.num_heads, self.num_bins)  # (B*H, num_bins)
+
+        tova_emb = torch.relu(self.head_proj(tova)).view(B, -1)  # (B, H*head_out_dim)
+        snap_emb = torch.relu(self.head_proj(snap)).view(B, -1)  # (B, H*head_out_dim)
+
+        combined = torch.cat([tova_emb, snap_emb, meta], dim=-1)
+        return self.embed_proj(combined)  # (B, 512)
 
     def _resolve_metric_type_for_batch(
         self,

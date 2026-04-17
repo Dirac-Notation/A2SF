@@ -46,8 +46,7 @@ def task_type_to_index(task_type: Optional[str] = None, dataset: Optional[str] =
     return int(TASK_TYPE_TO_INDEX.get(resolved, TASK_TYPE_TO_INDEX["unknown"]))
 
 
-# Metric type ordering for one-hot encoding. "unknown" always last.
-# longbench_eval.dataset2metric의 함수 이름들과 일치해야 한다.
+# Metric type ordering for one-hot encoding.
 METRIC_TYPE_ORDER = [
     "qa_f1_score",
     "qa_f1_zh_score",
@@ -75,15 +74,12 @@ class AttentionEncoder(nn.Module):
     Metadata encoder for RL state construction.
 
     Returns a feature vector structured as:
-      [ seq_len, task_type_one_hot(T),
-        tova_top1(H), tova_top2(H), tova_top3(H), tova_top4(H), tova_entropy(H),
-        snap_top1(H), snap_top2(H), snap_top3(H), snap_top4(H), snap_entropy(H) ]
+      [ seq_len(1), metric_type_one_hot(M),
+        tova_binned(num_bins * H), snap_binned(num_bins * H) ]
 
-    - snapkv_score: cumulative attention from last 16 queries
     - tova_score: attention from the last 1 query only
-    - top-k positions are normalized by (seq_len - 1)
-    - entropy는 정규화된 점수 분포의 엔트로피를 log(seq_len)으로 나눈 [0, 1] 값
-    - task_type_one_hot: one-hot over TASK_TYPE_ORDER (T categories incl. "unknown")
+    - snapkv_score: cumulative attention from last num_query_tokens queries
+    - 16 토큰 단위로 binning (합산), max_input_length까지 왼쪽 zero-padding
     """
 
     def __init__(
@@ -93,6 +89,8 @@ class AttentionEncoder(nn.Module):
         device: str = "cpu",
         output_dim: int = -1,
         num_query_tokens: int = 16,
+        max_input_length: int = 32768,
+        bin_size: int = 16,
     ):
         super().__init__()
         self.device = device if isinstance(device, torch.device) else torch.device(device)
@@ -100,6 +98,9 @@ class AttentionEncoder(nn.Module):
         self.output_dim = output_dim
         self.max_seq_length = float(target_model.config.max_position_embeddings)
         self.num_query_tokens = int(max(1, num_query_tokens))
+        self.max_input_length = int(max_input_length)
+        self.bin_size = int(bin_size)
+        self.num_bins = self.max_input_length // self.bin_size
 
         self.max_task_index = float(max(1, len(TASK_TYPE_ORDER) - 1))
 
@@ -119,43 +120,40 @@ class AttentionEncoder(nn.Module):
         object.__setattr__(self, "k_proj", self.self_attn.k_proj)
         object.__setattr__(self, "embed_tokens", self.target_model.model.embed_tokens)
 
-        self.topk = 4
-        self.num_task_types = int(len(TASK_TYPE_ORDER))
-        # tova/snap feature dim: (topk + 1)*H  -- top1~4 positions + entropy
-        self.side_feat_per_head = self.topk + 1
+        self.num_metric_types = int(len(METRIC_TYPE_ORDER))
+        # tova/snap 각각의 binned feature 차원
+        self.side_dim = self.num_bins * self.num_heads
 
         if self.output_dim <= 0:
-            # [seq_len(1) + task_type_one_hot(T)] + [tova((topk+1)H), snap((topk+1)H)]
-            self.output_dim = (
-                1 + self.num_task_types + 2 * self.side_feat_per_head * self.num_heads
-            )
+            # [seq_len(1) + metric_one_hot(M)] + [tova_binned(side_dim), snap_binned(side_dim)]
+            self.output_dim = 1 + self.num_metric_types + 2 * self.side_dim
 
     @property
     def _encode_device(self) -> torch.device:
         """Device where first-layer embedding lives."""
         return self.embed_tokens.weight.device
 
-    @staticmethod
-    def _topk_positions(acc_scores: torch.Tensor, seq_len: int, k: int) -> torch.Tensor:
-        """Return normalized top-k positions from accumulated attention scores [H, T].
+    def _bin_attention_scores(self, acc_scores: torch.Tensor, seq_len: int) -> torch.Tensor:
+        """Accumulated attention scores [H, T]를 binning하여 [H, num_bins]로 변환.
 
-        Returns: [top1(H), top2(H), ..., topk(H)] flattened to (k*H,).
+        - seq_len < max_input_length이면 왼쪽을 0으로 패딩 후 binning.
+        - seq_len > max_input_length이면 오른쪽 max_input_length 만큼만 사용.
         """
-        actual_k = min(k, acc_scores.size(-1))
-        _, topk_idx = torch.topk(acc_scores, actual_k, dim=-1)  # [H, k]
-        topk_norm = topk_idx.to(dtype=torch.float32) / max(float(seq_len - 1), 1.0)
-        # topk_idx is [H, k] -> transpose to [k, H] then flatten to (k*H,)
-        return topk_norm.t().contiguous().reshape(-1).to(torch.float32)
+        H, T = acc_scores.shape
+        target_len = self.num_bins * self.bin_size
 
-    @staticmethod
-    def _entropy_per_head(acc_scores: torch.Tensor, seq_len: int) -> torch.Tensor:
-        """누적 attention score 분포의 정규화 엔트로피 per-head. [H] → log(seq_len)으로 나눠 [0, 1]."""
-        prob = acc_scores / acc_scores.sum(dim=-1, keepdim=True).clamp_min(1e-12)
-        ent = -torch.sum(prob * torch.log(prob.clamp_min(1e-12)), dim=-1)  # [H]
-        denom = torch.log(
-            torch.tensor(float(seq_len), device=ent.device, dtype=ent.dtype).clamp_min(2.0)
-        )
-        return (ent / denom).to(torch.float32)
+        if T > target_len:
+            # 오른쪽(최근) 부분만 사용
+            acc_scores = acc_scores[:, T - target_len:]
+        elif T < target_len:
+            # 왼쪽 zero-padding
+            pad_len = target_len - T
+            acc_scores = F.pad(acc_scores, (pad_len, 0), value=0.0)
+
+        # [H, target_len] → [H, num_bins, bin_size] → sum → [H, num_bins]
+        binned = acc_scores.view(H, self.num_bins, self.bin_size).sum(dim=-1)
+        # Flatten to [H * num_bins]
+        return binned.reshape(-1).to(torch.float32)
 
     def _build_first_layer_attention_features(self, input_ids: torch.Tensor) -> torch.Tensor:
         input_ids = input_ids.to(self._encode_device)
@@ -168,7 +166,6 @@ class AttentionEncoder(nn.Module):
         q = self.q_proj(hidden_states)
         k = self.k_proj(hidden_states)
 
-        # Match LlamaAttention layout and GQA behavior.
         bsz = q.shape[0]
         q = q.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
         k = k.view(bsz, seq_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
@@ -181,16 +178,17 @@ class AttentionEncoder(nn.Module):
         q_snap = q[:, :, q_start:, :]  # last num_query_tokens queries
         q_tova = q[:, :, -1:, :]       # last 1 query only
 
-        # --- SnapKV score: cumulative attention from last 16 queries ---
+        key_positions = torch.arange(seq_len, device=hidden_states.device)
+
+        # --- SnapKV score ---
         attn_scores_snap = torch.matmul(q_snap, k.transpose(-2, -1)) / (self.head_dim ** 0.5)
         snap_query_positions = torch.arange(q_start, seq_len, device=attn_scores_snap.device)
-        key_positions = torch.arange(seq_len, device=attn_scores_snap.device)
         causal_mask_snap = key_positions.unsqueeze(0) > snap_query_positions.unsqueeze(1)
         attn_scores_snap = attn_scores_snap.masked_fill(causal_mask_snap.unsqueeze(0).unsqueeze(0), float("-inf"))
         attn_probs_snap = F.softmax(attn_scores_snap, dim=-1)
         snapkv_acc = attn_probs_snap.sum(dim=2).squeeze(0)  # [H, T]
 
-        # --- TOVA score: attention from the last 1 query ---
+        # --- TOVA score ---
         attn_scores_tova = torch.matmul(q_tova, k.transpose(-2, -1)) / (self.head_dim ** 0.5)
         tova_query_pos = torch.tensor([seq_len - 1], device=attn_scores_tova.device)
         causal_mask_tova = key_positions.unsqueeze(0) > tova_query_pos.unsqueeze(1)
@@ -198,13 +196,10 @@ class AttentionEncoder(nn.Module):
         attn_probs_tova = F.softmax(attn_scores_tova, dim=-1)
         tova_acc = attn_probs_tova.sum(dim=2).squeeze(0)  # [H, T]
 
-        tova_topk = self._topk_positions(tova_acc, seq_len, self.topk)    # (4*H,)
-        snap_topk = self._topk_positions(snapkv_acc, seq_len, self.topk)  # (4*H,)
-        tova_ent = self._entropy_per_head(tova_acc, seq_len)              # (H,)
-        snap_ent = self._entropy_per_head(snapkv_acc, seq_len)            # (H,)
+        tova_binned = self._bin_attention_scores(tova_acc, seq_len)  # (side_dim,)
+        snap_binned = self._bin_attention_scores(snapkv_acc, seq_len)  # (side_dim,)
 
-        # Return: [tova_top1..4(4H), tova_entropy(H), snap_top1..4(4H), snap_entropy(H)]
-        return torch.cat([tova_topk, tova_ent, snap_topk, snap_ent], dim=-1)
+        return torch.cat([tova_binned, snap_binned], dim=-1)
 
     def encode_context(
         self,
@@ -215,8 +210,7 @@ class AttentionEncoder(nn.Module):
         task_type: Optional[str] = None,
         dataset: Optional[str] = None,
     ) -> torch.Tensor:
-        # generation_length / token_budget / metric_type are kept for API compatibility.
-        del generation_length, token_budget, metric_type
+        del generation_length, token_budget, task_type, dataset
 
         tokenized = self.target_tokenizer(
             text,
@@ -230,22 +224,21 @@ class AttentionEncoder(nn.Module):
         seq_len = int(input_ids.size(1))
         seq_len_feature = min(float(seq_len), self.max_seq_length) / self.max_seq_length
 
-        task_idx = task_type_to_index(task_type=task_type, dataset=dataset)
-        task_one_hot = torch.zeros(self.num_task_types, device=enc_dev, dtype=torch.float32)
-        task_one_hot[task_idx] = 1.0
+        metric_idx = metric_type_to_index(metric_type)
+        metric_one_hot = torch.zeros(self.num_metric_types, device=enc_dev, dtype=torch.float32)
+        metric_one_hot[metric_idx] = 1.0
 
         attention_features = self._build_first_layer_attention_features(input_ids)
 
         features = torch.cat(
             [
                 torch.tensor([seq_len_feature], device=enc_dev, dtype=torch.float32),
-                task_one_hot,
+                metric_one_hot,
                 attention_features.to(dtype=torch.float32),
             ],
             dim=-1,
         )
 
-        # Decouple state vector from model shard placement.
         return features.detach().cpu()
 
 
