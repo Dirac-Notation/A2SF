@@ -74,7 +74,7 @@ class A2SFTrainer:
 
         state_dim = int(self.env.context_encoder.output_dim)
         num_heads = int(self.env.context_encoder.num_heads)
-        num_metric_types = int(self.env.context_encoder.num_metric_types)
+        num_task_types = int(self.env.context_encoder.num_task_types)
 
         # 실제 학습 데이터에 등장하는 metric만 head로 생성
         metric_heads = sorted({str(s["metric_type"]) for s in training_data_list if "metric_type" in s})
@@ -88,7 +88,7 @@ class A2SFTrainer:
             b_values=self.model_config.b_values,
             metric_heads=metric_heads,
             num_heads=num_heads,
-            num_metric_types=num_metric_types,
+            num_task_types=num_task_types,
         ).to(self.device)
 
         # Optimizer only includes agent parameters
@@ -261,10 +261,10 @@ class A2SFTrainer:
         sample_seq_len = int(sample.get("input_seq_len", 0)) or 1
         denom_pos = max(float(sample_seq_len - 1), 1.0)
 
-        num_metric_types = int(self.env.context_encoder.num_metric_types)
+        num_task_types = int(self.env.context_encoder.num_task_types)
         topk = int(self.env.context_encoder.topk)
         H = int(self.env.context_encoder.num_heads)
-        meta_end = 1 + num_metric_types
+        meta_end = 1 + num_task_types
         kH = topk * H
         side = (topk + 1) * H  # top-k positions + entropy per head
 
@@ -863,7 +863,7 @@ class A2SFTrainer:
         return {
             "state_dim": int(self.agent.state_dim),
             "num_heads": int(self.agent.num_heads),
-            "num_metric_types": int(self.agent.num_metric_types),
+            "num_task_types": int(self.agent.num_task_types),
             "feature_dim": int(self.agent.feature_dim),
             "topk": int(self.agent.topk),
             "num_actions": int(self.agent.num_actions),

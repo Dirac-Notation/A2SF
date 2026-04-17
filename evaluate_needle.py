@@ -86,14 +86,14 @@ def load_rl_agent(checkpoint_path, device, target_model, target_tokenizer):
     if arch_config is not None:
         state_dim = int(arch_config["state_dim"])
         num_heads = int(arch_config["num_heads"])
-        num_metric_types = int(arch_config["num_metric_types"])
+        num_task_types = int(arch_config["num_task_types"])
         metric_heads = list(arch_config["metric_heads"])
         a_values = arch_config["a_values"].to(dtype=torch.float32).clone()
         b_values = arch_config["b_values"].to(dtype=torch.float32).clone()
     else:
         state_dim = int(context_encoder.output_dim)
         num_heads = int(context_encoder.num_heads)
-        num_metric_types = int(context_encoder.num_metric_types)
+        num_task_types = int(context_encoder.num_task_types)
         metric_heads = METRIC_HEADS
         a_values = config.a_values
         b_values = config.b_values
@@ -104,7 +104,7 @@ def load_rl_agent(checkpoint_path, device, target_model, target_tokenizer):
         b_values=b_values,
         metric_heads=metric_heads,
         num_heads=num_heads,
-        num_metric_types=num_metric_types,
+        num_task_types=num_task_types,
     ).to(device)
 
     # Load agent weights (supports legacy policy_state_dict checkpoints)

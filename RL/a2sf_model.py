@@ -68,7 +68,7 @@ class A2SFModel:
             # 체크포인트의 arch_config를 단일 정보원(source of truth)으로 사용.
             state_dim = int(arch_config["state_dim"])
             num_heads = int(arch_config["num_heads"])
-            num_metric_types = int(arch_config["num_metric_types"])
+            num_task_types = int(arch_config["num_task_types"])
             metric_heads = list(arch_config["metric_heads"])
             a_values = arch_config["a_values"].to(dtype=torch.float32).clone()
             b_values = arch_config["b_values"].to(dtype=torch.float32).clone()
@@ -76,7 +76,7 @@ class A2SFModel:
             # Legacy path: encoder로부터 차원 유도 + state_dict에서 힌트 추출.
             state_dim = int(self.env.context_encoder.output_dim)
             num_heads = int(self.env.context_encoder.num_heads)
-            num_metric_types = int(self.env.context_encoder.num_metric_types)
+            num_task_types = int(self.env.context_encoder.num_task_types)
             if state_dict is not None:
                 head_names = sorted({
                     k.split(".")[1] for k in state_dict.keys()
@@ -98,7 +98,7 @@ class A2SFModel:
             b_values=b_values,
             metric_heads=metric_heads,
             num_heads=num_heads,
-            num_metric_types=num_metric_types,
+            num_task_types=num_task_types,
         ).to(first_layer_device)
 
         if state_dict is not None:
