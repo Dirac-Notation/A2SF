@@ -76,19 +76,21 @@ echo "[1/3] Training completed. Checkpoint: $rl_checkpoint"
 echo ""
 
 # ---- 2. Prediction (전체 GPU) ----
+output_dir="${save_dir}/${model}_sigmoid_${budget}_RL"
 echo "[2/3] Running LongBench RL prediction (all GPUs)..."
+echo "  Output dir: $output_dir"
 python longbench_RL.py \
     --model "$model" \
     --budget "$budget" \
     --rl_checkpoint "$rl_checkpoint" \
-    --gpus_per_model "$gpus_per_model"
+    --gpus_per_model "$gpus_per_model" \
+    --output_dir "$output_dir"
 
 echo ""
 echo "[2/3] Prediction completed."
 echo ""
 
 # ---- 3. Evaluation ----
-output_dir="result_txt/pred/${model}_sigmoid_${budget}_RL"
 echo "[3/3] Running evaluation on $output_dir ..."
 python longbench_eval.py "$output_dir"
 
