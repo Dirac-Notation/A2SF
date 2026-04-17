@@ -73,20 +73,18 @@ class NeuralUCBAgent(nn.Module):
         self.metric_name_to_idx = {name: i for i, name in enumerate(self.metric_heads)}
 
         self.feature_dim = 256
-        self.head_out_dim = 8  # per-head output after point-wise projection
         self.num_bins = self.side_dim // self.num_heads
         meta_dim = 1 + self.num_metric_types  # seq_len + metric_one_hot
 
-        # Stage 1: point-wise projection (공유 Linear, 헤드별 독립 적용)
-        # [B, H, num_bins] → shared Linear(num_bins, head_out_dim) → [B, H, head_out_dim]
-        # tova/snap 모두 같은 projection 공유
-        self.head_proj = nn.Linear(self.num_bins, self.head_out_dim)
+        # Stage 1: bin별 독립 weight로 H heads → 1 합침
+        # weight shape: (num_bins, num_heads) — 각 bin 위치마다 고유한 head 결합 가중치
+        self.head_merge = nn.Parameter(torch.randn(self.num_bins, self.num_heads) * 0.01)
 
-        # tova/snap 각각: H * head_out_dim = 32 * 8 = 256
-        side_reduced = self.num_heads * self.head_out_dim  # 256
+        # Stage 2: (num_bins,) → Linear(num_bins, 256) → (256,)
+        self.side_reduce = nn.Linear(self.num_bins, self.feature_dim)
 
-        # Stage 2: cat(tova_256, snap_256, meta) → Linear → 512
-        concat_dim = side_reduced * 2 + meta_dim
+        # Stage 3: cat(tova_256, snap_256, meta) → Linear → 512
+        concat_dim = self.feature_dim * 2 + meta_dim
         self.embed_proj = nn.Sequential(
             nn.Linear(concat_dim, self.feature_dim * 2),
             nn.ReLU(),
@@ -140,14 +138,19 @@ class NeuralUCBAgent(nn.Module):
         tova_flat = state[:, meta_dim:meta_dim + self.side_dim]   # (B, H*num_bins)
         snap_flat = state[:, meta_dim + self.side_dim:]           # (B, H*num_bins)
 
-        # Point-wise projection: 공유 Linear를 헤드별로 독립 적용
-        tova = tova_flat.view(B * self.num_heads, self.num_bins)  # (B*H, num_bins)
-        snap = snap_flat.view(B * self.num_heads, self.num_bins)  # (B*H, num_bins)
+        # [B, H*num_bins] → [B, num_bins, H]
+        tova = tova_flat.reshape(B, self.num_heads, self.num_bins).permute(0, 2, 1)
+        snap = snap_flat.reshape(B, self.num_heads, self.num_bins).permute(0, 2, 1)
 
-        tova_emb = torch.relu(self.head_proj(tova)).view(B, -1)  # (B, H*head_out_dim)
-        snap_emb = torch.relu(self.head_proj(snap)).view(B, -1)  # (B, H*head_out_dim)
+        # bin별 독립 weight로 H heads 합침: einsum("bnh,nh->bn", ...)
+        tova_merged = torch.einsum("bnh,nh->bn", tova, self.head_merge)  # (B, num_bins)
+        snap_merged = torch.einsum("bnh,nh->bn", snap, self.head_merge)  # (B, num_bins)
 
-        combined = torch.cat([tova_emb, snap_emb, meta], dim=-1)
+        # (num_bins,) → Linear → (256,)
+        tova_emb = torch.relu(self.side_reduce(tova_merged))  # (B, 256)
+        snap_emb = torch.relu(self.side_reduce(snap_merged))  # (B, 256)
+
+        combined = torch.cat([tova_emb, snap_emb, meta], dim=-1)  # (B, 256+256+meta_dim)
         return self.embed_proj(combined)  # (B, 512)
 
     def _resolve_metric_type_for_batch(
