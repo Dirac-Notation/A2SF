@@ -529,7 +529,7 @@ class A2SFTrainer:
             current_beta = self._get_ucb_beta(epoch, total_epochs)
 
             for batch in self.train_loader:
-                num_best = 1
+                num_best = 4
                 label_order = [f"best{i+1}" for i in range(num_best)]
                 per_label_data: Dict[str, Dict[str, List[Any]]] = {
                     label: {
