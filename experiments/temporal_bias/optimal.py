@@ -1,3 +1,20 @@
+"""
+Temporal Bias Analysis for KV Cache Compression
+
+Demonstrates that recent queries in the observation window contribute more
+to identifying important KV pairs than distant queries.
+
+Analyses:
+  1. Block Hit Rate  – each query's independent predictive power (decay with distance)
+  2. Optimal Coefficient – greedy per-query weight search with sigmoid fit
+  3. Cumulative Similarity – diminishing returns from adding distant queries
+
+Optimised for a single A100-80GB:
+  - Hook-based collection: only last MAX_WINDOW prefill rows stored, decode scores accumulated on-the-fly
+  - Manual decode loop: no generate() overhead, no intermediate attention storage
+  - Vectorised Jaccard via one-hot scatter
+"""
+
 import torch
 import json
 import os
@@ -6,6 +23,7 @@ import random
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit
+from collections import defaultdict
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
@@ -14,523 +32,428 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 workpath = os.path.dirname(os.path.abspath(__file__))
 root_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# ── Reproducibility ──
 SEED = 42
 random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
-torch.cuda.manual_seed(SEED)
 torch.cuda.manual_seed_all(SEED)
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
 
-def layer_wise_analysis(answer_indices, window_indices):
-    num_layers = answer_indices.size(0)
-    num_heads = answer_indices.size(1)
-    
-    similarities = []
-    for layer in range(num_layers):
-        jaccard_similarity = 0
-        for head in range(num_heads):
-            answer_set = set(answer_indices[layer, head].tolist())
-            window_set = set(window_indices[layer, head].tolist())
-            intersection = answer_set & window_set
-            union = answer_set | window_set
-            jaccard_similarity += len(intersection) / len(union) if len(union) > 0 else 0
-        similarities.append(jaccard_similarity / num_heads)
-    return sum(similarities) / num_layers
+# ── Config ──
+MAX_WINDOW = 128
+TOKEN_BUDGET = 128
+LOCAL_RATIO = 0.125
+NUM_ITEMS = 10
+MAX_SEQ_LEN = 7500
+MODEL_NAME = "llama3"
 
-
-def gqa_topk(scores, k, num_kv_heads, group_size):
-    """Apply topk with GQA grouping. scores: (num_layers, num_heads, seq_len)"""
-    if group_size <= 1:
-        return scores.topk(k, dim=2).indices
-    num_layers, num_heads, seq_len = scores.shape
-    grouped = scores.view(num_layers, num_kv_heads, group_size, seq_len)
-    grouped_scores = grouped.sum(dim=2)
-    grouped_indices = grouped_scores.topk(k, dim=2).indices
-    return grouped_indices.repeat_interleave(group_size, dim=1)
-
-
-def analyze_block_hit_rate(prefill_attention_maps, answer_indices, max_window, token_budget, num_kv_heads=0, group_size=1, block_size=8):
-    """
-    Calculate hit rate for each block (8 positions) from the end
-    Returns: data_to_plot (Blocks, Layers)
-    """
-    seq_len = prefill_attention_maps.size(2)
-    num_blocks = (min(max_window, seq_len) + block_size - 1) // block_size
-    
-    block_sim = []
-    
-    for block_idx in range(num_blocks):
-        start_offset = block_idx * block_size + 1
-        end_offset = min((block_idx + 1) * block_size + 1, max_window + 1, seq_len + 1)
-        
-        block_score = prefill_attention_maps[:, :, -end_offset:-start_offset, :].sum(dim=2)
-        
-        block_indices = gqa_topk(block_score, token_budget, num_kv_heads, group_size)
-        block_sim.append(layer_wise_analysis(answer_indices, block_indices))
-    
-    return np.array(block_sim)
-
-
-def analyze_optimal_contribution(prefill_attention_maps, answer_indices, max_window, token_budget, num_kv_heads=0, group_size=1, block_size=8):
-    """
-    Find optimal contribution coefficients for each block (8 positions) from the end
-    Returns: (optimal_coefficients, hit_rates) - both are lists for each block from -1~-8, -9~-16, ...
-    """
-    num_layers = prefill_attention_maps.size(0)
-    num_heads = prefill_attention_maps.size(1)
-    seq_len = prefill_attention_maps.size(2)
-    
-    # Test coefficients from 0.0 to 1.0 in 0.1 steps
-    test_coefficients = np.arange(0.0, 1.1, 0.1)
-    
-    optimal_coefficients = []
-    hit_rates = []
-    accumulated_score = torch.zeros(
-        num_layers, num_heads, seq_len,
-        device=prefill_attention_maps.device
-    )
-    
-    local_budget = int(token_budget * 0.125)
-    selective_budget = token_budget - local_budget
-
-    # Calculate number of blocks
-    num_blocks = (min(max_window, seq_len) + block_size - 1) // block_size
-    
-    # Process in blocks of block_size
-    for block_idx in range(num_blocks):
-        start_offset = block_idx * block_size + 1
-        end_offset = min((block_idx + 1) * block_size + 1, max_window + 1, seq_len + 1)
-        
-        # First block: fix coefficient to 1.0
-        if block_idx == 0:
-            best_coeff = 1.0
-            print(f"  >>> Block {block_idx+1}/{num_blocks} (positions {start_offset}~{end_offset-1} from end) - fixed to 1.0", end="", flush=True)
-            
-            # Update accumulated score with coefficient 1.0 for all positions in first block
-            accumulated_score += prefill_attention_maps[:, :, -end_offset:-start_offset, :].sum(dim=2)
-            
-            # Calculate hit rate for first block
-            temp_indices = gqa_topk(accumulated_score, token_budget, num_kv_heads, group_size)
-            similarities = layer_wise_analysis(answer_indices, temp_indices)
-            best_hit_rate = similarities
-            
-            optimal_coefficients.append(best_coeff)
-            hit_rates.append(best_hit_rate)
-            print(f" Done (coeff={best_coeff:.1f}, hit_rate={best_hit_rate:.4f})")
-        else:
-            # Other blocks: find optimal coefficient
-            print(f"  >>> Finding optimal coefficient for block {block_idx+1}/{num_blocks} (positions {start_offset}~{end_offset-1} from end)", end="", flush=True)
-            
-            best_coeff = 0.0
-            
-            # Try each coefficient
-            for coeff_idx, coeff in enumerate(test_coefficients):
-                # Create temporary score with current coefficient applied to all positions in this block
-                temp_score = accumulated_score.clone()
-                # Apply coefficient to all positions in this block
-                temp_score += coeff * prefill_attention_maps[:, :, -end_offset:-start_offset, :].sum(dim=2)
-                
-                # Calculate hit rate
-                temp_score[:,:,-local_budget:] = temp_score.max()
-                temp_indices = gqa_topk(temp_score, selective_budget, num_kv_heads, group_size)
-                similarities = layer_wise_analysis(answer_indices, temp_indices)
-                
-                # Update best if this is better, or if equal and coefficient is larger
-                if similarities > best_hit_rate:
-                    best_hit_rate = similarities
-                    best_coeff = coeff
-                
-                # Show progress for coefficient testing
-                if (coeff_idx + 1) % 3 == 0 or coeff_idx == len(test_coefficients) - 1:
-                    print(".", end="", flush=True)
-            
-            # Update accumulated score with best coefficient for all positions in this block
-            accumulated_score += best_coeff * prefill_attention_maps[:, :, -end_offset:-start_offset, :].sum(dim=2)
-            
-            optimal_coefficients.append(best_coeff)
-            hit_rates.append(best_hit_rate)
-            
-            print(f" Done (coeff={best_coeff:.1f}, hit_rate={best_hit_rate:.4f})")
-    
-    return optimal_coefficients, hit_rates
-
-
-def analyze_cumulative_similarity(prefill_attention_maps, answer_indices, max_window, token_budget, num_kv_heads=0, group_size=1, block_size=8):
-    """
-    Accumulate blocks with coefficient 1.0 and compute similarity at each step.
-    Block 0 -> Block 0+1 -> Block 0+1+2 -> ...
-    Returns: cumulative_similarities list
-    """
-    num_layers = prefill_attention_maps.size(0)
-    num_heads = prefill_attention_maps.size(1)
-    seq_len = prefill_attention_maps.size(2)
-
-    cumulative_similarities = []
-    accumulated_score = torch.zeros(
-        num_layers, num_heads, seq_len,
-        device=prefill_attention_maps.device
-    )
-
-    num_blocks = (min(max_window, seq_len) + block_size - 1) // block_size
-
-    for block_idx in range(num_blocks):
-        start_offset = block_idx * block_size + 1
-        end_offset = min((block_idx + 1) * block_size + 1, max_window + 1, seq_len + 1)
-
-        accumulated_score += prefill_attention_maps[:, :, -end_offset:-start_offset, :].sum(dim=2)
-
-        temp_indices = gqa_topk(accumulated_score, token_budget, num_kv_heads, group_size)
-        similarity = layer_wise_analysis(answer_indices, temp_indices)
-        cumulative_similarities.append(similarity)
-
-        print(f"  >>> Block 0~{block_idx} (up to position {end_offset-1} from end): similarity={similarity:.4f}")
-
-    return cumulative_similarities
-
-
-def plot_single_result(group_name, dataset_name, prompt_idx, block_hit_rates, optimal_coefficients, hit_rates,
-                       cumulative_similarities, workpath, seq_len, gen_len):
-    """
-    Plot temporal bias analysis result for a single prompt.
-    Saves to task_name/block_hit/, task_name/coeff_hit/, and task_name/cumulative_sim/
-    with filename dataset_name_{idx}.png
-    """
-    max_blocks = len(block_hit_rates)
-    block_indices = list(range(max_blocks))
-
-    plt.rcParams.update({
-        "font.family": "serif",
-        "font.size": 22,
-        "axes.labelsize": 22,
-        "axes.titlesize": 22,
-        "xtick.labelsize": 22,
-        "ytick.labelsize": 22,
-        "legend.fontsize": 22,
-        "axes.linewidth": 1.2,
-    })
-    plt.rcParams.update({"legend.fontsize": 18})
-    color = plt.cm.tab20(0)
-
-    base_folder = os.path.join(workpath, "plots", group_name.replace(' ', '_'))
-    block_hit_folder = os.path.join(base_folder, "block_hit")
-    coeff_hit_folder = os.path.join(base_folder, "coeff_hit")
-    cumulative_folder = os.path.join(base_folder, "cumulative_sim")
-    os.makedirs(block_hit_folder, exist_ok=True)
-    os.makedirs(coeff_hit_folder, exist_ok=True)
-    os.makedirs(cumulative_folder, exist_ok=True)
-
-    file_suffix = f"{dataset_name.replace(' ', '_')}_{prompt_idx}"
-
-    # 첫 번째 그래프: 블록별 Hit rate → task_name/block_hit/
-    fig1, ax1 = plt.subplots(1, 1, figsize=(7.5, 5))
-    ax1.plot(
-        block_indices,
-        block_hit_rates,
-        alpha=0.9,
-        linewidth=2.5,
-        linestyle='--',
-        color=color,
-        marker='o',
-        markersize=4,
-    )
-    ax1.set_xlabel("Query Block index", fontsize=22)
-    ax1.set_ylabel("Hit rate", fontsize=22)
-    ax1.tick_params(labelsize=22)
-    ax1.grid(True, linestyle='--', alpha=0.5, linewidth=0.8)
-    ax1.text(
-        0.98,
-        0.50,
-        f"Prefill: {seq_len:.0f}tokens\nGen: {gen_len:.0f}tokens",
-        transform=ax1.transAxes,
-        fontsize=16,
-        verticalalignment='top',
-        horizontalalignment='right',
-        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5),
-    )
-    ax1.set_title(f"{dataset_name} (prompt {prompt_idx})", fontsize=24, fontweight='bold')
-    plt.tight_layout()
-    save_path_block = os.path.join(block_hit_folder, f"{file_suffix}.png")
-    plt.savefig(save_path_block, dpi=300, bbox_inches='tight')
-    print(f"Saved block hit rate plot to {save_path_block}")
-    plt.close(fig1)
-
-    # 두 번째 그래프: Optimal coefficient & Hit rate → task_name/coeff_hit/
-    fig2, ax2 = plt.subplots(1, 1, figsize=(7.5, 5))
-    ax2_twin = ax2.twinx()
-    x_vals = np.array(block_indices, dtype=np.float64)
-    y_vals = np.array(optimal_coefficients, dtype=np.float64)
-
-    ax2.plot(
-        x_vals,
-        y_vals,
-        alpha=0.9,
-        linewidth=2.5,
-        linestyle='-',
-        color=color,
-        marker='o',
-        markersize=4,
-        label='Coefficient',
-    )
-
-    def sigmoid_func(x, a, b):
-        return 1/(1+np.exp(a*(x-b)))
-    
-    popt1, _ = curve_fit(
-        sigmoid_func,
-        x_vals,
-        y_vals,
-        p0=[1.0, 16.0],
-        bounds=((0, 0), (np.inf, np.inf)),
-    )
-    
-    sigmoid_fit_curve = sigmoid_func(x_vals, *popt1)
-    
-    ax2.plot(
-        block_indices,
-        sigmoid_fit_curve,
-        alpha=0.8,
-        linewidth=2.0,
-        linestyle=':',
-        color='red',
-        marker=None,
-        label='Sigmoid fit',
-    )
-    ax2.text(
-        0.98,
-        0.65,
-        f"a = {popt1[0]:.2f}, b = {popt1[1]:.2f}",
-        transform=ax2.transAxes,
-        fontsize=16,
-        verticalalignment='top',
-        horizontalalignment='right',
-        bbox=dict(boxstyle='round', facecolor='white', alpha=0.7),
-    )
-
-    ax2_twin.plot(
-        block_indices,
-        hit_rates,
-        alpha=0.7,
-        linewidth=2.0,
-        linestyle='--',
-        color=color,
-        # marker='s',
-        # markersize=3,
-        label='Hit rate',
-    )
-    ax2.set_xlabel("QueryBlock index", fontsize=22)
-    ax2.set_ylabel("Optimal coefficient", fontsize=22, color='black')
-    ax2.tick_params(labelsize=22, axis='y', labelcolor='black')
-    ax2.set_ylim(-0.05, 1.05)
-    ax2.grid(True, linestyle='--', alpha=0.5, linewidth=0.8)
-    ax2_twin.set_ylabel("Hit rate", fontsize=22, color='black')
-    ax2_twin.tick_params(labelsize=22, axis='y', labelcolor='black')
-    ax2.text(
-        0.98,
-        0.50,
-        f"Prefill: {seq_len:.0f}tokens\nGen: {gen_len:.0f}tokens",
-        transform=ax2.transAxes,
-        fontsize=16,
-        verticalalignment='top',
-        horizontalalignment='right',
-        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5),
-    )
-    ax2.set_title(f"{dataset_name} (prompt {prompt_idx})", fontsize=24, fontweight='bold')
-    plt.tight_layout()
-    save_path_coeff = os.path.join(coeff_hit_folder, f"{file_suffix}.png")
-    plt.savefig(save_path_coeff, dpi=300, bbox_inches='tight')
-    print(f"Saved coefficient & hit rate plot to {save_path_coeff}")
-    plt.close(fig2)
-
-    # 세 번째 그래프: cumulative similarity -> task_name/cumulative_sim/
-    cum_blocks = list(range(len(cumulative_similarities)))
-    fig3, ax3 = plt.subplots(1, 1, figsize=(7.5, 5))
-    ax3.plot(
-        cum_blocks,
-        cumulative_similarities,
-        alpha=0.9,
-        linewidth=2.5,
-        linestyle='-',
-        color=color,
-        marker='o',
-        markersize=4,
-    )
-    ax3.set_xlabel("Accumulated blocks (0 ~ N)", fontsize=22)
-    ax3.set_ylabel("Similarity", fontsize=22)
-    ax3.tick_params(labelsize=22)
-    ax3.grid(True, linestyle='--', alpha=0.5, linewidth=0.8)
-    ax3.text(
-        0.98,
-        0.50,
-        f"Prefill: {seq_len:.0f}tokens\nGen: {gen_len:.0f}tokens",
-        transform=ax3.transAxes,
-        fontsize=16,
-        verticalalignment='top',
-        horizontalalignment='right',
-        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5),
-    )
-    ax3.set_title(f"{dataset_name} (prompt {prompt_idx})", fontsize=24, fontweight='bold')
-    plt.tight_layout()
-    save_path_cum = os.path.join(cumulative_folder, f"{file_suffix}.png")
-    plt.savefig(save_path_cum, dpi=300, bbox_inches='tight')
-    print(f"Saved cumulative similarity plot to {save_path_cum}")
-    plt.close(fig3)
-
-
-# ---------------------------------------------------------
-# 2. 데이터 준비 및 프롬프트 구성 (Main Execution)
-# ---------------------------------------------------------
-
-dataset2maxlen_path = os.path.join(root_path, "config", "dataset2maxlen.json")
-with open(dataset2maxlen_path, "r") as f:
-    dataset2maxlen = json.load(f)
-
-longbench_folder_path = os.path.join(root_path, "datasets", "longbench")
-dataset_list = os.listdir(longbench_folder_path)
-dataset_prompts = {}
-for dataset in dataset_list:
-    dataset_path = os.path.join(longbench_folder_path, dataset)
-    with open(dataset_path, "r") as f:
-        data_lines = f.readlines()
-    
-    for line in data_lines:
-        item = json.loads(line)
-        input_prompt = item.get("input_prompt")
-        dataset_name = item.get("dataset")
-        length = item.get("length")
-
-        if length < 2000 or length > 6000:
-            continue
-
-        if dataset_name not in dataset_prompts:
-            dataset_prompts[dataset_name] = []
-        dataset_prompts[dataset_name].append((dataset_name, input_prompt))
-
-task_group = {
+TASK_GROUP = {
     "Few Shot": ["samsum"],
     "Single-doc QA": ["qasper"],
     "Multi-doc QA": ["hotpotqa"],
     "Summarization": ["gov_report"],
 }
 
-# 각 데이터셋별로 num_items개씩 문장을 뽑되,
-# 어떤 task에 속한 데이터셋인지 정보는 함께 유지한다.
-num_items = 10
-dataset_selected_data = {}
-dataset2task = {}
-for task_name, datasets in task_group.items():
-    for d_name in datasets:
-        dataset2task[d_name] = task_name
-        if d_name not in dataset_prompts:
-            continue
-        prompts = dataset_prompts[d_name]
-        if len(prompts) > num_items:
-            sampled = random.sample(prompts, num_items)
+plt.rcParams.update({
+    "font.family": "serif",
+    "font.size": 18,
+    "axes.labelsize": 20,
+    "axes.titlesize": 22,
+    "xtick.labelsize": 16,
+    "ytick.labelsize": 16,
+    "legend.fontsize": 14,
+    "axes.linewidth": 1.2,
+})
+
+
+# ══════════════════════════════════════════════════════════════
+# Hook-based Attention Collector
+# ══════════════════════════════════════════════════════════════
+class AttentionCollector:
+    """Memory-efficient attention collector.
+
+    Prefill : stores only the last MAX_WINDOW query rows per layer on CPU.
+    Decode  : accumulates attention-to-prefill scores on-the-fly (never stores
+              individual decode attention maps).
+    """
+
+    def __init__(self, model, max_window):
+        self.max_window = max_window
+        self.num_layers = model.config.num_hidden_layers
+        self.num_heads = model.config.num_attention_heads
+        self.num_kv_heads = getattr(model.config, "num_key_value_heads", self.num_heads)
+        self.group_size = self.num_heads // self.num_kv_heads
+
+        self._prefill = [None] * self.num_layers
+        self._answer = None
+        self._prefill_len = 0
+        self._is_prefill = True
+
+        self._hooks = []
+        for i, layer in enumerate(model.model.layers):
+            h = layer.self_attn.register_forward_hook(self._make_hook(i))
+            self._hooks.append(h)
+
+    # ── public API ──
+    def reset(self, prefill_len):
+        self._prefill = [None] * self.num_layers
+        self._answer = torch.zeros(self.num_layers, self.num_heads, prefill_len)
+        self._prefill_len = prefill_len
+        self._is_prefill = True
+
+    def set_decode(self):
+        self._is_prefill = False
+
+    def get_prefill_maps(self):
+        """(L, H, W, S) – W = min(MAX_WINDOW, seq_len)"""
+        return torch.stack(self._prefill, dim=0)
+
+    @property
+    def answer_score(self):
+        """(L, H, S) accumulated decode attention to prefill tokens."""
+        return self._answer
+
+    def remove_hooks(self):
+        for h in self._hooks:
+            h.remove()
+        self._hooks.clear()
+
+    # ── hook factory ──
+    def _make_hook(self, layer_idx):
+        def fn(module, _inp, out):
+            attn = out[1]
+            if attn is None:
+                return
+            if self._is_prefill:
+                w = min(self.max_window, attn.size(2))
+                self._prefill[layer_idx] = attn[0, :, -w:, :].detach().cpu()
+            else:
+                self._answer[layer_idx] += attn[0, :, 0, : self._prefill_len].detach().cpu()
+            return (out[0], None, out[2])
+
+        return fn
+
+
+# ══════════════════════════════════════════════════════════════
+# Vectorised helpers
+# ══════════════════════════════════════════════════════════════
+def jaccard(a_idx, b_idx, seq_len):
+    """One-hot scatter Jaccard, mean over layers & heads."""
+    L, H, _ = a_idx.shape
+    a = torch.zeros(L, H, seq_len, dtype=torch.bool)
+    b = torch.zeros(L, H, seq_len, dtype=torch.bool)
+    a.scatter_(2, a_idx, True)
+    b.scatter_(2, b_idx, True)
+    inter = (a & b).sum(2).float()
+    union = (a | b).sum(2).float().clamp(min=1)
+    return (inter / union).mean().item()
+
+
+def gqa_topk(scores, k, num_kv_heads, group_size):
+    """Top-k respecting GQA grouping."""
+    if group_size <= 1:
+        return scores.topk(k, dim=-1).indices
+    *batch, _H, S = scores.shape
+    g = scores.view(*batch, num_kv_heads, group_size, S).sum(dim=-2)
+    idx = g.topk(k, dim=-1).indices
+    return idx.repeat_interleave(group_size, dim=-2)
+
+
+# ══════════════════════════════════════════════════════════════
+# Analysis functions
+# ══════════════════════════════════════════════════════════════
+def analyze_block_hit_rate(prefill, answer_idx, budget, kv_h, gs, seq_len):
+    """Independent hit rate per query position (index 0 = most recent)."""
+    W = prefill.size(2)
+    rates = []
+    for b in range(W):
+        score = prefill[:, :, W - 1 - b, :]
+        idx = gqa_topk(score, budget, kv_h, gs)
+        rates.append(jaccard(answer_idx, idx, seq_len))
+    return np.array(rates)
+
+
+def analyze_optimal_coefficient(prefill, answer_idx, budget, kv_h, gs, seq_len):
+    """Greedy per-query coefficient search. Returns (coefficients, hit_rates)."""
+    L, H, W, S = prefill.shape
+    local_b = int(budget * LOCAL_RATIO)
+    sel_b = budget - local_b
+    test_coeffs = torch.arange(0.0, 1.1, 0.1)
+
+    accumulated = torch.zeros(L, H, S)
+    opt_coeffs, hit_rates = [], []
+
+    for b in range(W):
+        block = prefill[:, :, W - 1 - b, :]
+        if b == 0:
+            accumulated += block
+            idx = gqa_topk(accumulated, budget, kv_h, gs)
+            hr = jaccard(answer_idx, idx, seq_len)
+            opt_coeffs.append(1.0)
+            hit_rates.append(hr)
         else:
-            sampled = prompts
-        dataset_selected_data[d_name] = sampled
+            best_c, best_hr = 0.0, hit_rates[-1]
+            for c in test_coeffs:
+                tmp = accumulated + c * block
+                tmp[:, :, -local_b:] = tmp.max()
+                idx = gqa_topk(tmp, sel_b, kv_h, gs)
+                hr = jaccard(answer_idx, idx, seq_len)
+                if hr > best_hr:
+                    best_hr = hr
+                    best_c = c.item()
+            accumulated += best_c * block
+            opt_coeffs.append(best_c)
+            hit_rates.append(best_hr)
 
-model_name = "llama3"
-model2path_path = os.path.join(root_path, "config", "model2path.json")
-with open(model2path_path, "r") as f:
-    model2path = json.load(f)
-model_path = model2path[model_name]
+    return np.array(opt_coeffs), np.array(hit_rates)
 
-tokenizer = AutoTokenizer.from_pretrained(model_path)
-attention_model = AutoModelForCausalLM.from_pretrained(
-    model_path, 
-    torch_dtype=torch.bfloat16, 
-    device_map="auto",
-    attn_implementation="eager"
-).eval()
 
-num_heads = attention_model.config.num_attention_heads
-num_kv_heads = getattr(attention_model.config, 'num_key_value_heads', num_heads)
-group_size = num_heads // num_kv_heads
+def analyze_cumulative(prefill, answer_idx, budget, kv_h, gs, seq_len):
+    """Accumulate queries (coeff=1) from most-recent outward."""
+    L, H, W, S = prefill.shape
+    accumulated = torch.zeros(L, H, S)
+    sims = []
+    for b in range(W):
+        accumulated += prefill[:, :, W - 1 - b, :]
+        idx = gqa_topk(accumulated, budget, kv_h, gs)
+        sims.append(jaccard(answer_idx, idx, seq_len))
+    return np.array(sims)
 
-prefill_attention_list = []
 
-def get_attn_hook(module, input, output):
-    attention_map = output[1]
-    if attention_map is not None and attention_map.size(2) != 1:
-        prefill_attention_list.append(attention_map.detach().to("cpu"))
-        return (output[0], None, output[2])
-    return output
+# ══════════════════════════════════════════════════════════════
+# Visualisation
+# ══════════════════════════════════════════════════════════════
+def _sigmoid(x, a, b):
+    return 1.0 / (1.0 + np.exp(a * (x - b)))
 
-for layer in attention_model.model.layers:
-    layer.self_attn.register_forward_hook(get_attn_hook)
 
-for dataset_name, selected_items in dataset_selected_data.items():
-    task_name = dataset2task.get(dataset_name, "UnknownTask")
-    print(f"\n>>> Processing dataset: {dataset_name} (task: {task_name}, {len(selected_items)} items)")
-    sentences_info = {}
+def plot_dataset(name, task, block_rates, opt_coeffs, cum_sims, save_dir):
+    """Aggregate plot for one dataset: mean ± std with individual traces."""
+    n = len(block_rates)
+    W = min(len(r) for r in block_rates)
+    br = np.array([r[:W] for r in block_rates])
+    oc = np.array([c[:W] for c in opt_coeffs])
+    cs = np.array([s[:W] for s in cum_sims])
+    x = np.arange(W)
 
-    for idx, (ds_name, prompt) in enumerate(selected_items):
-        print(f">>> Processing item {idx+1}/{len(selected_items)} from {ds_name}")
-        prompt_with_format = f"[INST]{prompt}[/INST]"
-        input_enc = tokenizer(prompt_with_format, return_tensors="pt")
-        input_ids = input_enc.input_ids.to(attention_model.device)
-        attention_mask = input_enc.attention_mask.to(attention_model.device)
+    fig, axes = plt.subplots(1, 3, figsize=(24, 6))
 
-        if input_ids.size(1) > 7500:
-            input_ids = torch.cat([input_ids[:, :3750], input_ids[:, -3750:]], dim=1)
-            attention_mask = torch.cat([attention_mask[:, :3750], attention_mask[:, -3750:]], dim=1)
+    # 1 ── Block hit rate
+    ax = axes[0]
+    for i in range(n):
+        ax.plot(x, br[i], alpha=0.15, color="steelblue", linewidth=0.8)
+    m, s = br.mean(0), br.std(0)
+    ax.plot(x, m, color="steelblue", linewidth=2.5)
+    ax.fill_between(x, m - s, m + s, alpha=0.18, color="steelblue")
+    ax.set_xlabel("Query distance from end")
+    ax.set_ylabel("Hit Rate")
+    ax.set_title("Per-Query Hit Rate")
+    ax.grid(True, alpha=0.3)
 
-        seq_len = input_ids.size(1)
-        max_new_tokens = dataset2maxlen.get(dataset_name, 512)
-        token_budget = 128
-        prefill_attention_list.clear()
+    # 2 ── Optimal coefficient + sigmoid fit
+    ax = axes[1]
+    for i in range(n):
+        ax.plot(x, oc[i], alpha=0.15, color="coral", linewidth=0.8)
+    m_c = oc.mean(0)
+    ax.plot(x, m_c, color="coral", linewidth=2.5, label="Mean")
+    try:
+        popt, _ = curve_fit(
+            _sigmoid, x.astype(float), m_c,
+            p0=[0.5, 16.0], bounds=((0, 0), (np.inf, np.inf)), maxfev=5000,
+        )
+        ax.plot(x, _sigmoid(x.astype(float), *popt), "k--", linewidth=2,
+                label=f"Sigmoid (a={popt[0]:.2f}, b={popt[1]:.1f})")
+        ax.legend(loc="upper right")
+    except RuntimeError:
+        pass
+    ax.set_xlabel("Query distance from end")
+    ax.set_ylabel("Optimal Coefficient")
+    ax.set_title("Optimal Query Weight")
+    ax.set_ylim(-0.05, 1.05)
+    ax.grid(True, alpha=0.3)
 
-        print(">>> Generating tokens...")
-        with torch.no_grad():
-            output = attention_model.generate(
-                input_ids,
-                max_new_tokens=max_new_tokens,
-                do_sample=False,
-                pad_token_id=tokenizer.eos_token_id,
-                return_dict_in_generate=True,
-                output_attentions=True,
-                num_logits_to_keep=1,
+    # 3 ── Cumulative similarity
+    ax = axes[2]
+    for i in range(n):
+        ax.plot(x, cs[i], alpha=0.15, color="forestgreen", linewidth=0.8)
+    m_s, s_s = cs.mean(0), cs.std(0)
+    ax.plot(x, m_s, color="forestgreen", linewidth=2.5)
+    ax.fill_between(x, m_s - s_s, m_s + s_s, alpha=0.18, color="forestgreen")
+    ax.set_xlabel("Number of accumulated queries")
+    ax.set_ylabel("Similarity")
+    ax.set_title("Cumulative Similarity")
+    ax.grid(True, alpha=0.3)
+
+    fig.suptitle(f"{task}: {name} (n={n})", fontsize=24, fontweight="bold")
+    plt.tight_layout()
+    os.makedirs(save_dir, exist_ok=True)
+    path = os.path.join(save_dir, f"{name}.png")
+    plt.savefig(path, dpi=200, bbox_inches="tight")
+    plt.close()
+    print(f"  Saved: {path}")
+
+
+def plot_summary(all_results, save_dir):
+    """All datasets' mean optimal-coefficient decay on one plot."""
+    fig, ax = plt.subplots(figsize=(10, 6))
+    colors = plt.cm.Set2(np.linspace(0, 1, len(all_results)))
+
+    for (name, task, oc_list), color in zip(all_results, colors):
+        W = min(len(c) for c in oc_list)
+        oc = np.array([c[:W] for c in oc_list])
+        m = oc.mean(0)
+        x = np.arange(W)
+        ax.plot(x, m, linewidth=2.5, color=color, label=f"{name} ({task})")
+        try:
+            popt, _ = curve_fit(
+                _sigmoid, x.astype(float), m,
+                p0=[0.5, 16.0], bounds=((0, 0), (np.inf, np.inf)), maxfev=5000,
+            )
+            ax.plot(x, _sigmoid(x.astype(float), *popt), "--", color=color,
+                    linewidth=1.5, alpha=0.7)
+        except RuntimeError:
+            pass
+
+    ax.set_xlabel("Query distance from end")
+    ax.set_ylabel("Optimal Coefficient")
+    ax.set_title("Temporal Bias: Optimal Coefficient Decay", fontweight="bold")
+    ax.set_ylim(-0.05, 1.05)
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    path = os.path.join(save_dir, "summary.png")
+    plt.savefig(path, dpi=200, bbox_inches="tight")
+    plt.close()
+    print(f"Saved summary: {path}")
+
+
+# ══════════════════════════════════════════════════════════════
+# Main
+# ══════════════════════════════════════════════════════════════
+def main():
+    # ── Load configs ──
+    with open(os.path.join(root_path, "config", "model2path.json")) as f:
+        model2path = json.load(f)
+    with open(os.path.join(root_path, "config", "dataset2maxlen.json")) as f:
+        dataset2maxlen = json.load(f)
+
+    model_path = model2path[MODEL_NAME]
+
+    # ── Load & filter LongBench data ──
+    longbench_dir = os.path.join(root_path, "datasets", "longbench")
+    dataset_prompts = defaultdict(list)
+    for fname in os.listdir(longbench_dir):
+        with open(os.path.join(longbench_dir, fname)) as f:
+            for line in f:
+                item = json.loads(line)
+                length = item.get("length", 0)
+                if 2000 <= length <= 6000:
+                    dataset_prompts[item["dataset"]].append(item["input_prompt"])
+
+    dataset2task = {}
+    selected = {}
+    for task_name, datasets in TASK_GROUP.items():
+        for d in datasets:
+            dataset2task[d] = task_name
+            if d in dataset_prompts:
+                pool = dataset_prompts[d]
+                selected[d] = random.sample(pool, min(NUM_ITEMS, len(pool)))
+
+    # ── Load model ──
+    print(f"Loading {model_path} …")
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_path,
+        torch_dtype=torch.bfloat16,
+        device_map="auto",
+        attn_implementation="eager",
+    ).eval()
+
+    collector = AttentionCollector(model, MAX_WINDOW)
+    plot_dir = os.path.join(workpath, "plots")
+    all_results = []
+
+    # ── Process each dataset ──
+    for dataset_name, prompts in selected.items():
+        task_name = dataset2task[dataset_name]
+        print(f"\n{'=' * 60}")
+        print(f"  {task_name}: {dataset_name}  ({len(prompts)} samples)")
+        print(f"{'=' * 60}")
+
+        all_br, all_oc, all_cs = [], [], []
+
+        for idx, prompt in enumerate(prompts):
+            print(f"\n  [{idx + 1}/{len(prompts)}] ", end="", flush=True)
+
+            # Tokenise & truncate
+            enc = tokenizer(f"[INST]{prompt}[/INST]", return_tensors="pt")
+            input_ids = enc.input_ids.to(model.device)
+            if input_ids.size(1) > MAX_SEQ_LEN:
+                half = MAX_SEQ_LEN // 2
+                input_ids = torch.cat([input_ids[:, :half], input_ids[:, -half:]], dim=1)
+            seq_len = input_ids.size(1)
+            max_new = dataset2maxlen.get(dataset_name, 512)
+
+            collector.reset(seq_len)
+
+            with torch.no_grad():
+                # ── Prefill ──
+                out = model(input_ids, use_cache=True, output_attentions=True)
+                past_kv = out.past_key_values
+                next_tok = out.logits[:, -1:].argmax(dim=-1)
+                del out
+
+                # ── Decode ──
+                collector.set_decode()
+                gen_len = 0
+                for _ in range(max_new):
+                    out = model(
+                        next_tok,
+                        past_key_values=past_kv,
+                        use_cache=True,
+                        output_attentions=True,
+                    )
+                    past_kv = out.past_key_values
+                    next_tok = out.logits[:, -1:].argmax(dim=-1)
+                    gen_len += 1
+                    if next_tok.item() == tokenizer.eos_token_id:
+                        del out
+                        break
+                    del out
+
+            del past_kv
+            torch.cuda.empty_cache()
+            print(f"prefill={seq_len}  gen={gen_len}", end="  ", flush=True)
+
+            # ── Ground truth: top-k from accumulated decode attention ──
+            prefill_attn = collector.get_prefill_maps()
+            answer_idx = gqa_topk(
+                collector.answer_score, TOKEN_BUDGET,
+                collector.num_kv_heads, collector.group_size,
             )
 
-        prefill_attention_maps = torch.stack(prefill_attention_list, dim=0).squeeze(1)
-        decoding_attention_maps = [torch.stack(output.attentions[i], dim=0).squeeze(1).to("cpu") for i in range(1, len(output.attentions))]
-        generated_token_length = len(decoding_attention_maps)
+            # ── Analyses ──
+            kv_h, gs = collector.num_kv_heads, collector.group_size
+            br = analyze_block_hit_rate(prefill_attn, answer_idx, TOKEN_BUDGET, kv_h, gs, seq_len)
+            oc, hr = analyze_optimal_coefficient(prefill_attn, answer_idx, TOKEN_BUDGET, kv_h, gs, seq_len)
+            cs = analyze_cumulative(prefill_attn, answer_idx, TOKEN_BUDGET, kv_h, gs, seq_len)
 
-        first_decoding_attention_map = decoding_attention_maps[0]
-        answer_score = torch.zeros((*first_decoding_attention_map.shape[:2], seq_len), device=first_decoding_attention_map.device)
+            all_br.append(br)
+            all_oc.append(oc)
+            all_cs.append(cs)
+            print(f"HR[0]={br[0]:.3f}  coeff[-1]={oc[-1]:.1f}")
 
-        for atmaps in decoding_attention_maps:
-            answer_score += atmaps[:,:,0,:seq_len]
+        # ── Per-dataset plot ──
+        ds_dir = os.path.join(plot_dir, task_name.replace(" ", "_"))
+        plot_dataset(dataset_name, task_name, all_br, all_oc, all_cs, ds_dir)
+        all_results.append((dataset_name, task_name, all_oc))
 
-        answer_indices = gqa_topk(answer_score, token_budget, num_kv_heads, group_size)
-        max_window, block_size = 128, 1
+    # ── Summary ──
+    plot_summary(all_results, plot_dir)
 
-        block_hit_rates_data = analyze_block_hit_rate(prefill_attention_maps, answer_indices, max_window, token_budget, num_kv_heads, group_size, block_size)
-        optimal_coefficients, hit_rates = analyze_optimal_contribution(prefill_attention_maps, answer_indices, max_window, token_budget, num_kv_heads, group_size, block_size)
-        cumulative_similarities = analyze_cumulative_similarity(prefill_attention_maps, answer_indices, max_window, token_budget, num_kv_heads, group_size, block_size)
+    collector.remove_hooks()
+    print("\n>>> All done.")
 
-        plot_single_result(
-            task_name, dataset_name, idx,
-            block_hit_rates_data, optimal_coefficients, hit_rates, cumulative_similarities,
-            workpath, seq_len, generated_token_length
-        )
 
-        sentences_info[idx] = {
-            "index": idx, "dataset": dataset_name,
-            "input_prompt": prompt, "seq_len": int(seq_len), "gen_len": int(generated_token_length)
-        }
-    
-    # 문장 정보도 Task 폴더 안에 저장
-    sentences_group_folder = os.path.join(workpath, "sentences", task_name.replace(' ', '_'))
-    os.makedirs(sentences_group_folder, exist_ok=True)
-    sentences_file = os.path.join(
-        sentences_group_folder,
-        f"{dataset_name.replace(' ', '_')}_sentences.jsonl"
-    )
-    with open(sentences_file, 'w', encoding='utf-8') as f:
-        for idx in sorted(sentences_info.keys()):
-            f.write(json.dumps(sentences_info[idx], ensure_ascii=False) + "\n")
-
-print(">>> All analysis and visualization completed")
+if __name__ == "__main__":
+    main()
