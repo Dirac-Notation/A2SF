@@ -9,12 +9,14 @@ Analyses:
   2. Optimal Coefficient – greedy per-query weight search with sigmoid fit
   3. Cumulative Similarity – diminishing returns from adding distant queries
 
-Optimised for a single A100-80GB:
-  - Hook-based collection: only last MAX_WINDOW prefill rows stored, decode scores accumulated on-the-fly
-  - Manual decode loop: no generate() overhead, no intermediate attention storage
+Optimised for 8× 24GB VRAM GPUs (bf16):
+  - Prefill uses SDPA (flash attention): O(N) memory, never materialises the full (S, S) matrix
+  - Window attention (last 128 queries) is recomputed post-hoc from cached Q inputs + KV cache
+  - Decode uses output_attentions=True which falls back to eager; attention is (H, 1, S) — tiny
   - Vectorised Jaccard via one-hot scatter
 """
 
+import math
 import torch
 import json
 import os
@@ -26,6 +28,7 @@ from scipy.optimize import curve_fit
 from collections import defaultdict
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -44,7 +47,7 @@ MAX_WINDOW = 128
 TOKEN_BUDGET = 128
 LOCAL_RATIO = 0.125
 NUM_ITEMS = 10
-MAX_SEQ_LEN = 7500
+MAX_SEQ_LEN = 32768
 MODEL_NAME = "llama3"
 
 TASK_GROUP = {
@@ -67,36 +70,46 @@ plt.rcParams.update({
 
 
 # ══════════════════════════════════════════════════════════════
-# Hook-based Attention Collector
+# Attention Collector  (SDPA-safe: never requires eager prefill)
 # ══════════════════════════════════════════════════════════════
 class AttentionCollector:
-    """Memory-efficient attention collector.
+    """Memory-efficient attention collector for long sequences.
 
-    Prefill : stores only the last MAX_WINDOW query rows per layer on CPU.
-    Decode  : accumulates attention-to-prefill scores on-the-fly (never stores
-              individual decode attention maps).
+    Prefill phase (SDPA, output_attentions=False):
+      - Pre-hooks capture the hidden_states INPUT to each attention module
+        for the last MAX_WINDOW positions only (~1 MB/layer).
+      - After the forward pass, `compute_window_attention()` recomputes
+        attention weights for those 128 queries against the full KV cache,
+        one layer at a time (~630 MB peak per layer on that layer's GPU).
+
+    Decode phase (output_attentions=True → eager fallback for seq=1):
+      - Post-hooks accumulate attention-to-prefill scores on-the-fly.
     """
 
     def __init__(self, model, max_window):
+        self.model = model
         self.max_window = max_window
-        self.num_layers = model.config.num_hidden_layers
-        self.num_heads = model.config.num_attention_heads
-        self.num_kv_heads = getattr(model.config, "num_key_value_heads", self.num_heads)
+        cfg = model.config
+        self.num_layers = cfg.num_hidden_layers
+        self.num_heads = cfg.num_attention_heads
+        self.num_kv_heads = getattr(cfg, "num_key_value_heads", self.num_heads)
         self.group_size = self.num_heads // self.num_kv_heads
+        self.head_dim = cfg.hidden_size // self.num_heads
 
-        self._prefill = [None] * self.num_layers
-        self._answer = None
+        self._window_inputs = {}   # layer_idx → (1, W, D) on layer's device
+        self._answer = None        # (L, H, S) on CPU
         self._prefill_len = 0
         self._is_prefill = True
 
         self._hooks = []
         for i, layer in enumerate(model.model.layers):
-            h = layer.self_attn.register_forward_hook(self._make_hook(i))
-            self._hooks.append(h)
+            h1 = layer.self_attn.register_forward_pre_hook(self._pre_hook(i))
+            h2 = layer.self_attn.register_forward_hook(self._post_hook(i))
+            self._hooks.extend([h1, h2])
 
-    # ── public API ──
+    # ── public ──
     def reset(self, prefill_len):
-        self._prefill = [None] * self.num_layers
+        self._window_inputs.clear()
         self._answer = torch.zeros(self.num_layers, self.num_heads, prefill_len)
         self._prefill_len = prefill_len
         self._is_prefill = True
@@ -104,13 +117,8 @@ class AttentionCollector:
     def set_decode(self):
         self._is_prefill = False
 
-    def get_prefill_maps(self):
-        """(L, H, W, S) – W = min(MAX_WINDOW, seq_len)"""
-        return torch.stack(self._prefill, dim=0)
-
     @property
     def answer_score(self):
-        """(L, H, S) accumulated decode attention to prefill tokens."""
         return self._answer
 
     def remove_hooks(self):
@@ -118,20 +126,83 @@ class AttentionCollector:
             h.remove()
         self._hooks.clear()
 
-    # ── hook factory ──
-    def _make_hook(self, layer_idx):
-        def fn(module, _inp, out):
-            attn = out[1]
-            if attn is None:
+    # ── hooks ──
+    def _pre_hook(self, layer_idx):
+        """Prefill: save hidden_states for last MAX_WINDOW positions."""
+        def hook(module, args):
+            if not self._is_prefill:
                 return
-            if self._is_prefill:
-                w = min(self.max_window, attn.size(2))
-                self._prefill[layer_idx] = attn[0, :, -w:, :].detach().cpu()
-            else:
-                self._answer[layer_idx] += attn[0, :, 0, : self._prefill_len].detach().cpu()
-            return (out[0], None, out[2])
+            hidden = args[0]  # (B, S, D)
+            if hidden.size(1) <= 1:
+                return
+            w = min(self.max_window, hidden.size(1))
+            self._window_inputs[layer_idx] = hidden[:, -w:, :].detach()
+        return hook
 
-        return fn
+    def _post_hook(self, layer_idx):
+        """Decode: accumulate attention to prefill tokens, then discard weights."""
+        def hook(module, inp, out):
+            if self._is_prefill:
+                return
+            attn = out[1]
+            if attn is not None and attn.dim() >= 3 and attn.size(2) == 1:
+                self._answer[layer_idx] += (
+                    attn[0, :, 0, : self._prefill_len].detach().cpu()
+                )
+                return (out[0], None, out[2])
+        return hook
+
+    # ── post-hoc window attention ──
+    def compute_window_attention(self, past_kv):
+        """Recompute attention weights for the window queries.
+
+        Uses q_proj + rotary on stored hidden_states, and K from KV cache.
+        Processes one layer at a time → peak ~630 MB on that layer's GPU.
+        Returns: (L, H, W, S) on CPU.
+        """
+        S = self._prefill_len
+        maps = []
+
+        for i in range(self.num_layers):
+            attn_mod = self.model.model.layers[i].self_attn
+            hidden = self._window_inputs[i]          # (1, W, D) on layer device
+            device = hidden.device
+            W = hidden.size(1)
+
+            # ── Q projection + reshape ──
+            q = attn_mod.q_proj(hidden)              # (1, W, H*D)
+            q = q.view(1, W, self.num_heads, self.head_dim).transpose(1, 2)
+            #   → (1, H, W, D)
+
+            # ── Rotary embedding for Q ──
+            pos_ids = torch.arange(S - W, S, device=device).unsqueeze(0)
+            cos, sin = attn_mod.rotary_emb(q, pos_ids)
+            q, _ = apply_rotary_pos_emb(q, q, cos, sin)   # only q matters
+
+            # ── K from cache (already rotary-embedded) ──
+            k = past_kv[i][0]                        # (1, nkv, S, D)
+
+            # ── Attention scores (grouped matmul to avoid expanding K) ──
+            q_g = q.view(1, self.num_kv_heads, self.group_size, W, self.head_dim)
+            k_t = k.unsqueeze(2).transpose(-1, -2)   # (1, nkv, 1, D, S)
+            scores = torch.matmul(q_g, k_t) / math.sqrt(self.head_dim)
+            scores = scores.view(1, self.num_heads, W, S)
+
+            # ── Causal mask ──
+            key_pos = torch.arange(S, device=device)
+            qry_pos = torch.arange(S - W, S, device=device)
+            mask = key_pos.unsqueeze(0) <= qry_pos.unsqueeze(1)   # (W, S)
+            scores.masked_fill_(~mask.unsqueeze(0).unsqueeze(0), float("-inf"))
+
+            # ── Softmax ──
+            attn_w = torch.softmax(scores.float(), dim=-1).to(hidden.dtype)
+            maps.append(attn_w[0].cpu())             # (H, W, S)
+
+            del q, q_g, k_t, scores, attn_w, hidden, cos, sin
+            self._window_inputs[i] = None
+            torch.cuda.empty_cache()
+
+        return torch.stack(maps)                      # (L, H, W, S)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -228,7 +299,7 @@ def _sigmoid(x, a, b):
 
 
 def plot_dataset(name, task, block_rates, opt_coeffs, cum_sims, save_dir):
-    """Aggregate plot for one dataset: mean ± std with individual traces."""
+    """Aggregate plot for one dataset: mean +/- std with individual traces."""
     n = len(block_rates)
     W = min(len(r) for r in block_rates)
     br = np.array([r[:W] for r in block_rates])
@@ -359,14 +430,14 @@ def main():
                 pool = dataset_prompts[d]
                 selected[d] = random.sample(pool, min(NUM_ITEMS, len(pool)))
 
-    # ── Load model ──
+    # ── Load model (SDPA for memory-efficient prefill) ──
     print(f"Loading {model_path} …")
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
         torch_dtype=torch.bfloat16,
         device_map="auto",
-        attn_implementation="eager",
+        attn_implementation="sdpa",
     ).eval()
 
     collector = AttentionCollector(model, MAX_WINDOW)
@@ -397,13 +468,17 @@ def main():
             collector.reset(seq_len)
 
             with torch.no_grad():
-                # ── Prefill ──
-                out = model(input_ids, use_cache=True, output_attentions=True)
+                # ── Prefill (SDPA, no attention maps) ──
+                out = model(input_ids, use_cache=True)
                 past_kv = out.past_key_values
                 next_tok = out.logits[:, -1:].argmax(dim=-1)
                 del out
+                torch.cuda.empty_cache()
 
-                # ── Decode ──
+                # ── Recompute window attention from stored Q inputs + KV cache ──
+                prefill_attn = collector.compute_window_attention(past_kv)
+
+                # ── Decode (output_attentions=True → eager fallback, tiny matrix) ──
                 collector.set_decode()
                 gen_len = 0
                 for _ in range(max_new):
@@ -426,7 +501,6 @@ def main():
             print(f"prefill={seq_len}  gen={gen_len}", end="  ", flush=True)
 
             # ── Ground truth: top-k from accumulated decode attention ──
-            prefill_attn = collector.get_prefill_maps()
             answer_idx = gqa_topk(
                 collector.answer_score, TOKEN_BUDGET,
                 collector.num_kv_heads, collector.group_size,
