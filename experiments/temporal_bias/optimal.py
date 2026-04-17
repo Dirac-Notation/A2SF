@@ -48,7 +48,7 @@ TOKEN_BUDGET = 128
 LOCAL_RATIO = 0.125
 NUM_ITEMS = 10
 MAX_SEQ_LEN = 32768
-MODEL_NAME = "llama3"
+MODEL_NAME = "llama3-8b"
 
 TASK_GROUP = {
     "Few Shot": ["samsum"],
@@ -103,7 +103,9 @@ class AttentionCollector:
 
         self._hooks = []
         for i, layer in enumerate(model.model.layers):
-            h1 = layer.self_attn.register_forward_pre_hook(self._pre_hook(i))
+            h1 = layer.self_attn.register_forward_pre_hook(
+                self._pre_hook(i), with_kwargs=True,
+            )
             h2 = layer.self_attn.register_forward_hook(self._post_hook(i))
             self._hooks.extend([h1, h2])
 
@@ -128,12 +130,19 @@ class AttentionCollector:
 
     # ── hooks ──
     def _pre_hook(self, layer_idx):
-        """Prefill: save hidden_states for last MAX_WINDOW positions."""
-        def hook(module, args):
+        """Prefill: save hidden_states for last MAX_WINDOW positions.
+
+        LlamaDecoderLayer calls self.self_attn(hidden_states=..., ...)
+        entirely via kwargs, so we must use with_kwargs=True and read
+        from kwargs.
+        """
+        def hook(module, args, kwargs):
             if not self._is_prefill:
                 return
-            hidden = args[0]  # (B, S, D)
-            if hidden.size(1) <= 1:
+            hidden = kwargs.get("hidden_states")
+            if hidden is None:
+                hidden = args[0] if len(args) > 0 else None
+            if hidden is None or hidden.size(1) <= 1:
                 return
             w = min(self.max_window, hidden.size(1))
             self._window_inputs[layer_idx] = hidden[:, -w:, :].detach()
