@@ -31,7 +31,7 @@ class TrainingConfig:
     save_dir: str = "runs/a2sf_rl"
     resume: Optional[str] = None
     checkpoint_every_epochs: int = 500
-    plot_every_epochs: int = 50  # N 에폭마다 training_progress.png 갱신. 0이면 비활성.
+    plot_every_epochs: int = 100  # N 에폭마다 training_progress.png 갱신. 0이면 비활성.
 
     # ----- Dataset paths (fixed splits) -----
     train_data_path: str = "RL/training/data/training_data.jsonl"
