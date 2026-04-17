@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-NUM_BEST = 1
+NUM_BEST = 4
 BEST_LABELS = [f"best{i+1}" for i in range(NUM_BEST)]
 BEST_COLORS = ["#4C72B0", "#DD8452", "#55A868", "#C44E52"][:NUM_BEST]
 

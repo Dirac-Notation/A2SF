@@ -66,26 +66,25 @@ class NeuralUCBAgent(nn.Module):
         self.default_metric_head = self.metric_heads[0]
         self.metric_name_to_idx = {name: i for i, name in enumerate(self.metric_heads)}
 
-        # Embedding dimensions
-        self.feature_dim = 512
+        self.feature_dim = 256
         self.topk = 4
         self.side_feat_per_head = self.topk + 1
 
-        # 입력 전체를 하나의 projection으로 임베딩
+        # Embedding: 1-layer linear
         self.input_proj = nn.Sequential(
-            nn.Linear(self.state_dim, 256),
-            nn.ReLU(),
-            nn.Linear(256, self.feature_dim),
+            nn.Linear(self.state_dim, self.feature_dim),
             nn.ReLU(),
         )
 
-        # Shared backbone (bandit single-step이라 dropout=0)
+        # Backbone: 2x (linear + activation)
         self.backbone = nn.Sequential(
-            MLPResidualBlock(dim=self.feature_dim, hidden_dim=1024, dropout=0.0),
-            MLPResidualBlock(dim=self.feature_dim, hidden_dim=1024, dropout=0.0),
+            nn.Linear(self.feature_dim, self.feature_dim),
+            nn.ReLU(),
+            nn.Linear(self.feature_dim, self.feature_dim),
+            nn.ReLU(),
         )
 
-        # Per-metric reward heads
+        # Per-metric reward heads: linear 1개씩
         self.reward_heads = nn.ModuleDict(
             {
                 metric_name: nn.Linear(self.feature_dim, self.num_actions)
