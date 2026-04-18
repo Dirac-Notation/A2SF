@@ -94,18 +94,26 @@ def compute_action_scores(
     metric_type: str,
     answers: List[str],
     all_classes: List[str],
+    full_cache_pred: str = None,
 ) -> List[float]:
-    """Per-action reward under the dataset metric (max over reference answers)."""
+    """Per-action reward.
+
+    full_cache_pred가 주어지면 full cache 출력과의 유사도로 계산 (compressed vs full).
+    없으면 기존대로 ground truth answers와 비교 (max over references).
+    """
     metric_fn = _METRIC_FN_REGISTRY.get(str(metric_type), qa_f1_score)
     scores: List[float] = []
     for pred_text in action_outputs:
-        reward_val = 0.0
-        if answers:
-            for gt in answers:
-                reward_val = max(
-                    reward_val,
-                    float(metric_fn(str(pred_text), gt, all_classes=all_classes)),
-                )
+        if full_cache_pred is not None:
+            reward_val = float(metric_fn(str(pred_text), full_cache_pred, all_classes=all_classes))
+        else:
+            reward_val = 0.0
+            if answers:
+                for gt in answers:
+                    reward_val = max(
+                        reward_val,
+                        float(metric_fn(str(pred_text), gt, all_classes=all_classes)),
+                    )
         scores.append(float(reward_val))
     return scores
 
