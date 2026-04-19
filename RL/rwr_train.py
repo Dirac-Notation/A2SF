@@ -65,6 +65,10 @@ def parse_args():
     p.add_argument("--select_by", type=str, default="argmax",
                    choices=["expected", "argmax", "max"],
                    help="Which val metric to select best checkpoint on.")
+    p.add_argument("--adaptive_T", action="store_true",
+                   help="Use per-sample adaptive temperature: T_i = max(T_floor, gap_i) / kappa")
+    p.add_argument("--T_floor", type=float, default=0.02)
+    p.add_argument("--kappa", type=float, default=1.0)
     return p.parse_args()
 
 
@@ -203,8 +207,14 @@ def main():
     log = []
 
     def build_target(rewards):
-        # Soft target: softmax(r / T) + ε/K smoothing
-        p = F.softmax(rewards / args.target_T, dim=-1)
+        if args.adaptive_T:
+            # Per-sample T = max(T_floor, gap_i) / kappa
+            sorted_r, _ = torch.sort(rewards, dim=-1, descending=True)
+            gap = (sorted_r[:, 0] - sorted_r[:, 1]).clamp_min(args.T_floor)
+            T = (gap / args.kappa).unsqueeze(-1)
+            p = F.softmax(rewards / T, dim=-1)
+        else:
+            p = F.softmax(rewards / args.target_T, dim=-1)
         if args.label_smooth > 0:
             K = p.size(-1)
             p = (1 - args.label_smooth) * p + args.label_smooth / K
