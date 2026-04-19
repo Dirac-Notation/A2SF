@@ -17,6 +17,16 @@ def parse_args(args=None):
     parser.add_argument("--window", type=int, default=16)
     parser.add_argument("--budget", type=int, default=128)
     parser.add_argument("--gpus_per_model", type=int, default=1, help="한 모델 인스턴스가 사용할 GPU 개수 (연속된 ID 그룹).")
+    parser.add_argument(
+        "--aj_weight_fn", type=str, default="aj_offset",
+        choices=["aj_offset", "aj", "aj_sqrt", "aj_fastrise", "aj_quartic",
+                 "aj_floor30", "aj_floor50", "aj_floor70",
+                 "aj_mix25", "aj_mix50", "aj_mix75",
+                 "aj_gate30", "aj_gate50", "aj_sqrt_gate30", "aj_norm_sqrt"],
+        help="(AJ only) weight function applied to Jaccard signal.",
+    )
+    parser.add_argument("--aj_offset", type=float, default=0.1, help="(AJ only) offset for aj_offset weight.")
+    parser.add_argument("--recent_budget", type=int, default=16, help="(AJ only) number of keys always kept from the tail.")
     return parser.parse_args(args)
 
 
@@ -62,6 +72,9 @@ def _longbench_worker(
     dataset2maxlen: dict,
     task_queue: mp.Queue,
     result_queue: mp.Queue,
+    aj_weight_fn: str = "aj_offset",
+    aj_offset: float = 0.1,
+    recent_budget: int = 16,
 ):
     """
     CUDA_VISIBLE_DEVICES를 gpu_group으로 설정하고 모델을 로드한 뒤,
@@ -84,6 +97,9 @@ def _longbench_worker(
     config["total_budget"] = budget
     config["a"] = 10
     config["b"] = window
+    config["aj_weight_fn"] = aj_weight_fn
+    config["aj_offset"] = aj_offset
+    config["recent_budget"] = recent_budget
 
     try:
         while True:
@@ -233,6 +249,9 @@ def _run_longbench_multi_gpu(args):
                 dataset2maxlen,
                 task_queue,
                 result_queue,
+                args.aj_weight_fn,
+                float(args.aj_offset),
+                int(args.recent_budget),
             ),
         )
         p.start()

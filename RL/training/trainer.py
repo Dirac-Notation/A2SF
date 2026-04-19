@@ -75,6 +75,7 @@ class A2SFTrainer:
         state_dim = int(self.env.context_encoder.output_dim)
         num_heads = int(self.env.context_encoder.num_heads)
         num_metric_types = int(self.env.context_encoder.num_metric_types)
+        num_task_types = int(getattr(self.env.context_encoder, "num_task_types", 0))
         side_dim = int(self.env.context_encoder.side_dim)
 
         # 실제 학습 데이터에 등장하는 metric만 head로 생성
@@ -90,13 +91,23 @@ class A2SFTrainer:
             metric_heads=metric_heads,
             num_heads=num_heads,
             num_metric_types=num_metric_types,
+            num_task_types=num_task_types,
             side_dim=side_dim,
+            backbone_depth=int(getattr(self.training_config, "backbone_depth", 2)),
+            dropout=float(getattr(self.training_config, "dropout", 0.0)),
         ).to(self.device)
 
         # Optimizer only includes agent parameters
         # Context encoder is metadata-based and frozen
         all_params = list(self.agent.parameters())
-        self.optimizer = optim.SGD(all_params, lr=self.training_config.lr)
+        optimizer_name = str(getattr(self.training_config, "optimizer", "sgd")).lower()
+        if optimizer_name == "adam":
+            self.optimizer = optim.Adam(all_params, lr=self.training_config.lr, weight_decay=0.0)
+        elif optimizer_name == "adamw":
+            self.optimizer = optim.AdamW(all_params, lr=self.training_config.lr, weight_decay=1e-4)
+        else:
+            self.optimizer = optim.SGD(all_params, lr=self.training_config.lr)
+        print(f"[optimizer] {optimizer_name}  lr={self.training_config.lr}")
 
         self.real_best_reference_avg = self._compute_real_best_reference_avg(
             training_data_list, int(self.training_config.token_budget)
@@ -418,7 +429,45 @@ class A2SFTrainer:
             action_idx_batch.size(0), device=reward_pred.device, dtype=torch.long
         )
         selected_predict = reward_pred[batch_indices, action_idx_batch]  # (N,)
-        prediction_rmse = torch.sqrt(F.mse_loss(selected_predict, rewards))
+
+        loss_type = str(getattr(self.training_config, "loss_type", "rmse")).lower()
+        # Full-vector supervision (V2+): if the trainer has cached all-action scores for
+        # this batch, supervise the whole reward_pred tensor. This uses 14 actions per
+        # sample instead of 4 (current UCB subsample).
+        full_scores = getattr(self, "_batch_all_action_scores", None)
+        delta = float(getattr(self.training_config, "multilabel_delta", 0.02))
+
+        if loss_type in ("ce", "listwise_mse", "multilabel", "ranking") and full_scores is not None:
+            if loss_type == "ce":
+                # Soft cross-entropy: target = softmax(scores / T), T=0.1 to sharpen.
+                T = 0.1
+                target_p = torch.softmax(full_scores / T, dim=-1)
+                log_p = torch.log_softmax(reward_pred, dim=-1)
+                prediction_rmse = -(target_p * log_p).sum(dim=-1).mean()
+            elif loss_type == "listwise_mse":
+                prediction_rmse = torch.sqrt(F.mse_loss(reward_pred, full_scores))
+            elif loss_type == "multilabel":
+                # Target = 1 for any action within `delta` of the per-sample max.
+                # reward_pred is already in (0, 1) via sigmoid.
+                best_per_sample = full_scores.max(dim=-1, keepdim=True).values
+                target = (full_scores >= best_per_sample - delta).float()
+                # Numerically stable BCE.
+                p = reward_pred.clamp(1e-6, 1.0 - 1e-6)
+                bce = -(target * torch.log(p) + (1.0 - target) * torch.log(1.0 - p))
+                prediction_rmse = bce.mean()
+            else:  # ranking: pairwise hinge between positives and negatives
+                best_per_sample = full_scores.max(dim=-1, keepdim=True).values
+                is_pos = (full_scores >= best_per_sample - delta).float()  # (N, A)
+                # For each sample: loss = mean over (pos, neg) of max(0, margin + pred_neg - pred_pos)
+                # Efficient via pairwise matrix.
+                margin = 0.1
+                # (N, A, 1) - (N, 1, A) = (N, A, A) differences
+                pred_diff = reward_pred.unsqueeze(-1) - reward_pred.unsqueeze(-2)  # pos - neg
+                pos_mask = is_pos.unsqueeze(-1) * (1 - is_pos).unsqueeze(-2)       # 1 where i=pos, j=neg
+                hinge = (margin - pred_diff).clamp(min=0)
+                prediction_rmse = (hinge * pos_mask).sum() / (pos_mask.sum().clamp(min=1))
+        else:
+            prediction_rmse = torch.sqrt(F.mse_loss(selected_predict, rewards))
 
         reward_pairs: List[Tuple[float, float]] = []
         selected_cpu = selected_predict.detach().cpu().tolist()
@@ -593,11 +642,27 @@ class A2SFTrainer:
                 end_time = time.time()
                 print(f"Time taken for one iteration: {end_time - start_time} seconds")
 
+                # Stash full per-sample action-score vectors for listwise/CE losses.
+                # Each of `update_samples` is expanded (B × num_best entries) — we
+                # tile the per-sample score vector to match.
+                loss_type_cfg = str(getattr(self.training_config, "loss_type", "rmse")).lower()
+                if loss_type_cfg in ("ce", "listwise_mse", "multilabel", "ranking"):
+                    scores_t = torch.tensor(
+                        batch_action_scores, device=self.device, dtype=torch.float32
+                    )  # (B, num_actions)
+                    # update_samples has B × num_best rows, in same B-major order:
+                    # for b in range(B): for label_i in range(num_best): append
+                    tiled = scores_t.unsqueeze(1).expand(B, num_best, -1).reshape(-1, scores_t.size(-1))
+                    self._batch_all_action_scores = tiled
+                else:
+                    self._batch_all_action_scores = None
+
                 avg_loss_stats = self._neural_ucb_update_batch(
                     samples=update_samples,
                     config=self.training_config,
                     optimizer=self.optimizer,
                 )
+                self._batch_all_action_scores = None
                 self._log_progress_common(
                     iteration=global_iteration,
                     loss_stats=avg_loss_stats,
@@ -830,6 +895,9 @@ class A2SFTrainer:
             "metric_heads": list(self.agent.metric_heads),
             "a_values": self.agent.a_values.detach().cpu(),
             "b_values": self.agent.b_values.detach().cpu(),
+            "backbone_depth": int(getattr(self.agent, "backbone_depth", 2)),
+            "dropout": float(getattr(self.agent, "dropout_p", 0.0)),
+            "num_task_types": int(getattr(self.agent, "num_task_types", 0)),
         }
 
     def _agent_weights_only(self) -> Dict[str, torch.Tensor]:

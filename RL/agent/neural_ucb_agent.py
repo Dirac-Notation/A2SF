@@ -49,8 +49,14 @@ class NeuralUCBAgent(nn.Module):
         num_heads: int = 32,
         num_metric_types: int = 10,
         side_dim: int = 65536,
+        backbone_depth: int = 2,
+        dropout: float = 0.0,
+        num_task_types: int = 0,
     ):
         super().__init__()
+        self.backbone_depth = int(backbone_depth)
+        self.dropout_p = float(dropout)
+        self.num_task_types = int(num_task_types)
         # Discrete action space: (a, b) pairs for sigmoid cache
         self.register_buffer("a_values", a_values)
         self.register_buffer("b_values", b_values)
@@ -74,7 +80,8 @@ class NeuralUCBAgent(nn.Module):
 
         self.feature_dim = 256
         self.num_bins = self.side_dim // self.num_heads
-        meta_dim = 1 + self.num_metric_types  # seq_len + metric_one_hot
+        meta_dim = 1 + self.num_metric_types + self.num_task_types  # seq_len + metric + task
+        self._meta_dim = meta_dim
 
         # Stage 1: bin별 독립 weight로 H heads → 1 합침
         # weight shape: (num_bins, num_heads) — 각 bin 위치마다 고유한 head 결합 가중치
@@ -90,13 +97,14 @@ class NeuralUCBAgent(nn.Module):
             nn.ReLU(),
         )
 
-        # Backbone: 2x (linear + activation)
-        self.backbone = nn.Sequential(
-            nn.Linear(self.feature_dim * 2, self.feature_dim * 2),
-            nn.ReLU(),
-            nn.Linear(self.feature_dim * 2, self.feature_dim * 2),
-            nn.ReLU(),
-        )
+        # Backbone: configurable depth of (linear + activation + dropout) with residual for depth>=2
+        layers: List[nn.Module] = []
+        for _ in range(max(1, self.backbone_depth)):
+            layers.append(nn.Linear(self.feature_dim * 2, self.feature_dim * 2))
+            layers.append(nn.ReLU())
+            if self.dropout_p > 0.0:
+                layers.append(nn.Dropout(self.dropout_p))
+        self.backbone = nn.Sequential(*layers)
 
         # Backbone output dim
         self.backbone_out_dim = self.feature_dim * 2  # 512
@@ -133,8 +141,8 @@ class NeuralUCBAgent(nn.Module):
     def _embed_state(self, state: torch.Tensor) -> torch.Tensor:
         state = state.to(dtype=torch.float32)
         B = state.size(0)
-        meta_dim = 1 + self.num_metric_types
-        meta = state[:, :meta_dim]                                # (B, 1+M)
+        meta_dim = self._meta_dim
+        meta = state[:, :meta_dim]                                # (B, 1+M+T)
         tova_flat = state[:, meta_dim:meta_dim + self.side_dim]   # (B, H*num_bins)
         snap_flat = state[:, meta_dim + self.side_dim:]           # (B, H*num_bins)
 
