@@ -116,10 +116,10 @@ class A2SFModel:
                 "hidden": int(arch_config.get("hidden", 256)),
                 "task_emb_dim": int(arch_config.get("task_emb_dim", 32)),
                 "metric_emb_dim": int(arch_config.get("metric_emb_dim", 32)),
-                "dropout": float(arch_config.get("dropout", 0.0)),
                 "decoding_mode": str(arch_config.get("decoding_mode", "argmax")),
                 "decoding_temperature": float(arch_config.get("decoding_temperature", 1.0)),
             }
+            dropout = float(arch_config.get("dropout", 0.0))
         elif is_heuristic:
             agent_cls = HeuristicAgent
             table_list = arch_config["action_table_int"]
