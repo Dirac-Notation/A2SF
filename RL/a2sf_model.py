@@ -9,6 +9,7 @@ from .agent.neural_ucb_agent import NeuralUCBAgent
 from .agent.compact_agent import CompactAgent
 from .agent.binary_agent import BinaryAgent
 from .agent.rwr_agent import RWRAgent
+from .agent.rwr_v2_agent import RWRv2Agent
 from .agent.heuristic_agent import HeuristicAgent
 from .env import A2SFEnv, A2SFModelRunner
 from longbench_eval import dataset2metric
@@ -107,8 +108,19 @@ class A2SFModel:
         is_compact = bool(arch_config and arch_config.get("compact", False))
         is_binary = bool(arch_config and arch_config.get("binary", False))
         is_rwr = bool(arch_config and arch_config.get("rwr", False))
+        is_rwr_v2 = bool(arch_config and arch_config.get("rwr_v2", False))
         is_heuristic = bool(arch_config and arch_config.get("heuristic", False))
-        if is_heuristic:
+        if is_rwr_v2:
+            agent_cls = RWRv2Agent
+            extra_kwargs = {
+                "hidden": int(arch_config.get("hidden", 256)),
+                "task_emb_dim": int(arch_config.get("task_emb_dim", 32)),
+                "metric_emb_dim": int(arch_config.get("metric_emb_dim", 32)),
+                "dropout": float(arch_config.get("dropout", 0.0)),
+                "decoding_mode": str(arch_config.get("decoding_mode", "argmax")),
+                "decoding_temperature": float(arch_config.get("decoding_temperature", 1.0)),
+            }
+        elif is_heuristic:
             agent_cls = HeuristicAgent
             table_list = arch_config["action_table_int"]
             action_table = torch.tensor(table_list, dtype=torch.long)
