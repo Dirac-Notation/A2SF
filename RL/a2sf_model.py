@@ -9,6 +9,7 @@ from .agent.neural_ucb_agent import NeuralUCBAgent
 from .agent.compact_agent import CompactAgent
 from .agent.binary_agent import BinaryAgent
 from .agent.rwr_agent import RWRAgent
+from .agent.heuristic_agent import HeuristicAgent
 from .env import A2SFEnv, A2SFModelRunner
 from longbench_eval import dataset2metric
 
@@ -106,7 +107,13 @@ class A2SFModel:
         is_compact = bool(arch_config and arch_config.get("compact", False))
         is_binary = bool(arch_config and arch_config.get("binary", False))
         is_rwr = bool(arch_config and arch_config.get("rwr", False))
-        if is_rwr:
+        is_heuristic = bool(arch_config and arch_config.get("heuristic", False))
+        if is_heuristic:
+            agent_cls = HeuristicAgent
+            table_list = arch_config["action_table_int"]
+            action_table = torch.tensor(table_list, dtype=torch.long)
+            extra_kwargs = {"action_table": action_table}
+        elif is_rwr:
             agent_cls = RWRAgent
             extra_kwargs = {
                 "hidden": int(arch_config.get("hidden", 256)),
