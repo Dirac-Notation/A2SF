@@ -32,6 +32,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from RL.a2sf_model import ModelConfig
 from RL.env import A2SFModelRunner, A2SFEnv
 from RL.agent.rwr_v2_agent import RWRv2Agent
+from RL.agent.rwr_v3_agent import RWRv3Agent
 
 
 def parse_args():
@@ -59,6 +60,9 @@ def parse_args():
     p.add_argument("--val_frac", type=float, default=0.15)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--save_every", type=int, default=0)
+    p.add_argument("--variant", type=str, default="v2", choices=["v2", "v3"],
+                   help="v2: head_merge bottleneck | v3: per-head feature preservation")
+    p.add_argument("--hidden_per_head", type=int, default=8, help="v3 only")
     return p.parse_args()
 
 
@@ -161,7 +165,8 @@ def main():
     side_dim = int(enc.side_dim)
     metric_heads = sorted({r["metric_type"] for r in records})
 
-    agent = RWRv2Agent(
+    cls = RWRv3Agent if args.variant == "v3" else RWRv2Agent
+    kwargs = dict(
         state_dim=state_dim,
         a_values=mc.a_values,
         b_values=mc.b_values,
@@ -175,7 +180,10 @@ def main():
         metric_emb_dim=args.metric_emb_dim,
         dropout=args.dropout,
         decoding_mode=args.decoding_mode,
-    ).to(device)
+    )
+    if args.variant == "v3":
+        kwargs["hidden_per_head"] = args.hidden_per_head
+    agent = cls(**kwargs).to(device)
     print(f"RWRv2 agent params: {sum(p.numel() for p in agent.parameters())}", flush=True)
 
     opt = optim.Adam(agent.parameters(), lr=args.lr, weight_decay=args.weight_decay)
