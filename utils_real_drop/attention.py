@@ -94,6 +94,10 @@ def compressed_attention(
             probs.to(value.dtype), value
         )
 
+        # Optional per-block probs hook (used by content-adaptive policies like AJ)
+        if hasattr(policy, "observe_probs"):
+            policy.observe_probs(q_start, q_end, probs)
+
         # Score accumulation
         q_weights = policy.get_query_weights(
             q_start=q_start, q_end=q_end, device=device, dtype=probs.dtype,

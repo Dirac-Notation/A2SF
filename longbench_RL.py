@@ -16,7 +16,7 @@ def parse_args(args=None):
     parser = argparse.ArgumentParser(description="LongBench RL evaluation (multi-GPU, multi-process)")
     parser.add_argument("--model", type=str, required=True, choices=["llama3-8b", "llama3-1b", "qwen2"])
     parser.add_argument("--budget", type=int, default=100)
-    parser.add_argument("--rl_checkpoint", type=str, required=True, help="Path to RL model checkpoint (.pt file)")
+    parser.add_argument("--rl_checkpoint", type=str, required=True, help="Path(s) to RL model checkpoint(s). Comma-separated for ensemble.")
     parser.add_argument("--gpus_per_model", type=int, default=1, help="한 모델 인스턴스가 사용할 GPU 개수 (연속된 ID 그룹).")
     parser.add_argument("--output_dir", type=str, default=None, help="추론 결과 저장 경로. 미지정 시 result_txt/pred/<model>_sigmoid_<budget>_RL")
     return parser.parse_args(args)
@@ -51,20 +51,68 @@ def _build_tasks(longbench_dir: str, dataset2maxlen: dict) -> list:
 
 
 def _load_rl_model(model_name: str, checkpoint_path: str) -> A2SFModel:
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    state_dict = checkpoint.get("agent_state_dict")
-    if state_dict is None:
-        state_dict = checkpoint.get("policy_state_dict")
-    if state_dict is None:
-        raise ValueError("Checkpoint missing 'agent_state_dict' (and legacy 'policy_state_dict').")
-    arch_config = checkpoint.get("arch_config")
+    """Load single or ensemble RL model.
+
+    If checkpoint_path contains commas, load multiple checkpoints and produce an
+    ensemble model whose .generate() averages agent reward predictions across
+    all loaded agents before argmax.
+    """
+    paths = [p.strip() for p in checkpoint_path.split(",") if p.strip()]
 
     model_cfg = ModelConfig(model=model_name)
-    model = A2SFModel(
-        config=model_cfg,
-        state_dict=state_dict,
-        arch_config=arch_config,
-    )
+
+    if len(paths) == 1:
+        ckpt = torch.load(paths[0], map_location="cpu", weights_only=False)
+        state_dict = ckpt.get("agent_state_dict") or ckpt.get("policy_state_dict")
+        if state_dict is None:
+            raise ValueError("Checkpoint missing 'agent_state_dict'.")
+        return A2SFModel(config=model_cfg, state_dict=state_dict,
+                         arch_config=ckpt.get("arch_config"))
+
+    # Ensemble: load one primary (for env / encoder / runner), then additional agents.
+    main_ckpt = torch.load(paths[0], map_location="cpu", weights_only=False)
+    main_sd = main_ckpt.get("agent_state_dict") or main_ckpt.get("policy_state_dict")
+    model = A2SFModel(config=model_cfg, state_dict=main_sd,
+                      arch_config=main_ckpt.get("arch_config"))
+
+    from RL.agent.neural_ucb_agent import NeuralUCBAgent
+    extra_agents = []
+    for p in paths[1:]:
+        ckpt = torch.load(p, map_location="cpu", weights_only=False)
+        sd = ckpt.get("agent_state_dict") or ckpt.get("policy_state_dict")
+        arch = ckpt.get("arch_config") or {}
+        extra = NeuralUCBAgent(
+            state_dim=int(arch.get("state_dim", model.agent.state_dim)),
+            a_values=arch["a_values"].clone(),
+            b_values=arch["b_values"].clone(),
+            metric_heads=list(arch["metric_heads"]),
+            num_heads=int(arch.get("num_heads", model.agent.num_heads)),
+            num_metric_types=int(arch.get("num_metric_types", model.agent.num_metric_types)),
+            num_task_types=int(arch.get("num_task_types", 0)),
+            side_dim=int(arch.get("side_dim", model.agent.side_dim)),
+            backbone_depth=int(arch.get("backbone_depth", 2)),
+            dropout=float(arch.get("dropout", 0.0)),
+        ).to(next(model.agent.parameters()).device)
+        extra.load_state_dict(sd, strict=False)
+        extra.eval()
+        extra_agents.append(extra)
+
+    # Monkey-patch agent.act() to average reward_pred across (primary + extras).
+    primary_agent = model.agent
+    primary_act = primary_agent.act  # unused but kept for reference
+    all_agents = [primary_agent] + extra_agents
+
+    @torch.no_grad()
+    def _ensemble_act(state, metric_type=None):
+        preds = []
+        for a in all_agents:
+            out = a.forward(state, metric_type=metric_type)
+            preds.append(out["reward_pred"])
+        avg_pred = torch.stack(preds, dim=0).mean(dim=0)
+        return primary_agent._select_action_from_scores(avg_pred)
+
+    primary_agent.act = _ensemble_act
+    print(f"[ensemble] loaded {len(all_agents)} agents from {paths}")
     return model
 
 

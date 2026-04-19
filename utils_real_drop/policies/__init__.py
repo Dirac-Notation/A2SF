@@ -14,6 +14,7 @@ from .base import CompressionPolicy
 from .a2sf import A2SFPolicy
 from .snap import SnapPolicy
 from .sigmoid import SigmoidPolicy
+from .aj import AjPolicy
 
 
 def _build_a2sf(cfg, num_kv):
@@ -28,10 +29,26 @@ def _build_sigmoid(cfg, num_kv):
     return SigmoidPolicy(num_kv, cfg.total_budget, cfg.a, cfg.b)
 
 
+def _build_aj(cfg, num_kv):
+    # `observation_window` is re-used as AJ's window_size (defaults to 128 if 0/None/missing).
+    window_size = cfg.get("observation_window", 128) or 128
+    if window_size < 16:
+        window_size = 128       # guard against the longbench default of 16
+    return AjPolicy(
+        num_kv,
+        cfg.total_budget,
+        window_size=window_size,
+        offset=cfg.get("aj_offset", 0.1),
+        recent_budget=cfg.get("recent_budget", 16),
+        weight_fn=cfg.get("aj_weight_fn", "aj_offset"),
+    )
+
+
 _REGISTRY = {
     "a2sf": _build_a2sf,
     "snap": _build_snap,
     "sigmoid": _build_sigmoid,
+    "aj": _build_aj,
 }
 
 
@@ -58,5 +75,6 @@ __all__ = [
     "A2SFPolicy",
     "SnapPolicy",
     "SigmoidPolicy",
+    "AjPolicy",
     "build_policies",
 ]

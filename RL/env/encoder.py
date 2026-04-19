@@ -121,12 +121,13 @@ class AttentionEncoder(nn.Module):
         object.__setattr__(self, "embed_tokens", self.target_model.model.embed_tokens)
 
         self.num_metric_types = int(len(METRIC_TYPE_ORDER))
+        self.num_task_types = int(len(TASK_TYPE_ORDER))
         # tova/snap 각각의 binned feature 차원
         self.side_dim = self.num_bins * self.num_heads
 
         if self.output_dim <= 0:
-            # [seq_len(1) + metric_one_hot(M)] + [tova_binned(side_dim), snap_binned(side_dim)]
-            self.output_dim = 1 + self.num_metric_types + 2 * self.side_dim
+            # [seq_len(1) + metric_one_hot(M) + task_one_hot(T)] + [tova_binned, snap_binned]
+            self.output_dim = 1 + self.num_metric_types + self.num_task_types + 2 * self.side_dim
 
     @property
     def _encode_device(self) -> torch.device:
@@ -210,7 +211,7 @@ class AttentionEncoder(nn.Module):
         task_type: Optional[str] = None,
         dataset: Optional[str] = None,
     ) -> torch.Tensor:
-        del generation_length, token_budget, task_type, dataset
+        del generation_length, token_budget
 
         tokenized = self.target_tokenizer(
             text,
@@ -228,13 +229,18 @@ class AttentionEncoder(nn.Module):
         metric_one_hot = torch.zeros(self.num_metric_types, device=enc_dev, dtype=torch.float32)
         metric_one_hot[metric_idx] = 1.0
 
+        task_idx = task_type_to_index(task_type=task_type, dataset=dataset)
+        task_one_hot = torch.zeros(self.num_task_types, device=enc_dev, dtype=torch.float32)
+        task_one_hot[task_idx] = 1.0
+
         attention_features = self._build_first_layer_attention_features(input_ids)
 
         features = torch.cat(
             [
                 torch.tensor([seq_len_feature], device=enc_dev, dtype=torch.float32),
-                metric_one_hot,
-                attention_features.to(dtype=torch.float32),
+                metric_one_hot.to(enc_dev),
+                task_one_hot.to(enc_dev),
+                attention_features.to(device=enc_dev, dtype=torch.float32),
             ],
             dim=-1,
         )

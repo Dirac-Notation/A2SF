@@ -14,6 +14,11 @@ class TrainingConfig:
     ucb_beta_max: float = 10.0
     ucb_beta_min: float = 0.0
     l2_coef: float = 1e-5
+    optimizer: str = "sgd"               # "sgd" | "adam" | "adamw"
+    loss_type: str = "rmse"              # "rmse" | "ce" | "listwise_mse" | "multilabel" | "ranking"
+    multilabel_delta: float = 0.02       # near-optimal margin for multilabel target
+    backbone_depth: int = 2              # backbone layer count (current hard-coded = 2)
+    dropout: float = 0.0                 # dropout probability inside backbone
 
     # ----- Training configuration -----
     epochs: int = 1500
@@ -48,6 +53,11 @@ class TrainingConfig:
         parser.add_argument("--seed", type=int, default=default_cfg.seed)
         parser.add_argument("--checkpoint_every_epochs", type=int, default=default_cfg.checkpoint_every_epochs, help="N 에폭마다 policy_epoch_{N}.pt 저장. 0이면 에폭 중 저장 안 함.")
         parser.add_argument("--plot_every_epochs", type=int, default=default_cfg.plot_every_epochs, help="N 에폭마다 training_progress.png 갱신. 0이면 비활성.")
+        parser.add_argument("--optimizer", type=str, default=default_cfg.optimizer, choices=["sgd", "adam", "adamw"])
+        parser.add_argument("--loss_type", type=str, default=default_cfg.loss_type, choices=["rmse", "ce", "listwise_mse", "multilabel", "ranking"])
+        parser.add_argument("--multilabel_delta", type=float, default=default_cfg.multilabel_delta)
+        parser.add_argument("--backbone_depth", type=int, default=default_cfg.backbone_depth)
+        parser.add_argument("--dropout", type=float, default=default_cfg.dropout)
 
         args = parser.parse_args(argv)
         return cls(
@@ -64,5 +74,10 @@ class TrainingConfig:
             train_data_path=args.train_data_path,
             checkpoint_every_epochs=args.checkpoint_every_epochs,
             plot_every_epochs=args.plot_every_epochs,
+            optimizer=args.optimizer,
+            loss_type=args.loss_type,
+            backbone_depth=args.backbone_depth,
+            dropout=args.dropout,
+            multilabel_delta=args.multilabel_delta,
         )
 

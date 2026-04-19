@@ -6,6 +6,9 @@ from typing import Any, Dict, List, Optional, Union
 import torch
 
 from .agent.neural_ucb_agent import NeuralUCBAgent
+from .agent.compact_agent import CompactAgent
+from .agent.binary_agent import BinaryAgent
+from .agent.rwr_agent import RWRAgent
 from .env import A2SFEnv, A2SFModelRunner
 from longbench_eval import dataset2metric
 
@@ -73,12 +76,18 @@ class A2SFModel:
             metric_heads = list(arch_config["metric_heads"])
             a_values = arch_config["a_values"].to(dtype=torch.float32).clone()
             b_values = arch_config["b_values"].to(dtype=torch.float32).clone()
+            backbone_depth = int(arch_config.get("backbone_depth", 2))
+            dropout = float(arch_config.get("dropout", 0.0))
+            num_task_types = int(arch_config.get("num_task_types", 0))
         else:
             # Legacy path: encoder로부터 차원 유도 + state_dict에서 힌트 추출.
             state_dim = int(self.env.context_encoder.output_dim)
             num_heads = int(self.env.context_encoder.num_heads)
             num_metric_types = int(self.env.context_encoder.num_metric_types)
             side_dim = int(self.env.context_encoder.side_dim)
+            backbone_depth = 2
+            dropout = 0.0
+            num_task_types = int(getattr(self.env.context_encoder, "num_task_types", 0))
             if state_dict is not None:
                 head_names = sorted({
                     k.split(".")[1] for k in state_dict.keys()
@@ -94,14 +103,40 @@ class A2SFModel:
                 a_values = self.config.a_values
                 b_values = self.config.b_values
 
-        self.agent = NeuralUCBAgent(
+        is_compact = bool(arch_config and arch_config.get("compact", False))
+        is_binary = bool(arch_config and arch_config.get("binary", False))
+        is_rwr = bool(arch_config and arch_config.get("rwr", False))
+        if is_rwr:
+            agent_cls = RWRAgent
+            extra_kwargs = {
+                "hidden": int(arch_config.get("hidden", 256)),
+                "decoding_temperature": float(arch_config.get("decoding_temperature", 1.0)),
+                "decoding_mode": str(arch_config.get("decoding_mode", "expected")),
+            }
+        elif is_binary:
+            agent_cls = BinaryAgent
+            extra_kwargs = {
+                "hidden": int(arch_config.get("hidden", 256)),
+                "backup_idx": int(arch_config.get("backup_idx", 8)),
+            }
+        elif is_compact:
+            agent_cls = CompactAgent
+            extra_kwargs = {"hidden": int(arch_config.get("hidden", 128)), "budget_slot": True}
+        else:
+            agent_cls = NeuralUCBAgent
+            extra_kwargs = {}
+        self.agent = agent_cls(
             state_dim=state_dim,
             a_values=a_values,
             b_values=b_values,
             metric_heads=metric_heads,
             num_heads=num_heads,
             num_metric_types=num_metric_types,
+            num_task_types=num_task_types,
             side_dim=side_dim,
+            backbone_depth=backbone_depth,
+            dropout=dropout,
+            **extra_kwargs,
         ).to(first_layer_device)
 
         if state_dict is not None:
@@ -151,6 +186,10 @@ class A2SFModel:
             dataset=dataset,
             task_type=task_type,
         )
+
+        # Compact agent needs budget feature set per-inference
+        if hasattr(self.agent, "set_budget"):
+            self.agent.set_budget(token_budget, batch_size=1, device=self._agent_device)
 
         action, _ = self.agent.act(
             state.to(self._agent_device, dtype=torch.float32),
