@@ -158,42 +158,91 @@ def main():
     print(f"(b) prompt-J mean off-diag = "
           f"{(J_prompt.sum() - np.trace(J_prompt)) / (len(tasks_b)**2 - len(tasks_b)):.3f}")
 
-    # ── Plot ──
-    fig, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(11.5, 4.6),
-                                      gridspec_kw={"width_ratios": [1.0, 1.0]})
-    vmin, vmax = 0.0, 1.0
+    # ── Build density curves for line plots ──
+    NBINS = 30
+    # (a) density of selected positions for each α (same prompt)
+    density_a = []
+    for m in masks_a:
+        pos = np.where(m)[0] / (T_a - 1)
+        hist, edges = np.histogram(pos, bins=NBINS, range=(0, 1))
+        density_a.append(hist / hist.sum())
+    centers = 0.5 * (edges[:-1] + edges[1:])
 
-    im_a = ax_a.imshow(J_alpha, cmap="viridis", vmin=vmin, vmax=vmax)
-    ax_a.set_xticks(range(len(ALPHA_SET)))
-    ax_a.set_yticks(range(len(ALPHA_SET)))
-    ax_a.set_xticklabels([f"{a:g}" for a in ALPHA_SET])
-    ax_a.set_yticklabels([f"{a:g}" for a in ALPHA_SET])
-    ax_a.set_xlabel(r"coefficient  $\alpha$")
-    ax_a.set_ylabel(r"coefficient  $\alpha$")
+    # (b) density of selected positions per prompt at fixed α (already masked)
+    # Re-compute from raw masks to preserve prompt-specific T (not the resampled version).
+    density_b = []
+    raw_masks_b = []
+    for t in tasks_b:
+        attn_b, T_b = compute_first_layer_attention(model, tok, prompts[t], device)
+        m = selection_mask(attn_b, FIXED_ALPHA, BUDGET)
+        raw_masks_b.append((t, m, T_b))
+        pos = np.where(m)[0] / (T_b - 1)
+        hist, _ = np.histogram(pos, bins=NBINS, range=(0, 1))
+        density_b.append(hist / hist.sum())
+
+    # ── Plot: 2×2, top row line plots, bottom row Jaccard heatmaps ──
+    fig = plt.figure(figsize=(12.5, 8.0))
+    gs = fig.add_gridspec(2, 2, height_ratios=[1.0, 1.15],
+                          hspace=0.45, wspace=0.25)
+    ax_a = fig.add_subplot(gs[0, 0])
+    ax_b = fig.add_subplot(gs[0, 1])
+    ax_ja = fig.add_subplot(gs[1, 0])
+    ax_jb = fig.add_subplot(gs[1, 1])
+
+    # (a) density vs α
+    cmap_a = plt.get_cmap("plasma")
+    for i, (alpha, dens) in enumerate(zip(ALPHA_SET, density_a)):
+        col = cmap_a(i / max(1, len(ALPHA_SET) - 1))
+        ax_a.plot(centers, dens, color=col, lw=2.2, label=rf"$\alpha={alpha:g}$")
+    ax_a.set_xlabel("normalized key position  (0 = oldest, 1 = most recent)")
+    ax_a.set_ylabel("fraction of selected keys")
     ax_a.set_title(rf"(a) same prompt, varying $\alpha$")
+    ax_a.legend(loc="upper left", fontsize=9, framealpha=0.95)
+    ax_a.grid(True, alpha=0.3)
+    ax_a.set_xlim(0, 1)
+
+    # (b) density per prompt at fixed α
+    cmap_b = plt.get_cmap("tab10").colors
+    for i, ((t, _, _), dens) in enumerate(zip(raw_masks_b, density_b)):
+        ax_b.plot(centers, dens, color=cmap_b[i], lw=2.2, label=t)
+    ax_b.set_xlabel("normalized key position  (0 = oldest, 1 = most recent)")
+    ax_b.set_ylabel("fraction of selected keys")
+    ax_b.set_title(rf"(b) fixed $\alpha={FIXED_ALPHA}$, varying prompt")
+    ax_b.legend(loc="upper left", fontsize=9, framealpha=0.95)
+    ax_b.grid(True, alpha=0.3)
+    ax_b.set_xlim(0, 1)
+
+    # (c) Jaccard α×α
+    im_a = ax_ja.imshow(J_alpha, cmap="Blues", vmin=0, vmax=1)
+    ax_ja.set_xticks(range(len(ALPHA_SET)))
+    ax_ja.set_yticks(range(len(ALPHA_SET)))
+    ax_ja.set_xticklabels([f"{a:g}" for a in ALPHA_SET])
+    ax_ja.set_yticklabels([f"{a:g}" for a in ALPHA_SET])
+    ax_ja.set_xlabel(r"coefficient  $\alpha$")
+    ax_ja.set_ylabel(r"coefficient  $\alpha$")
+    ax_ja.set_title(r"(c) Jaccard of selected keys across $\alpha$")
     for i in range(len(ALPHA_SET)):
         for j in range(len(ALPHA_SET)):
-            ax_a.text(j, i, f"{J_alpha[i, j]:.2f}", ha="center", va="center",
-                      color="white" if J_alpha[i, j] < 0.5 else "black", fontsize=10)
+            ax_ja.text(j, i, f"{J_alpha[i, j]:.2f}", ha="center", va="center",
+                       color="white" if J_alpha[i, j] > 0.55 else "black", fontsize=10)
 
-    im_b = ax_b.imshow(J_prompt, cmap="viridis", vmin=vmin, vmax=vmax)
-    labels_b = tasks_b
-    ax_b.set_xticks(range(len(labels_b)))
-    ax_b.set_yticks(range(len(labels_b)))
-    ax_b.set_xticklabels(labels_b, rotation=25, ha="right")
-    ax_b.set_yticklabels(labels_b)
-    ax_b.set_title(rf"(b) fixed $\alpha={FIXED_ALPHA}$, varying prompt")
-    for i in range(len(labels_b)):
-        for j in range(len(labels_b)):
-            ax_b.text(j, i, f"{J_prompt[i, j]:.2f}", ha="center", va="center",
-                      color="white" if J_prompt[i, j] < 0.5 else "black", fontsize=10)
+    # (d) Jaccard prompt×prompt
+    im_b = ax_jb.imshow(J_prompt, cmap="Blues", vmin=0, vmax=1)
+    ax_jb.set_xticks(range(len(tasks_b)))
+    ax_jb.set_yticks(range(len(tasks_b)))
+    ax_jb.set_xticklabels(tasks_b, rotation=25, ha="right")
+    ax_jb.set_yticklabels(tasks_b)
+    ax_jb.set_title(rf"(d) Jaccard of selected keys across prompts ($\alpha={FIXED_ALPHA}$)")
+    for i in range(len(tasks_b)):
+        for j in range(len(tasks_b)):
+            ax_jb.text(j, i, f"{J_prompt[i, j]:.2f}", ha="center", va="center",
+                       color="white" if J_prompt[i, j] > 0.55 else "black", fontsize=10)
 
-    # Shared colorbar on the right
-    fig.subplots_adjust(right=0.88)
-    cbar_ax = fig.add_axes([0.90, 0.17, 0.015, 0.68])
-    fig.colorbar(im_b, cax=cbar_ax, label="Jaccard of selected keys")
+    # Shared colorbar on the right for both heatmaps
+    fig.subplots_adjust(right=0.90)
+    cbar_ax = fig.add_axes([0.92, 0.08, 0.015, 0.40])
+    fig.colorbar(im_b, cax=cbar_ax, label="Jaccard")
 
-    plt.tight_layout(rect=[0, 0, 0.88, 1.0])
     fig.savefig(os.path.join(out_dir, "fig3_selection_varies.pdf"), bbox_inches="tight")
     fig.savefig(os.path.join(out_dir, "fig3_selection_varies.png"), bbox_inches="tight")
     print(f"saved → {out_dir}/fig3_selection_varies.{{pdf,png}}")
