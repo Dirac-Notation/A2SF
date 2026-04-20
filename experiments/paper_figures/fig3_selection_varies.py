@@ -181,9 +181,9 @@ def main():
         density_b.append(hist / hist.sum())
 
     # ── Plot: 2×2, top row line plots, bottom row Jaccard heatmaps ──
-    fig = plt.figure(figsize=(12.5, 8.0))
-    gs = fig.add_gridspec(2, 2, height_ratios=[1.0, 1.15],
-                          hspace=0.45, wspace=0.25)
+    fig = plt.figure(figsize=(15.0, 8.0))
+    gs = fig.add_gridspec(2, 2, height_ratios=[1.0, 1.2],
+                          hspace=0.45, wspace=0.30)
     ax_a = fig.add_subplot(gs[0, 0])
     ax_b = fig.add_subplot(gs[0, 1])
     ax_ja = fig.add_subplot(gs[1, 0])
@@ -239,8 +239,8 @@ def main():
                        color="white" if J_prompt[i, j] > 0.55 else "black", fontsize=10)
 
     # Shared colorbar on the right for both heatmaps
-    fig.subplots_adjust(right=0.90)
-    cbar_ax = fig.add_axes([0.92, 0.08, 0.015, 0.40])
+    fig.subplots_adjust(right=0.92)
+    cbar_ax = fig.add_axes([0.94, 0.08, 0.012, 0.38])
     fig.colorbar(im_b, cax=cbar_ax, label="Jaccard")
 
     fig.savefig(os.path.join(out_dir, "fig3_selection_varies.pdf"), bbox_inches="tight")
