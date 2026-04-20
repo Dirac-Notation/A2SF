@@ -115,25 +115,40 @@ def compute_first_layer_attention(model, tokenizer, text, device):
     return attn[0].float().cpu().numpy(), T
 
 
-def selection_mask(attn, alpha, budget):
+def selection_mask_per_head(attn, alpha, budget):
+    """Per-head top-k selection (matches actual A2SF behavior — each KV head
+    keeps its own top-budget cache). Returns shape (H, T) binary masks."""
     H, T, _ = attn.shape
-    a = attn.sum(axis=0)                               # (T, T) summed across heads
     q = np.arange(T)
-    w = 1.0 / (1.0 + np.exp(-alpha * (q - (T - 1))))
-    score = (w[:, None] * a).sum(axis=0)               # (T,)
-    idx = np.argpartition(-score, budget)[:budget]
-    mask = np.zeros(T, dtype=bool); mask[idx] = True
-    return mask
+    w = 1.0 / (1.0 + np.exp(-alpha * (q - (T - 1))))              # (T,)
+    # score[h, k] = Σ_q w(q) · attn[h, q, k]
+    score = (w[None, :, None] * attn).sum(axis=1)                  # (H, T)
+    masks = np.zeros((H, T), dtype=bool)
+    for h in range(H):
+        idx = np.argpartition(-score[h], budget)[:budget]
+        masks[h, idx] = True
+    return masks                                                   # (H, T)
 
 
-def jaccard_matrix(masks):
-    n = len(masks)
+def jaccard_per_head_mean(masks_a, masks_b):
+    """Mean Jaccard across heads between two per-head selection sets (H, T)."""
+    H = masks_a.shape[0]
+    js = np.empty(H)
+    for h in range(H):
+        inter = np.logical_and(masks_a[h], masks_b[h]).sum()
+        union = np.logical_or(masks_a[h], masks_b[h]).sum()
+        js[h] = inter / max(1, union)
+    return float(js.mean())
+
+
+def jaccard_matrix_from_perhead(masks_list):
+    """masks_list: list of (H, T) per-head masks. Returns matrix of mean
+    per-head Jaccard across each pair."""
+    n = len(masks_list)
     J = np.zeros((n, n))
     for i in range(n):
         for j in range(n):
-            inter = np.logical_and(masks[i], masks[j]).sum()
-            union = np.logical_or(masks[i], masks[j]).sum()
-            J[i, j] = inter / max(1, union)
+            J[i, j] = jaccard_per_head_mean(masks_list[i], masks_list[j])
     return J
 
 
@@ -144,6 +159,15 @@ def resample_to_length(mask, N):
     for i in range(N):
         lo, hi = bins[i], max(bins[i] + 1, bins[i + 1])
         out[i] = mask[lo:hi].any()
+    return out
+
+
+def resample_per_head(masks, N):
+    """masks: (H, T) → (H, N)  position-bin resampling per head."""
+    H = masks.shape[0]
+    out = np.zeros((H, N), dtype=bool)
+    for h in range(H):
+        out[h] = resample_to_length(masks[h], N)
     return out
 
 
@@ -162,47 +186,49 @@ def main():
     prompts = load_one_per_task()
     task_for_a = "Multi-doc QA"
 
-    # (a) alpha-sweep selections, same prompt
+    # (a) alpha-sweep selections, same prompt — PER-HEAD Jaccard, mean over heads
     attn_a, T_a = compute_first_layer_attention(model, tok, prompts[task_for_a], device)
-    masks_a = [selection_mask(attn_a, a, BUDGET) for a in ALPHA_SET]
-    J_alpha = jaccard_matrix(masks_a)
+    masks_a_ph = [selection_mask_per_head(attn_a, a, BUDGET) for a in ALPHA_SET]
+    J_alpha = jaccard_matrix_from_perhead(masks_a_ph)
     print(f"(a) {task_for_a}: T={T_a}; α-J mean off-diag = "
           f"{(J_alpha.sum() - np.trace(J_alpha)) / (len(ALPHA_SET)**2 - len(ALPHA_SET)):.3f}")
 
-    # (b) prompt-sweep at fixed α
+    # (b) prompt-sweep at fixed α — per-head masks resampled to common length
     tasks_b = [t for t in TASK_ORDER if t in prompts]
-    Ts_b, masks_b = [], []
     Nres = 256
+    masks_b_ph = []
     for t in tasks_b:
         attn_b, T_b = compute_first_layer_attention(model, tok, prompts[t], device)
-        m = selection_mask(attn_b, FIXED_ALPHA, BUDGET)
-        Ts_b.append(T_b)
-        masks_b.append(resample_to_length(m, Nres))
-    J_prompt = jaccard_matrix(masks_b)
+        m_ph = selection_mask_per_head(attn_b, FIXED_ALPHA, BUDGET)       # (H, T_b)
+        m_ph_resampled = resample_per_head(m_ph, Nres)                      # (H, Nres)
+        masks_b_ph.append(m_ph_resampled)
+    J_prompt = jaccard_matrix_from_perhead(masks_b_ph)
     print(f"(b) prompt-J mean off-diag = "
           f"{(J_prompt.sum() - np.trace(J_prompt)) / (len(tasks_b)**2 - len(tasks_b)):.3f}")
 
-    # ── Build density curves for line plots ──
+    # ── Build density curves — aggregate over heads (position histogram of union) ──
     NBINS = 30
     # (a) density of selected positions for each α (same prompt)
     density_a = []
-    for m in masks_a:
-        pos = np.where(m)[0] / (T_a - 1)
-        hist, edges = np.histogram(pos, bins=NBINS, range=(0, 1))
-        density_a.append(hist / hist.sum())
+    for mph in masks_a_ph:                                       # (H, T_a)
+        # Position count = sum across heads (how many heads selected each position)
+        counts = mph.sum(axis=0).astype(float)                   # (T_a,)
+        positions = np.arange(T_a) / max(T_a - 1, 1)
+        hist, edges = np.histogram(positions, bins=NBINS, range=(0, 1), weights=counts)
+        density_a.append(hist / (hist.sum() + 1e-12))
     centers = 0.5 * (edges[:-1] + edges[1:])
 
-    # (b) density of selected positions per prompt at fixed α (already masked)
-    # Re-compute from raw masks to preserve prompt-specific T (not the resampled version).
+    # (b) density per prompt at fixed α (aggregate heads similarly)
     density_b = []
     raw_masks_b = []
     for t in tasks_b:
         attn_b, T_b = compute_first_layer_attention(model, tok, prompts[t], device)
-        m = selection_mask(attn_b, FIXED_ALPHA, BUDGET)
-        raw_masks_b.append((t, m, T_b))
-        pos = np.where(m)[0] / (T_b - 1)
-        hist, _ = np.histogram(pos, bins=NBINS, range=(0, 1))
-        density_b.append(hist / hist.sum())
+        m_ph = selection_mask_per_head(attn_b, FIXED_ALPHA, BUDGET)
+        raw_masks_b.append((t, m_ph, T_b))
+        counts = m_ph.sum(axis=0).astype(float)
+        positions = np.arange(T_b) / max(T_b - 1, 1)
+        hist, _ = np.histogram(positions, bins=NBINS, range=(0, 1), weights=counts)
+        density_b.append(hist / (hist.sum() + 1e-12))
 
     # ── Plot: 1×4 horizontal layout with EQUAL panel widths.
     fig = plt.figure(figsize=(15, 3.5))
