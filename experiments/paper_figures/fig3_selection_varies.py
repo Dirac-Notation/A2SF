@@ -182,6 +182,7 @@ def main():
 
     # ── Plot: 1×4 horizontal layout (matches fig1 / fig2 width) ──
     fig, (ax_a, ax_b, ax_ja, ax_jb) = plt.subplots(1, 4, figsize=(15, 3.5))
+    ax_b.sharey(ax_a)                    # panel (a)-(b) share → drop duplicate y
 
     # (a) density vs α
     cmap_a = plt.get_cmap("plasma")
@@ -200,7 +201,7 @@ def main():
     for i, ((t, _, _), dens) in enumerate(zip(raw_masks_b, density_b)):
         ax_b.plot(centers, dens, color=cmap_b[i], lw=2.2, label=t)
     ax_b.set_xlabel("normalized key position")
-    ax_b.set_ylabel("fraction of selected keys")
+    ax_b.tick_params(axis="y", labelleft=False)
     ax_b.set_title(r"(b) varying prompt")
     ax_b.legend(loc="upper left", fontsize=9, framealpha=0.95)
     ax_b.grid(True, alpha=0.3)
@@ -212,8 +213,8 @@ def main():
     ax_ja.set_yticks(range(len(ALPHA_SET)))
     ax_ja.set_xticklabels([f"{a:g}" for a in ALPHA_SET])
     ax_ja.set_yticklabels([f"{a:g}" for a in ALPHA_SET])
-    ax_ja.set_xlabel(r"coefficient  $\alpha$")
-    ax_ja.set_ylabel(r"coefficient  $\alpha$")
+    ax_ja.set_xlabel(r"$\alpha$")
+    ax_ja.set_ylabel(r"$\alpha$")
     ax_ja.set_title(r"(c) Jaccard  (varying $\alpha$)")
     for i in range(len(ALPHA_SET)):
         for j in range(len(ALPHA_SET)):
@@ -235,7 +236,7 @@ def main():
     # Small colorbars attached to each heatmap (not shared, clearer at narrow panels)
     fig.colorbar(im_a, ax=ax_ja, fraction=0.046, pad=0.04)
     fig.colorbar(im_b, ax=ax_jb, fraction=0.046, pad=0.04)
-    plt.tight_layout()
+    plt.tight_layout(w_pad=0.3)
 
     fig.savefig(os.path.join(out_dir, "fig3_selection_varies.pdf"), bbox_inches="tight")
     fig.savefig(os.path.join(out_dir, "fig3_selection_varies.png"), bbox_inches="tight")
