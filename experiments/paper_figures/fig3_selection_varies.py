@@ -190,7 +190,7 @@ def main():
         ax_a.plot(centers, dens, color=col, lw=2.2, label=rf"$\alpha={alpha:g}$")
     ax_a.set_xlabel("normalized key position")
     ax_a.set_ylabel("fraction of selected keys")
-    ax_a.set_title(rf"(a) same prompt, varying $\alpha$")
+    ax_a.set_title(r"(a) varying $\alpha$")
     ax_a.legend(loc="upper left", fontsize=9, framealpha=0.95)
     ax_a.grid(True, alpha=0.3)
     ax_a.set_xlim(0, 1)
@@ -201,7 +201,7 @@ def main():
         ax_b.plot(centers, dens, color=cmap_b[i], lw=2.2, label=t)
     ax_b.set_xlabel("normalized key position")
     ax_b.set_ylabel("fraction of selected keys")
-    ax_b.set_title(rf"(b) fixed $\alpha={FIXED_ALPHA}$, varying prompt")
+    ax_b.set_title(r"(b) varying prompt")
     ax_b.legend(loc="upper left", fontsize=9, framealpha=0.95)
     ax_b.grid(True, alpha=0.3)
     ax_b.set_xlim(0, 1)
@@ -214,7 +214,7 @@ def main():
     ax_ja.set_yticklabels([f"{a:g}" for a in ALPHA_SET])
     ax_ja.set_xlabel(r"coefficient  $\alpha$")
     ax_ja.set_ylabel(r"coefficient  $\alpha$")
-    ax_ja.set_title(r"(c) Jaccard across $\alpha$")
+    ax_ja.set_title(r"(c) Jaccard  (varying $\alpha$)")
     for i in range(len(ALPHA_SET)):
         for j in range(len(ALPHA_SET)):
             ax_ja.text(j, i, f"{J_alpha[i, j]:.2f}", ha="center", va="center",
@@ -226,7 +226,7 @@ def main():
     ax_jb.set_yticks(range(len(tasks_b)))
     ax_jb.set_xticklabels(tasks_b, rotation=25, ha="right")
     ax_jb.set_yticklabels(tasks_b)
-    ax_jb.set_title(rf"(d) Jaccard across prompts ($\alpha={FIXED_ALPHA}$)")
+    ax_jb.set_title(r"(d) Jaccard  (varying prompt)")
     for i in range(len(tasks_b)):
         for j in range(len(tasks_b)):
             ax_jb.text(j, i, f"{J_prompt[i, j]:.2f}", ha="center", va="center",
