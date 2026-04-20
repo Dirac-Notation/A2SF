@@ -188,7 +188,7 @@ def main():
     for i, (alpha, dens) in enumerate(zip(ALPHA_SET, density_a)):
         col = cmap_a(i / max(1, len(ALPHA_SET) - 1))
         ax_a.plot(centers, dens, color=col, lw=2.2, label=rf"$\alpha={alpha:g}$")
-    ax_a.set_xlabel("normalized key position  (0 = oldest, 1 = most recent)")
+    ax_a.set_xlabel("normalized key position")
     ax_a.set_ylabel("fraction of selected keys")
     ax_a.set_title(rf"(a) same prompt, varying $\alpha$")
     ax_a.legend(loc="upper left", fontsize=9, framealpha=0.95)
@@ -199,7 +199,7 @@ def main():
     cmap_b = plt.get_cmap("tab10").colors
     for i, ((t, _, _), dens) in enumerate(zip(raw_masks_b, density_b)):
         ax_b.plot(centers, dens, color=cmap_b[i], lw=2.2, label=t)
-    ax_b.set_xlabel("normalized key position  (0 = oldest, 1 = most recent)")
+    ax_b.set_xlabel("normalized key position")
     ax_b.set_ylabel("fraction of selected keys")
     ax_b.set_title(rf"(b) fixed $\alpha={FIXED_ALPHA}$, varying prompt")
     ax_b.legend(loc="upper left", fontsize=9, framealpha=0.95)
