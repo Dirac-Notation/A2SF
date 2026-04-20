@@ -1,13 +1,14 @@
-"""Figure 1 (Observation 1): Query importance decays with distance.
+"""Figure 1 (Observation 1): Individual query information quality decays with distance.
 
-Pure empirical curve — shows monotonic decrease of the optimal per-position
-coefficient as queries move away from the most recent position.
+For a single query q, we pre-select top-B keys using only that query's attention
+(no accumulation). We then measure the Jaccard overlap between the selected set and
+the ground-truth answer positions. This is stored as `br` (block-hit rate) per sample.
 
-Data: experiments/temporal_bias/plots/<Task>/<Dataset>/metrics.npz
-  - 'oc' (n_samples, W): greedy-optimal per-query weight found by
-    analyze_optimal_coefficient() in optimal.py.
+Here `br[i, d]` = hit rate when using only the query at distance d from the most
+recent position for sample i.
 
-Single panel, overlayed tasks. No fits — those are in Figure 2.
+Large `br` means: that single query's attention accurately points at answer tokens.
+The curve decaying with distance means: older queries carry less accurate signal.
 """
 import os
 import numpy as np
@@ -18,11 +19,12 @@ from scipy.ndimage import uniform_filter1d
 
 rcParams.update({
     "font.family": "serif",
-    "font.size": 13,
-    "axes.labelsize": 14,
-    "xtick.labelsize": 12,
-    "ytick.labelsize": 12,
-    "legend.fontsize": 12,
+    "font.size": 12,
+    "axes.labelsize": 12,
+    "axes.titlesize": 13,
+    "xtick.labelsize": 10,
+    "ytick.labelsize": 10,
+    "legend.fontsize": 10,
     "axes.linewidth": 1.0,
     "figure.dpi": 150,
 })
@@ -37,29 +39,27 @@ TASKS = [
 
 
 def main():
-    fig, ax = plt.subplots(figsize=(6.8, 4.0))
+    fig, axes = plt.subplots(1, 4, figsize=(15, 3.5), sharey=False)
     colors = plt.get_cmap("tab10").colors
 
-    for (path, label), c in zip(TASKS, colors):
+    for ax, ((path, label), c) in zip(axes, zip(TASKS, colors)):
         data = np.load(os.path.join(BASE, path, "metrics.npz"), allow_pickle=True)
-        oc = data["oc"]                                       # (n, W)
-        mean = oc.mean(axis=0)
-        smooth = uniform_filter1d(mean, size=8, mode="nearest")
+        br = data["br"]                                       # (n, W)
+        mean = br.mean(axis=0)
+        smooth = uniform_filter1d(mean, size=6, mode="nearest")
         d = np.arange(len(smooth))
-        # Shaded IQR band for visual of per-sample spread
-        q25 = np.percentile(oc, 25, axis=0)
-        q75 = np.percentile(oc, 75, axis=0)
-        q25s = uniform_filter1d(q25, size=12, mode="nearest")
-        q75s = uniform_filter1d(q75, size=12, mode="nearest")
-        ax.fill_between(d, q25s, q75s, color=c, alpha=0.15)
-        ax.plot(d, smooth, color=c, lw=2.0, label=label)
+        q25 = uniform_filter1d(np.percentile(br, 25, axis=0), size=8, mode="nearest")
+        q75 = uniform_filter1d(np.percentile(br, 75, axis=0), size=8, mode="nearest")
+        ax.fill_between(d, q25, q75, color=c, alpha=0.25, label="IQR across samples")
+        ax.plot(d, smooth, color=c, lw=2.0, label="empirical mean")
+        ax.set_xlabel("distance  $d$")
+        ax.set_title(label, fontsize=12)
+        ax.set_xlim(0, len(smooth) - 1)
+        ax.set_ylim(0.0, None)
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc="upper right", framealpha=0.95)
 
-    ax.set_xlabel("distance from most recent query position")
-    ax.set_ylabel("optimal query weight  $w(q)$")
-    ax.set_xlim(0, 128)
-    ax.set_ylim(-0.02, 1.02)
-    ax.grid(True, alpha=0.3)
-    ax.legend(loc="upper right", framealpha=0.95)
+    axes[0].set_ylabel("single-query hit rate  $\\mathrm{HR}(d)$")
 
     plt.tight_layout()
     out_dir = "/home/smp9898/A2SF/experiments/paper_figures"
