@@ -180,14 +180,8 @@ def main():
         hist, _ = np.histogram(pos, bins=NBINS, range=(0, 1))
         density_b.append(hist / hist.sum())
 
-    # ── Plot: 2×2, top row line plots, bottom row Jaccard heatmaps ──
-    fig = plt.figure(figsize=(15.0, 8.0))
-    gs = fig.add_gridspec(2, 2, height_ratios=[1.0, 1.2],
-                          hspace=0.45, wspace=0.30)
-    ax_a = fig.add_subplot(gs[0, 0])
-    ax_b = fig.add_subplot(gs[0, 1])
-    ax_ja = fig.add_subplot(gs[1, 0])
-    ax_jb = fig.add_subplot(gs[1, 1])
+    # ── Plot: 1×4 horizontal layout (matches fig1 / fig2 width) ──
+    fig, (ax_a, ax_b, ax_ja, ax_jb) = plt.subplots(1, 4, figsize=(15, 3.5))
 
     # (a) density vs α
     cmap_a = plt.get_cmap("plasma")
@@ -220,7 +214,7 @@ def main():
     ax_ja.set_yticklabels([f"{a:g}" for a in ALPHA_SET])
     ax_ja.set_xlabel(r"coefficient  $\alpha$")
     ax_ja.set_ylabel(r"coefficient  $\alpha$")
-    ax_ja.set_title(r"(c) Jaccard of selected keys across $\alpha$")
+    ax_ja.set_title(r"(c) Jaccard across $\alpha$")
     for i in range(len(ALPHA_SET)):
         for j in range(len(ALPHA_SET)):
             ax_ja.text(j, i, f"{J_alpha[i, j]:.2f}", ha="center", va="center",
@@ -232,16 +226,16 @@ def main():
     ax_jb.set_yticks(range(len(tasks_b)))
     ax_jb.set_xticklabels(tasks_b, rotation=25, ha="right")
     ax_jb.set_yticklabels(tasks_b)
-    ax_jb.set_title(rf"(d) Jaccard of selected keys across prompts ($\alpha={FIXED_ALPHA}$)")
+    ax_jb.set_title(rf"(d) Jaccard across prompts ($\alpha={FIXED_ALPHA}$)")
     for i in range(len(tasks_b)):
         for j in range(len(tasks_b)):
             ax_jb.text(j, i, f"{J_prompt[i, j]:.2f}", ha="center", va="center",
                        color="white" if J_prompt[i, j] > 0.55 else "black", fontsize=10)
 
-    # Shared colorbar on the right for both heatmaps
-    fig.subplots_adjust(right=0.92)
-    cbar_ax = fig.add_axes([0.94, 0.08, 0.012, 0.38])
-    fig.colorbar(im_b, cax=cbar_ax, label="Jaccard")
+    # Small colorbars attached to each heatmap (not shared, clearer at narrow panels)
+    fig.colorbar(im_a, ax=ax_ja, fraction=0.046, pad=0.04)
+    fig.colorbar(im_b, ax=ax_jb, fraction=0.046, pad=0.04)
+    plt.tight_layout()
 
     fig.savefig(os.path.join(out_dir, "fig3_selection_varies.pdf"), bbox_inches="tight")
     fig.savefig(os.path.join(out_dir, "fig3_selection_varies.png"), bbox_inches="tight")
