@@ -180,9 +180,15 @@ def main():
         hist, _ = np.histogram(pos, bins=NBINS, range=(0, 1))
         density_b.append(hist / hist.sum())
 
-    # ── Plot: 1×4 horizontal layout (matches fig1 / fig2 width) ──
-    fig, (ax_a, ax_b, ax_ja, ax_jb) = plt.subplots(1, 4, figsize=(15, 3.5))
-    ax_b.sharey(ax_a)                    # panel (a)-(b) share → drop duplicate y
+    # ── Plot: 1×4 horizontal layout with EQUAL panel widths.
+    # Build gridspec so every subplot cell has the exact same width.
+    fig = plt.figure(figsize=(15, 3.5))
+    gs = fig.add_gridspec(1, 4, wspace=0.35, left=0.05, right=0.98,
+                          bottom=0.20, top=0.88)
+    ax_a = fig.add_subplot(gs[0, 0])
+    ax_b = fig.add_subplot(gs[0, 1])
+    ax_ja = fig.add_subplot(gs[0, 2])
+    ax_jb = fig.add_subplot(gs[0, 3])
 
     # (a) density vs α
     cmap_a = plt.get_cmap("plasma")
@@ -201,7 +207,6 @@ def main():
     for i, ((t, _, _), dens) in enumerate(zip(raw_masks_b, density_b)):
         ax_b.plot(centers, dens, color=cmap_b[i], lw=2.2, label=t)
     ax_b.set_xlabel("normalized key position")
-    ax_b.tick_params(axis="y", labelleft=False)
     ax_b.set_title(r"(b) varying prompt")
     ax_b.legend(loc="upper left", fontsize=9, framealpha=0.95)
     ax_b.grid(True, alpha=0.3)
@@ -233,10 +238,10 @@ def main():
             ax_jb.text(j, i, f"{J_prompt[i, j]:.2f}", ha="center", va="center",
                        color="white" if J_prompt[i, j] > 0.55 else "black", fontsize=10)
 
-    # Small colorbars attached to each heatmap (not shared, clearer at narrow panels)
-    fig.colorbar(im_a, ax=ax_ja, fraction=0.046, pad=0.04)
-    fig.colorbar(im_b, ax=ax_jb, fraction=0.046, pad=0.04)
-    plt.tight_layout(w_pad=0.3)
+    # Single shared colorbar at far right — keeps all 4 panels equal-width.
+    fig.subplots_adjust(right=0.92)
+    cbar_ax = fig.add_axes([0.935, 0.22, 0.010, 0.63])
+    fig.colorbar(im_b, cax=cbar_ax, label="Jaccard")
 
     fig.savefig(os.path.join(out_dir, "fig3_selection_varies.pdf"), bbox_inches="tight")
     fig.savefig(os.path.join(out_dir, "fig3_selection_varies.png"), bbox_inches="tight")
