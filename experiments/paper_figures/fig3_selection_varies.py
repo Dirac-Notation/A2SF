@@ -237,9 +237,7 @@ def main():
     # Small colorbars attached to each heatmap (not shared, clearer at narrow panels)
     fig.colorbar(im_a, ax=ax_ja, fraction=0.046, pad=0.04)
     fig.colorbar(im_b, ax=ax_jb, fraction=0.046, pad=0.04)
-    plt.tight_layout()
-    # Tighten column spacing between panels 1-2 and 2-3
-    fig.subplots_adjust(wspace=0.18)
+    plt.tight_layout(w_pad=0.5)
 
     fig.savefig(os.path.join(out_dir, "fig3_selection_varies.pdf"), bbox_inches="tight")
     fig.savefig(os.path.join(out_dir, "fig3_selection_varies.png"), bbox_inches="tight")
