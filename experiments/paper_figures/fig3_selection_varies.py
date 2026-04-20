@@ -164,37 +164,98 @@ def main():
         panel_b_data.append((t, mask, T_b))
         print(f"Panel (b) task={t} T={T_b} selected={mask.sum()}")
 
-    # ─── Plot ───
-    fig, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(15, 4.2),
-                                      gridspec_kw={"width_ratios": [1.0, 1.0]})
+    # ─── Plot — density curves per row, then Jaccard heatmap to drive the point home ───
+    fig = plt.figure(figsize=(15, 8.4))
+    gs = fig.add_gridspec(2, 2, height_ratios=[1.0, 1.0])
+    ax_a = fig.add_subplot(gs[0, 0])
+    ax_b = fig.add_subplot(gs[0, 1])
+    ax_ja = fig.add_subplot(gs[1, 0])
+    ax_jb = fig.add_subplot(gs[1, 1])
 
-    # Panel (a) heatmap — rows: α, cols: position (normalized)
-    cmap = ListedColormap(["white", "tab:blue"])
-    ax_a.imshow(panel_a, aspect="auto", cmap=cmap, vmin=0, vmax=1,
-                extent=[0, 1, len(ALPHA_SWEEP), 0])
-    ax_a.set_yticks(np.arange(len(ALPHA_SWEEP)) + 0.5)
-    ax_a.set_yticklabels([f"{a:g}" for a in ALPHA_SWEEP])
+    NBINS = 40
+    cmap_a = plt.get_cmap("plasma")
+
+    # Panel (a) density of selected positions per α
+    for i, alpha in enumerate(ALPHA_SWEEP):
+        mask = panel_a[i]
+        pos = np.where(mask)[0] / (T_a - 1)                     # normalized [0, 1]
+        hist, edges = np.histogram(pos, bins=NBINS, range=(0, 1))
+        centers = 0.5 * (edges[:-1] + edges[1:])
+        color = cmap_a(i / max(1, len(ALPHA_SWEEP) - 1))
+        ax_a.plot(centers, hist / hist.sum(), color=color, lw=2.0,
+                  label=rf"$\alpha={alpha:g}$")
     ax_a.set_xlabel("normalized key position  (0 = oldest, 1 = most recent)")
-    ax_a.set_ylabel(r"coefficient  $\alpha$")
+    ax_a.set_ylabel("fraction of selected keys")
     ax_a.set_title(f"(a) one prompt ({panel_a_prompt_task}), varying $\\alpha$")
+    ax_a.legend(loc="upper left", fontsize=9, ncol=2, framealpha=0.95)
+    ax_a.grid(True, alpha=0.3)
 
-    # Panel (b) heatmap — rows: prompt, cols: position (normalized)
-    # Need to handle different T for each prompt → resample to common N bins
-    N = 256
-    panel_b_plot = np.zeros((len(panel_b_data), N), dtype=float)
-    for i, (_, mask, T) in enumerate(panel_b_data):
-        # bin N bins
-        bins = np.linspace(0, T, N + 1).astype(int)
-        for j in range(N):
-            lo, hi = bins[j], max(bins[j] + 1, bins[j + 1])
-            panel_b_plot[i, j] = mask[lo:hi].mean() if hi > lo else 0.0
-    ax_b.imshow(panel_b_plot, aspect="auto", cmap="Blues", vmin=0, vmax=1,
-                extent=[0, 1, len(panel_b_data), 0])
-    ax_b.set_yticks(np.arange(len(panel_b_data)) + 0.5)
-    ax_b.set_yticklabels([t for t, _, _ in panel_b_data])
+    # Panel (b) density per prompt at fixed α
+    cmap_b = plt.get_cmap("tab10")
+    for i, (task, mask, T) in enumerate(panel_b_data):
+        pos = np.where(mask)[0] / (T - 1)
+        hist, edges = np.histogram(pos, bins=NBINS, range=(0, 1))
+        centers = 0.5 * (edges[:-1] + edges[1:])
+        ax_b.plot(centers, hist / hist.sum(), color=cmap_b(i), lw=2.0,
+                  label=task)
     ax_b.set_xlabel("normalized key position  (0 = oldest, 1 = most recent)")
-    ax_b.set_ylabel("prompt")
+    ax_b.set_ylabel("fraction of selected keys")
     ax_b.set_title(f"(b) fixed $\\alpha={FIXED_ALPHA}$, varying prompt")
+    ax_b.legend(loc="upper left", fontsize=9, framealpha=0.95)
+    ax_b.grid(True, alpha=0.3)
+
+    # Panel (c): Jaccard similarity between α-selections (same prompt)
+    n_a = len(ALPHA_SWEEP)
+    jaccard_a = np.zeros((n_a, n_a))
+    for i in range(n_a):
+        for j in range(n_a):
+            inter = np.logical_and(panel_a[i], panel_a[j]).sum()
+            union = np.logical_or(panel_a[i], panel_a[j]).sum()
+            jaccard_a[i, j] = inter / max(1, union)
+    im = ax_ja.imshow(jaccard_a, cmap="viridis", vmin=0, vmax=1)
+    ax_ja.set_xticks(range(n_a))
+    ax_ja.set_xticklabels([f"{a:g}" for a in ALPHA_SWEEP], fontsize=9)
+    ax_ja.set_yticks(range(n_a))
+    ax_ja.set_yticklabels([f"{a:g}" for a in ALPHA_SWEEP], fontsize=9)
+    ax_ja.set_xlabel(r"$\alpha$")
+    ax_ja.set_ylabel(r"$\alpha$")
+    ax_ja.set_title("(c) Jaccard of selections across $\\alpha$ (same prompt)")
+    for i in range(n_a):
+        for j in range(n_a):
+            ax_ja.text(j, i, f"{jaccard_a[i, j]:.2f}", ha="center", va="center",
+                       color="white" if jaccard_a[i, j] < 0.5 else "black", fontsize=8)
+    plt.colorbar(im, ax=ax_ja, fraction=0.046, pad=0.04)
+
+    # Panel (d): Jaccard between prompts at same α — since prompt lengths differ,
+    # resample each mask to a common length first.
+    Nres = 256
+    resampled = []
+    for _, mask, T in panel_b_data:
+        bins = np.linspace(0, T, Nres + 1).astype(int)
+        out = np.zeros(Nres, dtype=bool)
+        for j in range(Nres):
+            lo, hi = bins[j], max(bins[j] + 1, bins[j + 1])
+            out[j] = mask[lo:hi].any()
+        resampled.append(out)
+    nb = len(resampled)
+    jaccard_b = np.zeros((nb, nb))
+    for i in range(nb):
+        for j in range(nb):
+            inter = np.logical_and(resampled[i], resampled[j]).sum()
+            union = np.logical_or(resampled[i], resampled[j]).sum()
+            jaccard_b[i, j] = inter / max(1, union)
+    im2 = ax_jb.imshow(jaccard_b, cmap="viridis", vmin=0, vmax=1)
+    labels_b = [t for t, _, _ in panel_b_data]
+    ax_jb.set_xticks(range(nb))
+    ax_jb.set_xticklabels(labels_b, rotation=30, ha="right", fontsize=9)
+    ax_jb.set_yticks(range(nb))
+    ax_jb.set_yticklabels(labels_b, fontsize=9)
+    ax_jb.set_title(f"(d) Jaccard of selections across prompts (same $\\alpha={FIXED_ALPHA}$)")
+    for i in range(nb):
+        for j in range(nb):
+            ax_jb.text(j, i, f"{jaccard_b[i, j]:.2f}", ha="center", va="center",
+                       color="white" if jaccard_b[i, j] < 0.5 else "black", fontsize=9)
+    plt.colorbar(im2, ax=ax_jb, fraction=0.046, pad=0.04)
 
     plt.tight_layout()
     fig.savefig(os.path.join(out_dir, "fig3_selection_varies.pdf"), bbox_inches="tight")
