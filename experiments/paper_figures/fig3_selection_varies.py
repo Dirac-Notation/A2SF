@@ -182,8 +182,6 @@ def main():
 
     # ── Plot: 1×4 horizontal layout (matches fig1 / fig2 width) ──
     fig, (ax_a, ax_b, ax_ja, ax_jb) = plt.subplots(1, 4, figsize=(15, 3.5))
-    # Share y-axis between the two line panels so (b) can drop its ylabel
-    ax_b.sharey(ax_a)
 
     # (a) density vs α
     cmap_a = plt.get_cmap("plasma")
@@ -202,7 +200,7 @@ def main():
     for i, ((t, _, _), dens) in enumerate(zip(raw_masks_b, density_b)):
         ax_b.plot(centers, dens, color=cmap_b[i], lw=2.2, label=t)
     ax_b.set_xlabel("normalized key position")
-    ax_b.tick_params(axis="y", which="both", left=True, labelleft=False)
+    ax_b.set_ylabel("fraction of selected keys")
     ax_b.set_title(r"(b) varying prompt")
     ax_b.legend(loc="upper left", fontsize=9, framealpha=0.95)
     ax_b.grid(True, alpha=0.3)
@@ -237,7 +235,7 @@ def main():
     # Small colorbars attached to each heatmap (not shared, clearer at narrow panels)
     fig.colorbar(im_a, ax=ax_ja, fraction=0.046, pad=0.04)
     fig.colorbar(im_b, ax=ax_jb, fraction=0.046, pad=0.04)
-    plt.tight_layout(w_pad=0.5)
+    plt.tight_layout()
 
     fig.savefig(os.path.join(out_dir, "fig3_selection_varies.pdf"), bbox_inches="tight")
     fig.savefig(os.path.join(out_dir, "fig3_selection_varies.png"), bbox_inches="tight")
