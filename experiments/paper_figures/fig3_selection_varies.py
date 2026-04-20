@@ -41,23 +41,47 @@ MODEL_PATH = "meta-llama/Llama-3.2-1B-Instruct"
 BUDGET = 128
 ALPHA_SET = [0.0, 0.001, 0.01, 0.1, 1.0]       # 5 representative values
 FIXED_ALPHA = 0.01
-DATA_FILE = "/home/smp9898/A2SF/RL/training/1b_fix_exp_aug4/training_data_backup.jsonl"
-TASK_ORDER = ["Single-doc QA", "Multi-doc QA", "Summarization", "Few Shot"]
+
+# ── Unified prompt selection (matches optimal.py used by fig1/fig2) ──
+# Load LongBench directly, same filter (LENGTH_MIN=2000, LENGTH_MAX=6000), same
+# seed (42) + random.sample(pool, 10).  We take index 0 for each task, so the
+# specific prompt Fig 3 visualises is a member of the same sample pool that
+# fig1/fig2 aggregate over.
+SEED = 42
+LENGTH_MIN, LENGTH_MAX = 2000, 6000
+LONGBENCH_DIR = "/home/smp9898/A2SF/datasets/longbench"
+TASK_TO_DATASET = {
+    "Single-doc QA": "qasper",
+    "Multi-doc QA": "hotpotqa",
+    "Summarization": "gov_report",
+    "Few Shot": "samsum",
+}
+TASK_ORDER = list(TASK_TO_DATASET.keys())
 
 
 def load_one_per_task():
+    """Match the prompt selection used in experiments/temporal_bias/optimal.py.
+
+    Same LongBench source + LENGTH_MIN/MAX filter + seed=42 + random.sample(10)[0].
+    """
+    import random as _random
+    import os as _os
+    pools = {}
+    for fname in _os.listdir(LONGBENCH_DIR):
+        with open(_os.path.join(LONGBENCH_DIR, fname)) as f:
+            for line in f:
+                item = json.loads(line)
+                length = item.get("length", 0)
+                if LENGTH_MIN <= length <= LENGTH_MAX:
+                    pools.setdefault(item["dataset"], []).append(item["input_prompt"])
+
     per_task = {}
-    with open(DATA_FILE) as f:
-        for line in f:
-            r = json.loads(line)
-            t = str(r.get("task_type"))
-            if t not in TASK_ORDER or t in per_task:
-                continue
-            txt = r.get("input_prompt", "")
-            if 2000 <= len(txt) <= 12000:
-                per_task[t] = txt
-            if len(per_task) == len(TASK_ORDER):
-                break
+    for task_name, dset in TASK_TO_DATASET.items():
+        if dset not in pools:
+            continue
+        _random.seed(SEED)
+        sample = _random.sample(pools[dset], min(10, len(pools[dset])))
+        per_task[task_name] = sample[0]
     return per_task
 
 
