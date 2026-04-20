@@ -181,9 +181,8 @@ def main():
         density_b.append(hist / hist.sum())
 
     # ── Plot: 1×4 horizontal layout with EQUAL panel widths.
-    # Build gridspec so every subplot cell has the exact same width.
     fig = plt.figure(figsize=(15, 3.5))
-    gs = fig.add_gridspec(1, 4, wspace=0.35, left=0.05, right=0.98,
+    gs = fig.add_gridspec(1, 4, wspace=0.22, left=0.05, right=0.98,
                           bottom=0.20, top=0.88)
     ax_a = fig.add_subplot(gs[0, 0])
     ax_b = fig.add_subplot(gs[0, 1])
@@ -238,10 +237,7 @@ def main():
             ax_jb.text(j, i, f"{J_prompt[i, j]:.2f}", ha="center", va="center",
                        color="white" if J_prompt[i, j] > 0.55 else "black", fontsize=10)
 
-    # Single shared colorbar at far right — keeps all 4 panels equal-width.
-    fig.subplots_adjust(right=0.92)
-    cbar_ax = fig.add_axes([0.935, 0.22, 0.010, 0.63])
-    fig.colorbar(im_b, cax=cbar_ax, label="Jaccard")
+    # No colorbar — text annotations carry the values.
 
     fig.savefig(os.path.join(out_dir, "fig3_selection_varies.pdf"), bbox_inches="tight")
     fig.savefig(os.path.join(out_dir, "fig3_selection_varies.png"), bbox_inches="tight")
