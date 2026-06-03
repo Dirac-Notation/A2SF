@@ -1,17 +1,17 @@
 import torch
 
-from .base import CompressionPolicy
+from .base import Scorer
 
 
-class SnapPolicy(CompressionPolicy):
+class SnapScorer(Scorer):
     """SnapKV: only queries inside the observation window contribute to scores."""
 
-    def __init__(self, num_key_value_heads, total_budget, observation_window, recent_budget=16):
-        super().__init__(num_key_value_heads, total_budget, recent_budget)
+    def __init__(self, num_key_value_heads: int, observation_window: int):
+        super().__init__(num_key_value_heads)
         self.observation_window = int(observation_window)
         self._observation_start = 0
 
-    def prepare_prefill(self, seq_len_q, device, dtype):
+    def prepare_prefill(self, seq_len_q, device, dtype, **kwargs):
         self._observation_start = max(0, seq_len_q - self.observation_window)
 
     def get_query_weights(self, q_start, q_end, device, dtype):
@@ -21,6 +21,3 @@ class SnapPolicy(CompressionPolicy):
         if local_start < qb:
             w[local_start:] = 1.0
         return w
-
-    def select(self, scores, seq_len_k):
-        return self._topk_with_recent(scores, seq_len_k)

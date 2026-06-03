@@ -1,10 +1,9 @@
 """KV storage with optional compression hooks.
 
-This class is a thin HF `Cache` implementation. It owns the K/V tensors and the
-per-layer compression policies, but it does NOT run attention. The model's
-attention layer calls `cache.update()` to append new K/V, then runs
+Owns the K/V tensors, the per-layer Scorer list, and a single Selector. The
+model's attention layer calls `cache.update()` to append new K/V, then runs
 `compressed_attention(...)` from `attention.py`, then optionally calls
-`cache.compress(layer_idx, indices)` to drop unselected tokens.
+`cache.compress(layer_idx, scores, seq_len_k)` to drop unselected tokens.
 
 The cache reports a *logical* sequence length (the absolute number of tokens
 seen) so position ids keep advancing even after physical KV tensors shrink.
@@ -14,8 +13,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 from transformers.cache_utils import Cache
 
-from .policies import build_policies
-from .policies.base import CompressionPolicy
+from .scorers import build_scorers, Scorer
+from .selectors import build_selector, Selector
 
 
 class CompressedKVCache(Cache):
@@ -36,10 +35,14 @@ class CompressedKVCache(Cache):
             if getattr(config, "num_key_value_heads", None) is None
             else config.num_key_value_heads
         )
-        self.policies: Optional[List[CompressionPolicy]] = build_policies(
+        self.scorers: Optional[List[Scorer]] = build_scorers(
             compression_config=compression_config,
             num_layers=config.num_hidden_layers,
             num_kv_heads=num_kv_heads,
+        )
+        self.selector: Optional[Selector] = build_selector(
+            compression_config=compression_config,
+            num_layers=config.num_hidden_layers,
         )
 
     # ---- HF Cache interface ----
@@ -56,7 +59,6 @@ class CompressedKVCache(Cache):
         return self.key_cache[layer_idx], self.value_cache[layer_idx]
 
     def get_seq_length(self, layer_idx: Optional[int] = 0) -> int:
-        # Logical (un-compressed) length, used for position ids.
         return self._seen_tokens
 
     def get_max_cache_shape(self) -> Optional[int]:
@@ -96,23 +98,44 @@ class CompressedKVCache(Cache):
             )
         return self.key_cache[layer_idx], self.value_cache[layer_idx]
 
-    def compress(self, layer_idx: int, selected_indices: Optional[torch.Tensor]) -> None:
-        if selected_indices is None:
+    def compress(
+        self,
+        layer_idx: int,
+        scores: Optional[torch.Tensor],
+        seq_len_k: Optional[int] = None,
+    ) -> None:
+        """Run selection on the given accumulated scores and gather KV tensors.
+
+        scores: (B, num_kv, seq_len_k) fp32 or None. Score-free selectors
+            (e.g. OracleSelector or LIR follower layers) are still invoked
+            when scores is None so they can apply their own selection logic.
+        seq_len_k: defaults to scores.shape[-1] when not given.
+        """
+        if self.selector is None:
             return
         if layer_idx >= len(self.key_cache) or self.key_cache[layer_idx] is None:
             return
+        if seq_len_k is None:
+            seq_len_k = (
+                scores.shape[-1]
+                if scores is not None
+                else self.key_cache[layer_idx].shape[-2]
+            )
+        indices = self.selector.select(layer_idx, scores, seq_len_k)
+        if indices is None:
+            return
         key = self.key_cache[layer_idx]
         value = self.value_cache[layer_idx]
-        gather_idx = selected_indices.to(key.device)
+        gather_idx = indices.to(key.device)
         gather_idx = gather_idx.unsqueeze(-1).expand(-1, -1, -1, key.size(-1))
         self.key_cache[layer_idx] = key.gather(dim=2, index=gather_idx)
         self.value_cache[layer_idx] = value.gather(dim=2, index=gather_idx)
 
-    # ---- policy access ----
-    def get_policy(self, layer_idx: int) -> Optional[CompressionPolicy]:
-        if self.policies is None:
+    # ---- access ----
+    def get_scorer(self, layer_idx: int) -> Optional[Scorer]:
+        if self.scorers is None:
             return None
-        return self.policies[layer_idx]
+        return self.scorers[layer_idx]
 
 
 __all__ = ["CompressedKVCache"]

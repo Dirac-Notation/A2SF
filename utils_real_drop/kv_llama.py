@@ -133,15 +133,21 @@ class LlamaAttention(nn.Module):
         if attention_mask is not None and attention_mask.dim() == 4:
             causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
         
-        policy = cache.get_policy(self.layer_idx) if cache is not None else None
-        attn_output, selected = compressed_attention(
+        scorer = cache.get_scorer(self.layer_idx) if cache is not None else None
+        selector = cache.selector if cache is not None else None
+        # LIR: follower layers skip score accumulation entirely; their compression
+        # uses indices cached from the group's leader.
+        if selector is not None and not selector.needs_scores(self.layer_idx):
+            scorer = None
+        attn_output, scores = compressed_attention(
             query_states, key_states, value_states,
-            policy=policy,
+            scorer=scorer,
             attn_mask=causal_mask,
             head_dim=self.head_dim,
         )
-        if cache is not None and selected is not None:
-            cache.compress(self.layer_idx, selected)
+        is_prefill = query_states.size(-2) > 1
+        if cache is not None and selector is not None and is_prefill:
+            cache.compress(self.layer_idx, scores, seq_len_k=key_states.size(-2))
 
         attn_output = attn_output.transpose(1, 2).contiguous()
 
