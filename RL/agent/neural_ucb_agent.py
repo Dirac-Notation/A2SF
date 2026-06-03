@@ -52,17 +52,33 @@ class NeuralUCBAgent(nn.Module):
         backbone_depth: int = 2,
         dropout: float = 0.0,
         num_task_types: int = 0,
+        paired_actions: bool = False,
+        num_hidden_pool: int = 0,
+        task_cond_head: bool = False,
+        task_head_mlp: bool = False,
+        task_head_hidden: int = 0,
+        output_activation: str = "sigmoid",
+        num_views: int = 2,            # 2 = legacy tova+snap, 1 = single mini-attn view
+        include_seq_len: bool = True,  # if False, state has no seq_len scalar prefix
     ):
         super().__init__()
         self.backbone_depth = int(backbone_depth)
         self.dropout_p = float(dropout)
         self.num_task_types = int(num_task_types)
+        self.paired_actions = bool(paired_actions)
+        # "sigmoid" -> reward_pred ∈ [0, 1] (matches non-normalised rewards)
+        # "linear"  -> raw logits (use with z-scored / signed targets)
+        self.output_activation = str(output_activation)
         # Discrete action space: (a, b) pairs for sigmoid cache
         self.register_buffer("a_values", a_values)
         self.register_buffer("b_values", b_values)
         self.num_a_values = len(a_values)
         self.num_b_values = len(b_values)
-        self.num_actions = self.num_a_values * self.num_b_values
+        if self.paired_actions:
+            assert self.num_a_values == self.num_b_values
+            self.num_actions = self.num_a_values
+        else:
+            self.num_actions = self.num_a_values * self.num_b_values
 
         self.lambda_reg = 5 * self.num_actions
         self.state_dim = int(state_dim)
@@ -80,30 +96,47 @@ class NeuralUCBAgent(nn.Module):
 
         self.feature_dim = 256
         self.num_bins = self.side_dim // self.num_heads
-        meta_dim = 1 + self.num_metric_types + self.num_task_types  # seq_len + metric + task
+        self.num_hidden_pool = int(num_hidden_pool)
+        # (1 if seq_len) + metric + task + optional hidden_pool (from encoder.include_hidden_pool)
+        self.include_seq_len = bool(include_seq_len)
+        meta_dim = (1 if self.include_seq_len else 0) + self.num_metric_types + self.num_task_types + self.num_hidden_pool
         self._meta_dim = meta_dim
 
+        # Set num_views first (used by LayerNorm setup below).
+        self.num_views = int(num_views)
+        if self.num_views not in (1, 2):
+            raise ValueError(f"num_views must be 1 or 2, got {self.num_views}")
+
         # Stage 1: bin별 독립 weight로 H heads → 1 합침
-        # weight shape: (num_bins, num_heads) — 각 bin 위치마다 고유한 head 결합 가중치
+        # weight shape: (num_bins, num_heads). Champion init.
         self.head_merge = nn.Parameter(torch.randn(self.num_bins, self.num_heads) * 0.01)
 
         # Stage 2: (num_bins,) → Linear(num_bins, 256) → (256,)
         self.side_reduce = nn.Linear(self.num_bins, self.feature_dim)
 
-        # Stage 3: cat(tova_256, snap_256, meta) → Linear → 512
-        concat_dim = self.feature_dim * 2 + meta_dim
+        # Stage 3: cat(view emb × num_views, meta) → Linear → 512
+        concat_dim = self.feature_dim * self.num_views + meta_dim
         self.embed_proj = nn.Sequential(
             nn.Linear(concat_dim, self.feature_dim * 2),
             nn.ReLU(),
         )
 
-        # Backbone: configurable depth of (linear + activation + dropout) with residual for depth>=2
+        # Backbone: depth ≥ 2 uses MLPResidualBlock (skip connections). Depth = 1 is a
+        # plain linear+ReLU for legacy parity. Previous code declared residual but was
+        # actually Sequential (no skip); now correctly uses MLPResidualBlock.
         layers: List[nn.Module] = []
-        for _ in range(max(1, self.backbone_depth)):
+        if self.backbone_depth <= 1:
             layers.append(nn.Linear(self.feature_dim * 2, self.feature_dim * 2))
             layers.append(nn.ReLU())
             if self.dropout_p > 0.0:
                 layers.append(nn.Dropout(self.dropout_p))
+        else:
+            for _ in range(self.backbone_depth):
+                layers.append(MLPResidualBlock(
+                    dim=self.feature_dim * 2,
+                    hidden_dim=self.feature_dim * 2,
+                    dropout=self.dropout_p,
+                ))
         self.backbone = nn.Sequential(*layers)
 
         # Backbone output dim
@@ -116,6 +149,32 @@ class NeuralUCBAgent(nn.Module):
                 for metric_name in self.metric_heads
             }
         )
+
+        # Task-conditional output head: additional per-task (num_task_types) linear
+        # that produces a residual correction on top of the per-metric head. Task
+        # identity is read from the task one-hot in state's meta section.
+        self.task_cond_head = bool(task_cond_head)
+        self.task_head_mlp = bool(task_head_mlp)
+        self.task_head_hidden = int(task_head_hidden) if task_head_hidden > 0 else self.backbone_out_dim
+        if self.task_cond_head:
+            n_slots = max(1, self.num_task_types)
+            if self.task_head_mlp:
+                self.task_heads = nn.ModuleList([
+                    nn.Sequential(
+                        nn.Linear(self.backbone_out_dim, self.task_head_hidden),
+                        nn.ReLU(),
+                        nn.Dropout(self.dropout_p) if self.dropout_p > 0 else nn.Identity(),
+                        nn.Linear(self.task_head_hidden, self.num_actions),
+                    )
+                    for _ in range(n_slots)
+                ])
+            else:
+                self.task_heads = nn.ModuleList([
+                    nn.Linear(self.backbone_out_dim, self.num_actions)
+                    for _ in range(n_slots)
+                ])
+        else:
+            self.task_heads = None
 
         # Per-metric, per-action inverse covariance (Neural-Linear uncertainty).
         eye = torch.eye(self.backbone_out_dim, device=a_values.device)
@@ -144,22 +203,23 @@ class NeuralUCBAgent(nn.Module):
         meta_dim = self._meta_dim
         meta = state[:, :meta_dim]                                # (B, 1+M+T)
         tova_flat = state[:, meta_dim:meta_dim + self.side_dim]   # (B, H*num_bins)
-        snap_flat = state[:, meta_dim + self.side_dim:]           # (B, H*num_bins)
-
-        # [B, H*num_bins] → [B, num_bins, H]
         tova = tova_flat.reshape(B, self.num_heads, self.num_bins).permute(0, 2, 1)
-        snap = snap_flat.reshape(B, self.num_heads, self.num_bins).permute(0, 2, 1)
+        tova_merged = torch.einsum("bnh,nh->bn", tova, self.head_merge)
+        tova_emb = torch.relu(self.side_reduce(tova_merged))      # (B, feature_dim)
 
-        # bin별 독립 weight로 H heads 합침: einsum("bnh,nh->bn", ...)
-        tova_merged = torch.einsum("bnh,nh->bn", tova, self.head_merge)  # (B, num_bins)
-        snap_merged = torch.einsum("bnh,nh->bn", snap, self.head_merge)  # (B, num_bins)
+        if self.num_views == 2:
+            snap_flat = state[:, meta_dim + self.side_dim:]
+            snap = snap_flat.reshape(B, self.num_heads, self.num_bins).permute(0, 2, 1)
+            snap_merged = torch.einsum("bnh,nh->bn", snap, self.head_merge)
+            snap_emb = torch.relu(self.side_reduce(snap_merged)) # (B, feature_dim)
+        else:
+            snap_emb = None
 
-        # (num_bins,) → Linear → (256,)
-        tova_emb = torch.relu(self.side_reduce(tova_merged))  # (B, 256)
-        snap_emb = torch.relu(self.side_reduce(snap_merged))  # (B, 256)
-
-        combined = torch.cat([tova_emb, snap_emb, meta], dim=-1)  # (B, 256+256+meta_dim)
-        return self.embed_proj(combined)  # (B, 512)
+        if snap_emb is not None:
+            combined = torch.cat([tova_emb, snap_emb, meta], dim=-1)
+        else:
+            combined = torch.cat([tova_emb, meta], dim=-1)        # single-view: just one
+        return self.embed_proj(combined)  # (B, feature_dim*2)
 
     def _resolve_metric_type_for_batch(
         self,
@@ -185,6 +245,18 @@ class NeuralUCBAgent(nn.Module):
         key = self._head_key(metric_name)
         return int(self.metric_name_to_idx[key])
 
+    @property
+    def head_route_by(self) -> str:
+        return "metric"
+
+    def _head_idx_for_state(self, state, metric_type=None):
+        """Returns per-sample head index tensor (B,) for inverse_lambdas indexing.
+        For NeuralUCBAgent, head_route_by is always 'metric'."""
+        keys = self._resolve_metric_type_for_batch(metric_type, state.size(0))
+        keys = [self._head_key(k) for k in keys]
+        return torch.tensor([self.metric_name_to_idx[k] for k in keys],
+                            device=state.device, dtype=torch.long)
+
     def forward(
         self,
         state: torch.Tensor,
@@ -204,15 +276,35 @@ class NeuralUCBAgent(nn.Module):
         metric_types = self._resolve_metric_type_for_batch(metric_type, state.size(0))
         resolved_keys = [self._head_key(m) for m in metric_types]
 
-        reward_pred = torch.empty(
+        # Pre-compute logits from metric head
+        metric_logits = torch.empty(
             state.size(0), self.num_actions, device=h.device, dtype=h.dtype
         )
         for mname in set(resolved_keys):
             mask = [i for i, k in enumerate(resolved_keys) if k == mname]
             head = self.reward_heads[mname]
-            logits = head(h[mask])  # (len(mask), num_actions)
-            reward_pred[mask] = torch.sigmoid(logits)
+            metric_logits[mask] = head(h[mask])
 
+        # Add task-conditional residual if enabled. Task index comes from the
+        # task one-hot in the state's meta section.
+        if self.task_cond_head and self.num_task_types > 0:
+            task_oh_start = (1 if self.include_seq_len else 0) + self.num_metric_types
+            task_oh = state[:, task_oh_start:task_oh_start + self.num_task_types]
+            task_idx = task_oh.argmax(dim=-1)  # (B,)
+            task_residual = torch.empty_like(metric_logits)
+            for t in task_idx.unique().tolist():
+                mask = (task_idx == t).nonzero(as_tuple=True)[0]
+                task_residual[mask] = self.task_heads[t](h[mask])
+            logits = metric_logits + task_residual
+        else:
+            logits = metric_logits
+
+        if self.output_activation == "sigmoid":
+            reward_pred = torch.sigmoid(logits)
+        elif self.output_activation == "linear":
+            reward_pred = logits
+        else:
+            raise ValueError(f"Unknown output_activation: {self.output_activation!r}")
         return {"reward_pred": reward_pred, "feature_vector": h}
 
     def _select_action_from_scores(
@@ -223,8 +315,12 @@ class NeuralUCBAgent(nn.Module):
             scores = scores.unsqueeze(0)
 
         action_idx = torch.argmax(scores, dim=-1)  # (B,)
-        a_idx = action_idx // self.num_b_values
-        b_idx = action_idx % self.num_b_values
+        if self.paired_actions:
+            a_idx = action_idx
+            b_idx = action_idx
+        else:
+            a_idx = action_idx // self.num_b_values
+            b_idx = action_idx % self.num_b_values
 
         a_val = self.a_values[a_idx]
         b_val = self.b_values[b_idx]
@@ -313,6 +409,11 @@ class NeuralUCBAgent(nn.Module):
 
         a_val = a_val.view(-1)
         b_val = b_val.view(-1)
+
+        if self.paired_actions:
+            da = (a_val.unsqueeze(-1) - self.a_values.unsqueeze(0)).abs()
+            db = (b_val.unsqueeze(-1) - self.b_values.unsqueeze(0)).abs()
+            return torch.argmin(da + db, dim=-1)
 
         a_expanded = self.a_values.unsqueeze(0)
         a_idx = torch.argmin(torch.abs(a_val.unsqueeze(-1) - a_expanded), dim=-1)

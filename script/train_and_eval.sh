@@ -11,7 +11,7 @@ usage() {
     echo "  -b, --budget              Token budget (default: 512)"
     echo "  -m, --model               Model name (default: llama3-1b)"
     echo "  -g, --train_gpu           Training GPU ID (default: 0)"
-    echo "  -d, --train_data_path     Training data JSONL (default: RL/training/data/training_data.jsonl)"
+    echo "  -d, --train_data_path     Training data JSONL (default: datasets/training/scored/llama3-1b/train.jsonl)"
     echo "  -e, --episodes_per_update Episodes per update (default: 16)"
     echo "  -p, --gpus_per_model      GPUs per model for inference (default: 1)"
     echo "  -s, --save_dir            Save directory (default: runs/<model>_<budget>)"
@@ -22,7 +22,7 @@ usage() {
 budget=512
 model="llama3-1b"
 train_gpu=0
-train_data_path="RL/training/data/training_data.jsonl"
+train_data_path="datasets/training/scored/llama3-1b/train.jsonl"
 episodes_per_update=16
 gpus_per_model=1
 save_dir=""
