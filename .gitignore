@@ -5,10 +5,22 @@
 *.jsonl
 *.json
 *.sh
+!script/*.sh
 *.pt
 backup
+*.log
+paper/
+train_lr.py
+*.npz
+*.md
+*.npy
 
 # Custom Directories
+logs/
+runs/
+result_txt/pred/
+RL/training/1b_*/
+RL/training/8b_*/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
