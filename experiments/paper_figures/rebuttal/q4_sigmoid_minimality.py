@@ -47,7 +47,8 @@ rcParams.update({
     "figure.dpi": 150,
 })
 
-PLOTS_BASE = "/home/smp9898/A2SF/experiments/temporal_bias/plots"
+# Tanimoto-optimal w_tan from the obs1 pipeline (budget-independent).
+DATA       = "/home/smp9898/A2SF/experiments/paper_figures/observations/data"
 OUT_DIR    = "/home/smp9898/A2SF/experiments/paper_figures/rebuttal"
 
 TASKS = [
@@ -120,13 +121,13 @@ def main():
     }
 
     for col, (path, label) in enumerate(TASKS):
-        npz = f"{PLOTS_BASE}/{path}/coord_descent.npz"
+        npz = os.path.join(DATA, path.replace("/", "__") + ".npz")
         if not os.path.exists(npz):
-            print(f"[skip] {label}: missing {npz} (run coord_descent.py first)")
+            print(f"[skip] {label}: missing {npz} (run obs1.py first)")
             continue
 
         d_npz = np.load(npz)
-        w_cd  = d_npz["w_cd"]              # (N=10, W=128) per-prompt optimal w
+        w_cd  = d_npz["w_tan"]             # (N, G) per-prompt Tanimoto-optimal w
         chunk = int(d_npz["chunk"])
         W     = int(d_npz["window"])
         N, G  = w_cd.shape

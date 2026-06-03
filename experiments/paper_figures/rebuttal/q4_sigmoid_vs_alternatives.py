@@ -32,10 +32,9 @@ rcParams.update({
     "figure.dpi": 180,
 })
 
-PLOTS_BASE = "/home/smp9898/A2SF/experiments/temporal_bias/plots/b256"
+# Tanimoto-optimal w_tan from the obs1 pipeline (chunk/window read from each npz).
+DATA       = "/home/smp9898/A2SF/experiments/paper_figures/observations/data"
 OUT_DIR    = "/home/smp9898/A2SF/experiments/paper_figures/rebuttal"
-CHUNK_SIZE = 2          # b256 uses chunk = 2 (W=256, G=128)
-W_TOTAL    = 256
 
 TASKS = [
     ("Single-doc_QA/qasper",     "Single-doc QA"),
@@ -108,13 +107,14 @@ def main():
     per_prompt_r2 = {fam: [] for fam in FAM_COLOR}   # overall PPT bar chart
 
     for path, label in TASKS:
-        npz = f"{PLOTS_BASE}/{path}/coord_descent.npz"
+        npz = os.path.join(DATA, path.replace("/", "__") + ".npz")
         if not os.path.exists(npz):
             print(f"  [skip] {label}: {npz}"); continue
         cd = np.load(npz)
-        w_cd = cd["w_cd"]                      # (N, G=128)
+        w_cd = cd["w_tan"]                     # (N, G) Tanimoto-optimal
         N, G = w_cd.shape
-        d_c = np.arange(G) * CHUNK_SIZE + (CHUNK_SIZE - 1) / 2.0  # query distances
+        chunk = int(cd["chunk"]); W_TOTAL = int(cd["window"])
+        d_c = np.arange(G) * chunk + (chunk - 1) / 2.0  # query distances
 
         # Per-prompt fits → R² per family
         task_r2 = {fam: [] for fam in FAM_COLOR}

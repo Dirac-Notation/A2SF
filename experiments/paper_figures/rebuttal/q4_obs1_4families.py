@@ -29,8 +29,8 @@ rcParams.update({
 })
 
 BUDGET = int(os.environ.get('BUDGET', '128'))
-_PLOTS = os.path.join(ROOT, 'experiments/temporal_bias/plots')
-BASE   = _PLOTS if BUDGET == 128 else os.path.join(_PLOTS, f'b{BUDGET}')
+# Tanimoto-optimal w_tan from the obs1 pipeline (budget-independent).
+DATA   = os.path.join(ROOT, 'experiments/paper_figures/observations/data')
 SUFFIX = '' if BUDGET == 128 else f'_b{BUDGET}'
 
 TASKS = [
@@ -116,7 +116,7 @@ def draw_4family(out_dir):
     legend_labels  = []
 
     for col, ((path, label), bc) in enumerate(zip(TASKS, band_colors)):
-        cd = np.load(os.path.join(BASE, path, 'coord_descent.npz'))
+        cd = np.load(os.path.join(DATA, path.replace('/', '__') + '.npz'))
         w = cd['w_tan']                                # (N, G)
         N, G = w.shape
         chunk = int(cd['chunk']); W = int(cd['window'])

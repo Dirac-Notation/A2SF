@@ -17,7 +17,9 @@ import numpy as np
 from scipy.optimize import curve_fit, minimize_scalar
 
 
-BASE = '/home/smp9898/A2SF/experiments/temporal_bias/plots'
+# Tanimoto-optimal weights come from the obs1 pipeline
+# (observations/data/<Task>__<dataset>.npz, key "w_tan"). Budget-independent.
+DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
 TASKS = [
     ('Single-doc_QA/qasper',     'Single-doc QA'),
     ('Multi-doc_QA/hotpotqa',    'Multi-doc QA'),
@@ -130,7 +132,7 @@ def _fit_with_sse(fit_fn, d, y, W):
 
 
 def analyze_task(label, path):
-    cd = np.load(os.path.join(BASE, path, 'coord_descent.npz'))
+    cd = np.load(os.path.join(DATA, path.replace('/', '__') + '.npz'))
     w_tan = cd['w_tan']                          # (N, G) — Tanimoto-optimal weight
     N, G = w_tan.shape
     chunk = int(cd['chunk']); W = int(cd['window'])
