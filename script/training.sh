@@ -9,7 +9,7 @@ usage() {
     echo "  -g, --gpu                  GPU device ID (default: 0)"
     echo "  -s, --save_dir             Directory to save checkpoints and logs (default: runs/a2sf_rl)"
     echo "  -b, --token_budget         Token budget for KV cache compression (default: 128)"
-    echo "  -d, --train_data_path      Path to training data JSONL file (default: RL/training/data/training_data.jsonl)"
+    echo "  -d, --train_data_path      Path to training data JSONL file (default: datasets/training/scored/llama3-1b/train.jsonl)"
     echo "  -e, --episodes_per_update  Number of episodes per parameter update (default: 32)"
     echo "  -h, --help                 Show this help message"
     exit 0
@@ -18,7 +18,7 @@ usage() {
 gpu=0
 save_dir="runs/a2sf_rl"
 token_budget=128
-train_data_path="RL/training/data/training_data.jsonl"
+train_data_path="datasets/training/scored/llama3-1b/train.jsonl"
 episodes_per_update=16
 model="llama3-1b"
 

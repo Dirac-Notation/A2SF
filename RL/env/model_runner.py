@@ -82,11 +82,30 @@ class A2SFModelRunner:
 
     def _create_compression_config(self, a: float, b: float, token_budget: int) -> Dict[str, Any]:
         base_config = CompressionConfig()
-        base_config.compression_method = "sigmoid"
+        base_config.compression_method = getattr(self.config, "compression_method", "a2sf")
         base_config.total_budget = token_budget
         base_config.local_ratios = 0.125
         base_config.a = a
         base_config.b = b
+        # Per-(L, h) static lookup override: if config provides per_lh_a/per_lh_b
+        # (shape (n_layers, n_kv_heads)), each layer's scorer uses head-specific (a, b).
+        # The global a, b above are still set for backward compat.
+        per_lh_a = getattr(self.config, "per_lh_a", None)
+        per_lh_b = getattr(self.config, "per_lh_b", None)
+        if per_lh_a is not None and per_lh_b is not None:
+            base_config.per_lh_a = per_lh_a
+            base_config.per_lh_b = per_lh_b
+        # Per-(L, h) policy bank (dynamic per-prompt action via PerLHPolicyScorer)
+        bank = getattr(self.config, "per_lh_policy_bank", None)
+        if bank is not None:
+            base_config.per_lh_policy_bank = bank
+            base_config.per_lh_topk = int(getattr(self.config, "per_lh_topk", 64))
+            base_config.per_lh_query_window = int(getattr(self.config, "per_lh_query_window", 16))
+            base_config.per_lh_sink_mask = int(getattr(self.config, "per_lh_sink_mask", 4))
+        # Orthogonal modifiers (ChunkKV / PyramidKV) propagate from ModelConfig.
+        base_config.chunk_size = int(getattr(self.config, "chunk_size", 0) or 0)
+        base_config.pyramid_kv = bool(getattr(self.config, "pyramid_kv", False))
+        base_config.pyramid_ratio = float(getattr(self.config, "pyramid_ratio", 4.0) or 4.0)
         return base_config
 
 

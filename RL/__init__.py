@@ -1,22 +1,14 @@
-"""
-A2SF RL Package
+"""A2SF RL package: NeuralUCB agent + sigmoid compression (champion)."""
 
-This package contains the reinforcement learning components for training
-an A2SF model to dynamically adjust KV cache compression ratios.
-"""
-
+from .a2sf_model import A2SFModel, ModelConfig
 from .agent.neural_ucb_agent import NeuralUCBAgent
-from .env import A2SFEnv, AttentionEncoder
-from .env import A2SFModelRunner
-from .training.trainer import A2SFTrainer
-from .a2sf_model import ModelConfig
+from .env import A2SFEnv, AttentionEncoder, A2SFModelRunner
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 __all__ = [
+    "A2SFModel",
+    "ModelConfig",
     "NeuralUCBAgent",
     "A2SFEnv",
     "A2SFModelRunner",
-    "A2SFTrainer",
-    "AttentionEncoder",
-    "ModelConfig",
 ]

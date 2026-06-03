@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 
 from .encoder import AttentionEncoder
+from .mini_attn_encoder import MiniAttnEncoder
 from longbench_eval import (
     qa_f1_score,
     qa_f1_zh_score,
@@ -36,14 +37,46 @@ class A2SFEnv:
         self.config = config
         self.device = torch.device(config.device)
 
-        # Metadata encoder used to build compact RL state features
-        self.context_encoder = AttentionEncoder(
-            target_model=runner.model,
-            target_tokenizer=runner.tokenizer,
-            device=config.device,
-            output_dim=-1,
-            num_query_tokens=16,
-        )
+        # Metadata encoder: layer-0 attention OR pretrained mini-attn module
+        mini_attn_ckpt = str(getattr(config, "mini_attn_ckpt", "") or "")
+        if mini_attn_ckpt:
+            self.context_encoder = MiniAttnEncoder(
+                target_model=runner.model,
+                target_tokenizer=runner.tokenizer,
+                mini_attn_ckpt_path=mini_attn_ckpt,
+                device=config.device,
+                output_dim=-1,
+                encoder_topk=int(getattr(config, "encoder_topk", 16)),
+                include_hidden_pool=bool(getattr(config, "encoder_include_hidden_pool", False)),
+                hidden_pool_window=int(getattr(config, "encoder_hidden_pool_window", 0)),
+                max_input_length=int(getattr(config, "encoder_max_input_length", 32768)),
+                bin_size=int(getattr(config, "encoder_bin_size", 16)),
+                feature_mode=str(getattr(config, "encoder_feature_mode", "stats")),
+                endalign_vec_len=int(getattr(config, "endalign_vec_len", 256)),
+                endalign_bin_size=int(getattr(config, "endalign_bin_size", 128)),
+                endalign_sink_mask=int(getattr(config, "endalign_sink_mask", 4)),
+                endalign_include_stats=bool(getattr(config, "endalign_include_stats", True)),
+                single_view=bool(getattr(config, "single_view", False)),
+                include_metric_oh=bool(getattr(config, "include_metric_oh", True)),
+                include_seq_len=bool(getattr(config, "include_seq_len", True)),
+                include_task_oh=bool(getattr(config, "include_task_oh", True)),
+                extra_view=str(getattr(config, "extra_view", "none")),
+                pre_rope_query_window=int(getattr(config, "pre_rope_query_window", 16)),
+            )
+        else:
+            self.context_encoder = AttentionEncoder(
+                target_model=runner.model,
+                target_tokenizer=runner.tokenizer,
+                device=config.device,
+                output_dim=-1,
+                num_query_tokens=16,
+                bin_size=int(getattr(config, "encoder_bin_size", 16)),
+                encoder_mode=str(getattr(config, "encoder_mode", "bin")),
+                encoder_topk=int(getattr(config, "encoder_topk", 32)),
+                encoder_views=str(getattr(config, "encoder_views", "both")),
+                include_hidden_pool=bool(getattr(config, "encoder_include_hidden_pool", False)),
+                hidden_pool_window=int(getattr(config, "encoder_hidden_pool_window", 0)),
+            )
 
         # Current episode cache
         self.current_prompt = None
