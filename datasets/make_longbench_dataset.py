@@ -12,20 +12,17 @@ def seed_everything(seed):
 
 def extract_data(data, prompt_format, dataset_name, out_path):
     """Extract input prompts and generate dummy outputs"""
-    for json_obj in tqdm(data, desc=f"Processing {dataset_name}"):
-        # Format the prompt using the dataset's prompt format
-        prompt = prompt_format.format(**json_obj)
-        
-        # Save to file
-        result = {
-            "input_prompt": prompt,
-            "answers": json_obj.get("answers", []),
-            "all_classes": json_obj.get("all_classes", []),
-            "length": json_obj.get("length", 0),
-            "dataset": dataset_name
-        }
-        
-        with open(out_path, "a", encoding="utf-8") as f:
+    with open(out_path, "a", encoding="utf-8") as f:
+        for idx, json_obj in enumerate(tqdm(data, desc=f"Processing {dataset_name}")):
+            prompt = prompt_format.format(**json_obj)
+            result = {
+                "idx": idx,
+                "input_prompt": prompt,
+                "answers": json_obj.get("answers", []),
+                "all_classes": json_obj.get("all_classes", []),
+                "length": json_obj.get("length", 0),
+                "dataset": dataset_name,
+            }
             json.dump(result, f, ensure_ascii=False)
             f.write('\n')
         

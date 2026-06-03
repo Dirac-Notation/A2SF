@@ -27,6 +27,32 @@ def parse_args(args=None):
     )
     parser.add_argument("--aj_offset", type=float, default=0.1, help="(AJ only) offset for aj_offset weight.")
     parser.add_argument("--recent_budget", type=int, default=16, help="(AJ only) number of keys always kept from the tail.")
+    parser.add_argument("--chunk_size", type=int, default=0,
+                        help="ChunkKV: 0 = off (token-level select), >0 = group head tokens into chunks of this size.")
+    parser.add_argument("--chunk_group_size", type=int, default=1,
+                        help="ChunkKV LIR: layers per group sharing one selection (1 = no sharing).")
+    parser.add_argument("--pyramid_kv", action="store_true",
+                        help="PyramidKV: linearly decreasing per-layer budget.")
+    parser.add_argument("--pyramid_ratio", type=float, default=4.0,
+                        help="PyramidKV bottom/top ratio (default 4.0).")
+    parser.add_argument("--shard_count", type=int, default=1,
+                        help="Cross-server shard count (round-robin task distribution).")
+    parser.add_argument("--shard_id", type=int, default=0,
+                        help="This instance's shard id ∈ [0, shard_count).")
+    parser.add_argument("--run_name", type=str, default=None,
+                        help="Override auto-generated run name (output dir suffix).")
+    parser.add_argument("--waits_table", type=str, default=None,
+                        help="Per-prompt WAITS action table JSON (result_txt/backup/waits_action_table.json). "
+                             "If set, overrides --method/--window with per-prompt (a, b) from the table.")
+    parser.add_argument("--min_prompt_tokens", type=int, default=0,
+                        help="Skip samples whose tokenized length < this value (Phase 2: long sequences).")
+    parser.add_argument("--max_prompt_tokens", type=int, default=0,
+                        help="Skip samples whose tokenized length >= this value; 0=no limit (Phase 1: short sequences).")
+    parser.add_argument("--sigmoid_a", type=float, default=None,
+                        help="Override 'a' parameter for sigmoid compression (use with --method sigmoid).")
+    parser.add_argument("--triattention_stats", type=str, default=None,
+                        help="Path to calibrated TriAttention stats .pt file. "
+                             "Sets compression_method=triattention automatically.")
     return parser.parse_args(args)
 
 
@@ -75,6 +101,15 @@ def _longbench_worker(
     aj_weight_fn: str = "aj_offset",
     aj_offset: float = 0.1,
     recent_budget: int = 16,
+    chunk_size: int = 0,
+    chunk_group_size: int = 1,
+    pyramid_kv: bool = False,
+    pyramid_ratio: float = 4.0,
+    waits_table: dict = None,
+    min_prompt_tokens: int = 0,
+    max_prompt_tokens: int = 0,
+    sigmoid_a: float = None,
+    triattention_stats: dict = None,
 ):
     """
     CUDA_VISIBLE_DEVICES를 gpu_group으로 설정하고 모델을 로드한 뒤,
@@ -100,6 +135,15 @@ def _longbench_worker(
     config["aj_weight_fn"] = aj_weight_fn
     config["aj_offset"] = aj_offset
     config["recent_budget"] = recent_budget
+    config["chunk_size"] = int(chunk_size)
+    config["chunk_group_size"] = int(chunk_group_size)
+    config["pyramid_kv"] = bool(pyramid_kv)
+    config["pyramid_ratio"] = float(pyramid_ratio)
+    if sigmoid_a is not None:
+        config["a"] = float(sigmoid_a)
+    if triattention_stats is not None:
+        config["compression_method"] = "triattention"
+        config["triattention_stats"] = triattention_stats
 
     try:
         while True:
@@ -128,7 +172,21 @@ def _longbench_worker(
             attention_mask = encoded.attention_mask.to(torch.bfloat16).to(model.device)
             context_length = int(input_ids.shape[-1])
 
+            if min_prompt_tokens > 0 and context_length < min_prompt_tokens:
+                result_queue.put(("__skip__", dataset, sample_idx))
+                continue
+            if max_prompt_tokens > 0 and context_length >= max_prompt_tokens:
+                result_queue.put(("__skip__", dataset, sample_idx))
+                continue
+
             max_gen = int(dataset2maxlen.get(dataset, 64))
+
+            if waits_table is not None:
+                ab = waits_table.get(dataset, [None] * (sample_idx + 1))[sample_idx]
+                if ab is not None:
+                    config["compression_method"] = "sigmoid"
+                    config["a"] = float(ab[0])
+                    config["b"] = int(ab[1])
 
             model.init_cache(config)
 
@@ -194,7 +252,36 @@ def _run_longbench_multi_gpu(args):
     if not os.path.exists("result_txt/pred"):
         os.makedirs("result_txt/pred")
 
-    output_dir = f"result_txt/pred/{args.model}_{args.method}_{args.window}_{args.budget}"
+    # Load TriAttention calibration stats if provided
+    triattention_stats_data = None
+    if args.triattention_stats:
+        import torch as _torch
+        triattention_stats_data = _torch.load(args.triattention_stats, map_location="cpu", weights_only=False)
+        print(f"[longbench] TriAttention stats loaded from {args.triattention_stats}")
+
+    # Load per-prompt WAITS action table if provided
+    waits_table_data = None
+    if args.waits_table:
+        with open(args.waits_table) as f:
+            full_table = json.load(f)
+        table_key = f"{model_key}_{int(args.budget)}"
+        waits_table_data = full_table.get(table_key)
+        if waits_table_data is None:
+            raise ValueError(f"--waits_table: key '{table_key}' not found in {args.waits_table}")
+        print(f"[longbench] WAITS table loaded: key={table_key}, {len(waits_table_data)} datasets")
+
+    chunk_suffix = f"_chunk{int(args.chunk_size)}" if int(args.chunk_size) > 1 else ""
+    if int(args.chunk_size) > 1 and int(args.chunk_group_size) > 1:
+        chunk_suffix += f"g{int(args.chunk_group_size)}"
+    if args.pyramid_kv:
+        chunk_suffix += "_pyr"
+    if args.run_name:
+        run_name = args.run_name
+    elif args.waits_table:
+        run_name = f"{args.model}_WAITS_{args.budget}"
+    else:
+        run_name = f"{args.model}_{args.method}_{args.window}_{args.budget}{chunk_suffix}"
+    output_dir = f"result_txt/pred/{int(args.budget)}/{run_name}"
     os.makedirs(output_dir, exist_ok=True)
 
     longbench_dir = os.path.join("datasets", "longbench")
@@ -202,6 +289,13 @@ def _run_longbench_multi_gpu(args):
     if not tasks:
         print("No LongBench tasks found. Exiting.")
         return
+
+    import random as _random
+    _random.Random(42).shuffle(tasks)
+    if args.shard_count > 1:
+        n_total = len(tasks)
+        tasks = [t for i, t in enumerate(tasks) if i % args.shard_count == args.shard_id]
+        print(f"[longbench] shard {args.shard_id+1}/{args.shard_count}: {len(tasks)}/{n_total} tasks")
 
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for multi-GPU LongBench evaluation.")
@@ -215,12 +309,16 @@ def _run_longbench_multi_gpu(args):
             f"--gpus_per_model ({gpus_per_model}) cannot exceed visible GPU count ({visible_gpu_count})"
         )
 
-    all_gpu_ids = list(range(visible_gpu_count))
-    gpu_groups = []
-    for start in range(0, visible_gpu_count, gpus_per_model):
-        group = all_gpu_ids[start : start + gpus_per_model]
-        if group:
-            gpu_groups.append(group)
+    parent_visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+    if parent_visible:
+        all_gpu_ids = [int(g) for g in parent_visible.split(",") if g.strip()]
+    else:
+        all_gpu_ids = list(range(visible_gpu_count))
+    gpu_groups = [
+        all_gpu_ids[start : start + gpus_per_model]
+        for start in range(0, len(all_gpu_ids), gpus_per_model)
+        if all_gpu_ids[start : start + gpus_per_model]
+    ]
 
     print(f"[longbench] visible_gpu_count={visible_gpu_count}, gpus_per_model={gpus_per_model}")
     print(f"[longbench] gpu_groups={gpu_groups}")
@@ -252,6 +350,15 @@ def _run_longbench_multi_gpu(args):
                 args.aj_weight_fn,
                 float(args.aj_offset),
                 int(args.recent_budget),
+                int(args.chunk_size),
+                int(args.chunk_group_size),
+                bool(args.pyramid_kv),
+                float(args.pyramid_ratio),
+                waits_table_data,
+                int(args.min_prompt_tokens),
+                int(args.max_prompt_tokens),
+                args.sigmoid_a,
+                triattention_stats_data,
             ),
         )
         p.start()
@@ -266,6 +373,10 @@ def _run_longbench_multi_gpu(args):
         item = result_queue.get()
         if item[0] == "__error__":
             raise RuntimeError(item[1])
+
+        if item[0] == "__skip__":
+            remaining -= 1
+            continue
 
         dataset, sample_idx, payload = item
         out_path = os.path.join(output_dir, f"{dataset}.jsonl")

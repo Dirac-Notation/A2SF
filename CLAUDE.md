@@ -4,76 +4,108 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-A2SF (Accumulative Attention Score with Forgetting) is a KV cache compression technique for LLM inference. It reduces memory by selectively retaining key-value pairs using accumulative attention scores with a forgetting mechanism. The project includes both heuristic compression methods and a Reinforcement Learning approach for learning optimal compression policies.
+A2SF (Accumulative Attention Score with Forgetting) is a KV cache compression technique
+for LLM inference. It reduces memory by selectively retaining key-value pairs using
+accumulative attention scores with a forgetting mechanism. Includes both heuristic
+compression methods and a Reinforcement Learning approach for learning per-prompt
+sigmoid compression policies.
 
-## Environment Setup
+## Champion (current)
 
-```bash
-conda env create -n A2SF python=3.8
-conda activate A2SF
-pip install -r pip.txt
+- Name: `RL_minattn_v5_maxo`. **LB128 = 26.95** on LLaMA-3.2-1B.
+- Architecture: `NeuralUCBAgent` (13-action paired sigmoid grid + per-task linear residual
+  heads + sigmoid output + 2-view MiniAttn encoder + `MLPResidualBlock × 2`). ~1.41M params.
+- State features come from a frozen pretrained mini-attn encoder, not from target-model
+  layer-0 attention. mini-attn ckpts: `runs/mini_attn_v5/mini_attn_best.pt` (1B),
+  `runs/mini_attn_v5_8b/mini_attn_best.pt` (8B).
+- Reward = MaxO (per-sample max over GT and full-cache scores).
+
+Champion training command:
+```
+python RL/train.py --model llama3-1b --save_dir runs/<run_name> --budget 128 \
+    --data_file datasets/training/scored/llama3-1b/train.jsonl \
+    --mini_attn_ckpt runs/mini_attn_v5/mini_attn_best.pt \
+    --epochs 200 --ucb_topk 4 --ucb_beta 1.0
 ```
 
-Key pinned dependencies: `transformers==4.46.2`, `datasets<4.0.0`, `sentence-transformers==2.7.0`.
+`--budget 128` even when eval budget is larger — this is the documented sweet spot.
 
-## Common Commands
+`--action_subset {full,hard}`: `hard` = 5 actions (a=0 + a=10 × {1,16,32,128}), used for
+ablation Config B. `full` = all 13 actions (champion).
 
-### Run LongBench evaluation (heuristic methods)
-```bash
-python longbench.py --model llama3-1b --method snap --window 16 --budget 256
-python longbench_eval.py result_txt/pred/llama3-1b_snap_16_256
-```
+## Action grid
 
-Supported `--method` values: `full`, `a2sf`, `snap`, `sigmoid`. (`h2o` was removed.)
+13 paired (a, b) actions, defined in `RL/a2sf_model.py` as `SIGMOID_A_VALUES`/
+`SIGMOID_B_VALUES`: `(0, 1)` + cartesian({0.01, 0.1, 10} × {1, 16, 32, 128}).
+`HARD_LIKE_INDICES = [0, 9, 10, 11, 12]` for the hard-only subset.
 
-### Run LongBench evaluation (RL agent)
-```bash
-python longbench_RL.py --model llama3-1b --budget 1024 --rl_checkpoint runs/a2sf_rl/policy_final.pt
-python longbench_eval.py result_txt/pred/llama3-1b_sigmoid_1024_RL
-```
+## Sigmoid scorer math
 
-### Train RL agent
-```bash
-python RL/training/run.py --model llama3-1b --epochs 2000 --save_dir runs/a2sf_rl
-```
+`utils_real_drop/scorers/sigmoid.py`:
+`w[q] = 1 / (1 + exp(-a * (q - (N - b - 0.5))))` — real sigmoid, midpoint between
+tokens N-b-1 and N-b. Matches paper §4.1. The (a, b) action grid is interpreted with
+this formula in both training data generation (`script/generate_sigmoid_dataset.py`)
+and inference; both must stay in sync.
 
 ## Architecture
 
 ### KV Cache Compression (`utils_real_drop/`)
-Responsibilities are split into four model-agnostic pieces plus a Llama wiring layer:
-
-- `kv_llama.py` — `KVLlamaForCausalLM`: Custom Llama model extending HuggingFace. Entry point is `model.init_cache(compression_config)` (pass `None` for no compression). Its `LlamaAttention.forward` does: `cache.update(k, v)` → `repeat_kv` → `compressed_attention(...)` → `cache.compress(layer_idx, selected)`.
-- `attention.py` — `compressed_attention(query, key, value, *, policy, attn_mask, head_dim)`: model-agnostic attention kernel. Two paths:
-  - Fast path (no policy or already prefilled): `F.scaled_dot_product_attention` with `is_causal`.
-  - Score-accumulating path: K-tiled online softmax (true flash-attention style, never materializes `[B,H,qb,Sk]`), followed by a second K-tiled pass that reconstructs probabilities from saved `(m, l)` to feed the policy's per-query weights. Scores are accumulated directly in KV-head space.
-- `cache.py` — `CompressedKVCache(Cache)`: HuggingFace-compatible cache. Stores K/V tensors, owns the per-layer policies, exposes `update`, `compress`, `get_seq_length` (always returns the *logical* length so position ids keep advancing after compression). Knows nothing about attention math.
-- `policies/` — Compression policies, all inheriting `CompressionPolicy`:
-  - `base.py` — abstract base + `_topk_with_recent` helper for the "score topk + always-keep recent" pattern. `recent_budget=16` is hardcoded by design.
-  - `a2sf.py` — A2SF: exponential forgetting window over query positions
-  - `snap.py` — SnapKV: only queries inside the observation window contribute
-  - `sigmoid.py` — Sigmoid-shaped forgetting window
-  - `__init__.py` — `build_policies(compression_config, num_layers, num_kv_heads)` dispatcher with `_REGISTRY`. Adding a new method = subclass `CompressionPolicy` + register one line.
-
-Each policy implements only `prepare_prefill`, `get_query_weights(q_start, q_end, ...)`, and `select(scores, seq_len_k)`. The attention kernel handles the rest.
+- `kv_llama.py` — `KVLlamaForCausalLM`: extends HF Llama. Entry point is
+  `model.init_cache(compression_config)` (pass `None` for no compression).
+  `LlamaAttention.forward`: `cache.update(k, v)` → `repeat_kv` → `compressed_attention(...)`
+  returns `(out, scores)` → `cache.compress(layer_idx, scores, seq_len_k)` (only on prefill).
+- `attention.py` — `compressed_attention(query, key, value, *, scorer, attn_mask, head_dim)`.
+  Two paths:
+  - Fast path (no scorer or already prefilled): `F.scaled_dot_product_attention`.
+  - Score-accumulating: Q-tiled single pass; per-key fp32 scores accumulated in KV-head
+    space, weighted by `scorer.get_query_weights(...)`.
+- `cache.py` — `CompressedKVCache(Cache)`: HF-compatible. Owns K/V tensors, per-layer
+  scorer list, single selector. `compress` calls `selector.select` then gathers.
+- `scorers/` — per-query weight curves only (budget/recent/select-free).
+  - `Scorer` base, `A2SFScorer`, `SnapScorer`, `SigmoidScorer`.
+  - Adding a new scorer: subclass `Scorer`, register in `_REGISTRY` in `__init__.py`.
+- `selectors/` — score → kept indices. Owns layer-aware budget.
+  - `Selector` base, `TokenSelector` (default top-k + always-keep recent),
+    `ChunkSelector` (ChunkKV; optional LIR via `layer_group_size > 1`).
+  - Budget strategies: `uniform_budgets`, `pyramid_budgets` (PyramidKV).
 
 ### Reinforcement Learning (`RL/`)
-- `a2sf_model.py` — `A2SFModel`: ties together environment, agent, and runner. `ModelConfig` defines action space (a_values, b_values).
-- `agent/neural_ucb_agent.py` — `NeuralUCBAgent`: multi-metric bandit agent with separate `MetricPolicyNetwork` per evaluation metric, using UCB exploration.
-- `env/env.py` — `A2SFEnv`: single-step RL environment.
-- `env/encoder.py` — `AttentionEncoder`: encodes attention patterns to state features.
-- `env/model_runner.py` — `A2SFModelRunner`: manages LLM inference and cache during RL episodes.
-- `training/` — Training loop (`trainer.py`), config (`training_config.py`), data loading (`dataloader.py`), entry point (`run.py`).
+- `a2sf_model.py` — `A2SFModel` ties env + agent + runner. `ModelConfig` defines the
+  default 13-action grid + encoder settings.
+- `train.py` — Champion training loop: NeuralUCB top-K MSE loss + Σ⁻¹ Sherman-Morrison
+  rank-1 update. Reads `training_data.jsonl` with `action_scores_*_by_budget` fields.
+- `agent/neural_ucb_agent.py` — only agent class (`NeuralUCBAgent`). Hardcoded:
+  paired_actions, sigmoid output, 2 views, task_cond_head, residual backbone.
+- `env/env.py` — `A2SFEnv`: single-step bandit env.
+- `env/encoder.py` — `AttentionEncoder` (uses target-model layer-0 attention).
+- `env/mini_attn_encoder.py` — `MiniAttnEncoder` (champion path; frozen mini-attn ckpt).
+  State features = stats mode (top-K positions + score + entropy/mean/std per head, 2 views).
+- `env/model_runner.py` — `A2SFModelRunner`: LLM inference + cache during episodes.
 
 ### Evaluation
-- `longbench.py` / `longbench_RL.py` — Multi-GPU evaluation pipelines (heuristic vs RL).
-- `longbench_eval.py` — Scoring: F1 (QA), ROUGE (summarization), exact match (retrieval), class match (classification), fuzzy similarity (code).
+- `longbench.py` / `longbench_RL.py` — Multi-GPU pipelines (heuristic / RL).
+  Method aliases used in eval scripts: TOVA = `--method snap --window 1`,
+  SnapKV-N = `--method snap --window N`, H2O = `--method snap --window 32768`.
+  Optional `--chunk_size` (ChunkKV), `--chunk_group_size` (LIR), `--pyramid_kv`,
+  `--fixed_actions_json` (per-task fixed action; bypasses agent for ablation Config A).
+- `longbench_eval.py` — Scoring (F1 / ROUGE / EM / class match / fuzzy sim).
 - `evaluate_needle.py` — Needle-in-haystack benchmark.
 
 ### Configuration (`config/`)
-- `model2path.json` — Maps model shortnames to HuggingFace model IDs.
-- `dataset2maxlen.json` — Max token lengths per dataset.
-- `dataset2prompt.json` — Dataset-specific prompts.
-- `task2dataset.json` — Maps task categories to dataset names.
+- `model2path.json` — model shortname → HF model id.
+- `dataset2maxlen.json`, `dataset2prompt.json` — per-dataset eval settings.
+- `task2dataset.json` — 6 task families: Code Complete, Few Shot, Single-doc QA,
+  Multi-doc QA, Summarization, Passage Retrieval.
 
 ### Supported Models
-Llama 3.1 8B Instruct, Llama 3.2 1B Instruct, Qwen 2.5 7B Instruct (mapped via `config/model2path.json`).
+LLaMA 3.2 1B Instruct, LLaMA 3.1 8B Instruct, Qwen 2.5 7B Instruct (`config/model2path.json`).
+
+## Output convention
+Eval predictions go in `result_txt/pred/<budget>/<run_name>/`, never directly under
+`result_txt/pred/`. `result_txt/backup/...` is read-only.
+
+## Environment
+```
+conda activate A2SF
+```
+Pinned: `transformers==4.46.2`, `datasets<4.0.0`, `sentence-transformers==2.7.0`.
