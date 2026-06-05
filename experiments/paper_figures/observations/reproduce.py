@@ -56,14 +56,30 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--plot-only", action="store_true",
                     help="skip GPU data generation; re-plot from data/")
+    ap.add_argument("--appendix", action="store_true",
+                    help="also produce the B=256/512 appendix variants")
     args = ap.parse_args()
     extra = ["--plot-only"] if args.plot_only else []
 
-    for script in ("obs1.py", "obs2.py"):
-        print(f"\n{'='*70}\n=== running {script} {' '.join(extra)}\n{'='*70}", flush=True)
-        subprocess.run([sys.executable, os.path.join(HERE, script), *extra], check=True)
+    # (script, args)  — the 3 main-paper figures (B=128)
+    steps = [
+        ("obs1.py", ["--variant", "b128"]),
+        ("obs2.py", ["--budget", "128"]),
+    ]
+    if args.appendix:
+        steps += [
+            ("obs1.py", ["--variant", "b256"]),   # identical to b128 (reuses its data)
+            ("obs1.py", ["--variant", "b512"]),   # N=20
+            ("obs2.py", ["--budget", "256"]),
+            ("obs2.py", ["--budget", "512"]),
+        ]
 
-    print("\nDone. Figures:")
+    for script, sargs in steps:
+        cmd = [sys.executable, os.path.join(HERE, script), *sargs, *extra]
+        print(f"\n{'='*70}\n=== {' '.join(cmd[1:])}\n{'='*70}", flush=True)
+        subprocess.run(cmd, check=True)
+
+    print("\nDone. Main figures:")
     for f in ("obs1_sigmoid_band.pdf", "obs1_tanimoto_recovery.pdf",
               "obs2_window_dominance.pdf"):
         print(f"  {os.path.join(HERE, f)}")

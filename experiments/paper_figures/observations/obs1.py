@@ -66,10 +66,10 @@ _TAN_CURVES = [
 # ══════════════════════════════════════════════════════════════════════════════
 # Generate (GPU) — minimal per-task curves
 # ══════════════════════════════════════════════════════════════════════════════
-def generate(device="cuda"):
+def generate(nitems=C.NUM_ITEMS, data_suffix="", device="cuda"):
     import time
     os.makedirs(C.DATA_DIR, exist_ok=True)
-    selected = C.sample_prompts(C.NUM_ITEMS)
+    selected = C.sample_prompts(nitems)
     backup_pred = C.load_backup_preds()
     tok, model = C.load_model(device)
     collector = C.AttentionCollector(model, C.MAX_WINDOW)
@@ -131,7 +131,7 @@ def generate(device="cuda"):
             print(f"  [{si+1}/{len(items)}] L={seq_len}  t={time.time()-t0:.1f}s  "
                   f"w_tan[0..2]={w_tan[:3]}  j_opt={j_opt[-1]:.3f}", flush=True)
 
-        out = os.path.join(C.DATA_DIR, f"{C.data_stem(task_path)}.npz")
+        out = os.path.join(C.DATA_DIR, f"{C.data_stem(task_path)}{data_suffix}.npz")
         np.savez_compressed(
             out,
             w_tan=np.stack(agg["w_tan"]),
@@ -148,21 +148,21 @@ def generate(device="cuda"):
     print("\n>>> obs1 data generation done.")
 
 
-def _load_task(task_path):
-    return np.load(os.path.join(C.DATA_DIR, f"{C.data_stem(task_path)}.npz"))
+def _load_task(task_path, data_suffix=""):
+    return np.load(os.path.join(C.DATA_DIR, f"{C.data_stem(task_path)}{data_suffix}.npz"))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Plot — obs1_sigmoid_band.pdf
 # ══════════════════════════════════════════════════════════════════════════════
-def plot_sigmoid_band(suffix=""):
+def plot_sigmoid_band(fig_suffix="", data_suffix=""):
     from scipy.optimize import curve_fit
     colors = plt.get_cmap("tab10").colors
     fig, axes = plt.subplots(1, 4, figsize=(13, 3.8), sharex=False, sharey=False)
     h_proxy = []
 
     for col, ((task_path, label), c) in enumerate(zip(C.OBS1_TASKS, colors)):
-        cd = _load_task(task_path)
+        cd = _load_task(task_path, data_suffix)
         w = cd["w_tan"]                                   # (N, G)
         G = w.shape[1]
         chunk = int(cd["chunk"]); W = int(cd["window"])
@@ -205,19 +205,19 @@ def plot_sigmoid_band(suffix=""):
                    loc="upper center", bbox_to_anchor=(0.5, 0.99), ncol=3, frameon=False)
     fig.subplots_adjust(left=0.07, right=0.99, top=0.82, bottom=0.16, wspace=0.28)
     for ext in ("pdf", "png"):
-        fig.savefig(os.path.join(HERE, f"obs1_sigmoid_band{suffix}.{ext}"), bbox_inches="tight")
+        fig.savefig(os.path.join(HERE, f"obs1_sigmoid_band{fig_suffix}.{ext}"), bbox_inches="tight")
     plt.close(fig)
-    print(f"saved → obs1_sigmoid_band{suffix}.pdf")
+    print(f"saved → obs1_sigmoid_band{fig_suffix}.pdf")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Plot — obs1_tanimoto_recovery.pdf
 # ══════════════════════════════════════════════════════════════════════════════
-def plot_tanimoto_recovery(suffix=""):
+def plot_tanimoto_recovery(fig_suffix="", data_suffix=""):
     # global ylim from all task data (5% pad)
     all_vals = []
     for task_path, _ in C.OBS1_TASKS:
-        cd = _load_task(task_path)
+        cd = _load_task(task_path, data_suffix)
         chunk = int(cd["chunk"]); G = cd["w_tan"].shape[1]; W = G * chunk
         for _, key in _TAN_CURVES:
             all_vals.extend(np.repeat(cd[key].mean(axis=0), chunk)[:W].tolist())
@@ -228,7 +228,7 @@ def plot_tanimoto_recovery(suffix=""):
     fig, axes = plt.subplots(1, 4, figsize=(13, 4.2))
     h_proxy, all_labels = [], []
     for col, (task_path, label) in enumerate(C.OBS1_TASKS):
-        cd = _load_task(task_path)
+        cd = _load_task(task_path, data_suffix)
         chunk = int(cd["chunk"]); G = cd["w_tan"].shape[1]; W = G * chunk
         ax = axes[col]; d = np.arange(W); handles_this = []
         for scheme, key in _TAN_CURVES:
@@ -249,29 +249,41 @@ def plot_tanimoto_recovery(suffix=""):
     fig.legend(h_proxy, all_labels, loc="upper center", bbox_to_anchor=(0.5, 0.99),
                ncol=min(5, len(h_proxy)), frameon=False)
     for ext in ("pdf", "png"):
-        fig.savefig(os.path.join(HERE, f"obs1_tanimoto_recovery{suffix}.{ext}"),
+        fig.savefig(os.path.join(HERE, f"obs1_tanimoto_recovery{fig_suffix}.{ext}"),
                     bbox_inches="tight")
     plt.close(fig)
-    print(f"saved → obs1_tanimoto_recovery{suffix}.pdf")
+    print(f"saved → obs1_tanimoto_recovery{fig_suffix}.pdf")
 
 
-def _data_exists():
-    return all(os.path.isfile(os.path.join(C.DATA_DIR, f"{C.data_stem(p)}.npz"))
+# Figure variants. w_tan is budget-independent, so the B=256 appendix figure is
+# identical to B=128 (same N=40 data, reused). B=512 used only 20 prompts.
+#   variant -> (nitems, fig_suffix, data_suffix)
+VARIANTS = {
+    "b128": (C.NUM_ITEMS, "",      ""),       # main paper figure (N=40)
+    "b256": (C.NUM_ITEMS, "_b256", ""),       # appendix: identical to b128, reuses its data
+    "b512": (20,          "_b512", "_b512"),  # appendix: N=20
+}
+
+
+def _data_exists(data_suffix=""):
+    return all(os.path.isfile(os.path.join(C.DATA_DIR, f"{C.data_stem(p)}{data_suffix}.npz"))
                for p, _ in C.OBS1_TASKS)
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--plot-only", action="store_true")
+    ap.add_argument("--variant", choices=list(VARIANTS), default="b128")
     args = ap.parse_args()
+    nitems, fig_suffix, data_suffix = VARIANTS[args.variant]
 
-    if not args.plot_only and not _data_exists():
-        generate()
-    elif not args.plot_only and _data_exists():
-        print("data/ already present; skipping generation (use --plot-only to silence).")
+    if not args.plot_only and not _data_exists(data_suffix):
+        generate(nitems=nitems, data_suffix=data_suffix)
+    elif not args.plot_only:
+        print(f"data{data_suffix or '/'} already present; skipping generation.")
 
-    plot_sigmoid_band()
-    plot_tanimoto_recovery()
+    plot_sigmoid_band(fig_suffix, data_suffix)
+    plot_tanimoto_recovery(fig_suffix, data_suffix)
 
 
 if __name__ == "__main__":
