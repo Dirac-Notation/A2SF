@@ -123,17 +123,21 @@ def compute_densities(model, tokenizer, text, device, windows, budget):
             k = repeat_kv(k, G)
             scores = (q @ k.transpose(-2, -1)) / (D ** 0.5)
             scores = scores.masked_fill(causal[None, None], float("-inf"))
-            attn = torch.softmax(scores, dim=-1)
-            attn_np = attn[0].float().cpu().numpy()         # (H, T, T)
+            attn = torch.softmax(scores, dim=-1)[0].float()   # (H, T, T) on GPU
+            del scores
 
+            # Selection runs on GPU (torch.topk) so only the tiny index tensors
+            # cross to CPU; the (H, T, T) attention matrix never leaves the device.
+            # topk and the original np.argpartition return the same top-B *set*,
+            # so the position counts (hence densities) are identical.
             for w in windows:
                 if w == "full":
-                    weights = np.ones(T, dtype=np.float32)
+                    weights = torch.ones(T, device=attn.device)
                 else:
                     ww = int(w)
-                    weights = np.zeros(T, dtype=np.float32)
+                    weights = torch.zeros(T, device=attn.device)
                     weights[max(0, T - ww):] = 1.0
-                score = (weights[None, :, None] * attn_np).sum(axis=1)   # (H, T)
+                score = (weights[None, :, None] * attn).sum(dim=1)   # (H, T)
                 if T <= budget:
                     counts[w] += H
                     continue
@@ -141,15 +145,15 @@ def compute_densities(model, tokenizer, text, device, windows, budget):
                     if select_b >= head_len:
                         counts[w][:head_len] += H
                     else:
-                        sub = score[:, :head_len]
-                        idx = np.argpartition(-sub, select_b - 1, axis=1)[:, :select_b]
+                        sub = score[:, :head_len]                          # (H, head_len)
+                        idx = sub.topk(select_b, dim=1).indices.cpu().numpy()  # (H, select_b)
                         for hh in range(H):
                             counts[w][idx[hh]] += 1
                 if RECENT_BUDGET > 0:
                     counts[w][head_len:T] += H
 
             hidden_states[layer_idx] = None
-            del scores, attn, q, k, ln_h, attn_np
+            del attn, q, k, ln_h
             torch.cuda.empty_cache()
 
     edges = np.linspace(0, T, NBINS + 1).astype(int)
