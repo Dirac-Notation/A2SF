@@ -112,7 +112,6 @@ def main():
         ours = np.array(ours_vals, dtype=float)
         o_mean = ours.mean()
         o_min, o_max = ours.min(), ours.max()
-        o_std = ours.std(ddof=1) if len(ours) > 1 else 0.0
         present = [v for v in base_vals.values() if v is not None and not np.isnan(v)]
         lo, hi = min(list(ours) + present), max(list(ours) + present)
         pad = max((hi - lo) * 0.25, 0.15)
@@ -135,7 +134,7 @@ def main():
         ax.set_ylim(lo - pad, hi + pad)
         ax.set_xticks(range(1 + len(base_order)))
         ax.set_xticklabels(["Ours"] + base_order, fontsize=8.5, rotation=30, ha="right")
-        ax.set_title(f"{title}   σ={o_std:.2f}", fontsize=13 if emphasize else 12,
+        ax.set_title(title, fontsize=13 if emphasize else 12,
                      fontweight="bold" if emphasize else "normal")
         ax.grid(True, axis="y", alpha=0.3)
         if emphasize:
@@ -162,7 +161,7 @@ def main():
 
     from matplotlib.lines import Line2D
     handles = [Line2D([0], [0], marker="o", color="w", markerfacecolor=OURS_C,
-                      markeredgecolor="black", markersize=9, label="Ours (mean, min–max)")]
+                      markeredgecolor="black", markersize=9, label="Ours")]
     handles += [Line2D([0], [0], marker="D", color="w", markerfacecolor=base_colors[b],
                        markeredgecolor="black", markersize=9, label=b) for b in base_order]
     fig.legend(handles=handles, loc="upper center", ncol=len(handles),
