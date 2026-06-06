@@ -99,7 +99,7 @@ def main():
                 per_task[t].append(v)
 
     labels = [t for t in tasks if per_task[t]]
-    base_order = [b for b, _ in BASELINES if b in base_data]
+    base_order = [b for b in ["TOVA", "SnapKV-16", "SnapKV-32", "H2O"] if b in base_data]
     base_colors = {"SnapKV-16": "#d62728", "SnapKV-32": "#ff7f0e",
                    "TOVA": "#9467bd", "H2O": "#7f7f7f"}
     OURS_C = "#1f77b4"
