@@ -103,7 +103,6 @@ def main():
     base_colors = {"SnapKV-16": "#d62728", "SnapKV-32": "#ff7f0e",
                    "TOVA": "#9467bd", "H2O": "#7f7f7f"}
     OURS_C = "#1f77b4"
-    rng = np.random.default_rng(0)
 
     # ── One zoomed panel per metric (Overall + each task) ────────────────────────
     # A shared 0-50 axis hides the (small) seed-to-seed spread, which is the whole
@@ -112,19 +111,19 @@ def main():
     def draw_panel(ax, ours_vals, base_vals, title, ylabel=False, emphasize=False):
         ours = np.array(ours_vals, dtype=float)
         o_mean = ours.mean()
+        o_min, o_max = ours.min(), ours.max()
         o_std = ours.std(ddof=1) if len(ours) > 1 else 0.0
         present = [v for v in base_vals.values() if v is not None and not np.isnan(v)]
         lo, hi = min(list(ours) + present), max(list(ours) + present)
         pad = max((hi - lo) * 0.25, 0.15)
 
-        # Ours: mean±std band + mean line + jittered seed dots
-        ax.axhspan(o_mean - o_std, o_mean + o_std, color=OURS_C, alpha=0.13, zorder=0)
+        # Ours: min-max range band + mean marker (whiskers reach min and max,
+        # so the mean sits as the centre of the range).
+        ax.axhspan(o_min, o_max, color=OURS_C, alpha=0.13, zorder=0)
         ax.axhline(o_mean, color=OURS_C, lw=1.4, alpha=0.8, zorder=1)
-        ax.errorbar(0, o_mean, yerr=o_std, fmt="o", ms=9, color=OURS_C,
-                    ecolor=OURS_C, elinewidth=1.6, capsize=5, zorder=4,
-                    markeredgecolor="black", markeredgewidth=0.6)
-        ax.scatter(rng.uniform(-0.16, 0.16, len(ours)), ours, s=26,
-                   color=OURS_C, alpha=0.9, zorder=5, edgecolor="white", linewidth=0.4)
+        ax.errorbar(0, o_mean, yerr=[[o_mean - o_min], [o_max - o_mean]],
+                    fmt="o", ms=9, color=OURS_C, ecolor=OURS_C, elinewidth=1.6,
+                    capsize=5, zorder=4, markeredgecolor="black", markeredgewidth=0.6)
         for j, b in enumerate(base_order, start=1):
             v = base_vals.get(b)
             if v is None or np.isnan(v):
@@ -163,7 +162,7 @@ def main():
 
     from matplotlib.lines import Line2D
     handles = [Line2D([0], [0], marker="o", color="w", markerfacecolor=OURS_C,
-                      markeredgecolor="black", markersize=9, label="Ours (mean ± std)")]
+                      markeredgecolor="black", markersize=9, label="Ours (mean, min–max)")]
     handles += [Line2D([0], [0], marker="D", color="w", markerfacecolor=base_colors[b],
                        markeredgecolor="black", markersize=9, label=b) for b in base_order]
     fig.legend(handles=handles, loc="upper center", ncol=len(handles),
