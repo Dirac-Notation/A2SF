@@ -54,6 +54,13 @@ and inference; both must stay in sync.
   `model.init_cache(compression_config)` (pass `None` for no compression).
   `LlamaAttention.forward`: `cache.update(k, v)` → `repeat_kv` → `compressed_attention(...)`
   returns `(out, scores)` → `cache.compress(layer_idx, scores, seq_len_k)` (only on prefill).
+- `kv_qwen.py` / `kv_gemma.py` / `kv_opt.py` — same integration for Qwen2 / Gemma / OPT.
+  Qwen2 ≈ Llama (qkv bias=True). Gemma: `head_dim=config.head_dim` (may ≠ hidden/heads),
+  embedding ×√hidden, internal RoPE. OPT: no RoPE (learned positions), no GQA, LayerNorm,
+  fc1/relu/fc2, `out_proj`, `project_in/out`; query not pre-scaled (compressed_attention
+  applies 1/√head_dim). `cache.py`/`attention.py`/scorers/selectors are model-agnostic.
+  Dispatch: `utils_real_drop.get_kv_class(config.model_type)` / `load_kv_model(path)`;
+  `utils.load_model` routes by `config.model_type`. Verify: `script/verify_kv_models.py`.
 - `attention.py` — `compressed_attention(query, key, value, *, scorer, attn_mask, head_dim)`.
   Two paths:
   - Fast path (no scorer or already prefilled): `F.scaled_dot_product_attention`.
@@ -98,7 +105,8 @@ and inference; both must stay in sync.
   Multi-doc QA, Summarization, Passage Retrieval.
 
 ### Supported Models
-LLaMA 3.2 1B Instruct, LLaMA 3.1 8B Instruct, Qwen 2.5 7B Instruct (`config/model2path.json`).
+LLaMA 3.2 1B / 3.1 8B Instruct, Qwen 2.5, OPT, Gemma (`config/model2path.json`).
+Architecture support via `kv_{llama,qwen,gemma,opt}.py`, dispatched by `config.model_type`.
 
 ## Output convention
 Eval predictions go in `result_txt/pred/<budget>/<run_name>/`, never directly under
