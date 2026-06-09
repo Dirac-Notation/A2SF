@@ -4,8 +4,8 @@ import os
 import numpy as np
 import random
 
-from transformers import AutoTokenizer, AutoModelForCausalLM
-from utils_real_drop import KVLlamaForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
+from utils_real_drop import get_kv_class
 
 class CompressionConfig(dict):
     __getattr__ = dict.get
@@ -36,15 +36,15 @@ def load_model(model_name):
     
     tokenizer = AutoTokenizer.from_pretrained(model_path)
 
-    if "llama" in model_name.lower():
-        model = KVLlamaForCausalLM.from_pretrained(
-            model_path,
-            torch_dtype=torch.bfloat16,
-            device_map="auto",
-        )
-    else:
-        raise ValueError(f"Unsupported model: {model_name}. Only Llama and OPT models are supported.")
-    
+    # Dispatch by HF config.model_type (llama / qwen2 / gemma / opt).
+    model_type = AutoConfig.from_pretrained(model_path).model_type
+    kv_class = get_kv_class(model_type)
+    model = kv_class.from_pretrained(
+        model_path,
+        torch_dtype=torch.bfloat16,
+        device_map="auto",
+    )
+
     model = model.eval()
-    
+
     return model, tokenizer
