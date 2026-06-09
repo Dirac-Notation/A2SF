@@ -1,6 +1,5 @@
 from utils_real_drop.kv_llama import KVLlamaForCausalLM
 from utils_real_drop.kv_qwen import KVQwen2ForCausalLM
-from utils_real_drop.kv_gemma import KVGemmaForCausalLM
 from utils_real_drop.kv_opt import KVOPTForCausalLM
 from utils_real_drop.cache import CompressedKVCache
 
@@ -8,7 +7,6 @@ from utils_real_drop.cache import CompressedKVCache
 _MODEL_TYPE_TO_KV_CLASS = {
     "llama": KVLlamaForCausalLM,
     "qwen2": KVQwen2ForCausalLM,
-    "gemma": KVGemmaForCausalLM,
     "opt": KVOPTForCausalLM,
 }
 
@@ -33,7 +31,6 @@ def load_kv_model(model_path: str, **from_pretrained_kwargs):
 __all__ = [
     "KVLlamaForCausalLM",
     "KVQwen2ForCausalLM",
-    "KVGemmaForCausalLM",
     "KVOPTForCausalLM",
     "CompressedKVCache",
     "get_kv_class",
