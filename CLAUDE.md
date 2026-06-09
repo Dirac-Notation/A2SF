@@ -62,10 +62,11 @@ and inference; both must stay in sync.
   `utils.load_model` routes by `config.model_type`. Verify: `script/verify_kv_models.py`.
   (Gemma deferred: Gemma 4 needs newer transformers than the pinned 4.46.2.)
 - `attention.py` — `compressed_attention(query, key, value, *, scorer, attn_mask, head_dim)`.
-  Two paths:
-  - Fast path (no scorer or already prefilled): `F.scaled_dot_product_attention`.
-  - Score-accumulating: Q-tiled single pass; per-key fp32 scores accumulated in KV-head
-    space, weighted by `scorer.get_query_weights(...)`.
+  Decoupled (SnapKV-style): **output** always via `F.scaled_dot_product_attention` (flash,
+  full K/V); **scoring** is a separate windowed pass — only queries in
+  `[scorer.score_query_start(seq), seq)` (forgetting weight ≥ `SCORE_WEIGHT_EPS`=1e-5) are
+  revisited, single matmul if ≤ `q_block_size` else Q-tiled (a=0/H2O → all queries, tiled).
+  Steep sigmoid → tiny window → ~flash-only speed; scores match full-pass within ~1e-6.
 - `cache.py` — `CompressedKVCache(Cache)`: HF-compatible. Owns K/V tensors, per-layer
   scorer list, single selector. `compress` calls `selector.select` then gathers.
 - `scorers/` — per-query weight curves only (budget/recent/select-free).

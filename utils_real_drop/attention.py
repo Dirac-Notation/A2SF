@@ -1,16 +1,25 @@
 """Memory-efficient attention with optional KV-compression score accumulation.
 
-This module is model-agnostic: it knows nothing about Llama, Qwen, etc. It takes
-already-projected (and already-RoPE'd, already-repeat_kv'd) Q/K/V plus an
-optional `Scorer`, and returns the attention output along with the accumulated
-per-key scores (or `None` if no compression). Selection from those scores is
-the cache + selector's responsibility, not attention's.
+Model-agnostic: takes already-projected (RoPE'd, repeat_kv'd) Q/K/V plus an
+optional `Scorer`, returns the attention output and the accumulated per-key
+scores (or `None`). Selection from those scores is the cache + selector's job.
 
-Two paths:
-  * Fast path (no scorer or scorer already prefilled): SDPA with `is_causal`.
-  * Score-accumulating path: Q-tiled single-pass. Only the Q dimension is
-    chunked; K/V are kept whole so softmax is exact per block and both output
-    and compression scores are computed in a single pass over K.
+Decoupled design (mirrors SnapKV's official flow):
+  1. **Output** is always computed with FlashAttention-class
+     `F.scaled_dot_product_attention` on the FULL K/V (exact causal attention).
+  2. **Scoring** for compression is a SEPARATE pass that only revisits the
+     recent query window the forgetting curve actually weights. `Scorer.
+     score_query_start(seq_len_q)` returns the earliest query whose weight is
+     >= SCORE_WEIGHT_EPS; earlier queries contribute negligibly and are skipped.
+     The window is processed in Q-tiles (`q_block_size`): a single matmul when it
+     fits one tile, memory-efficiently tiled when larger (e.g. a=0 / H2O, where
+     the window spans all queries). FlashAttention cannot expose the softmax
+     probabilities, hence this small extra scoring matmul.
+
+Three paths:
+  * No scorer (or already prefilled): SDPA only, no scores.
+  * Precomputed-score scorer (e.g. TriAttentionScorer): SDPA output + ready scores.
+  * Score-accumulating: SDPA output + windowed Q-tiled scoring.
 """
 import math
 from typing import Optional, Tuple
@@ -42,13 +51,13 @@ def compressed_attention(
     sm_scale = 1.0 / math.sqrt(head_dim)
     device = query.device
 
+    # ── Fast path: no compression scoring needed ─────────────────────────────
     if scorer is None or not scorer.needs_scores():
         is_causal = attn_mask is None and seq_len_q > 1
         out = F.scaled_dot_product_attention(
             query, key, value,
             attn_mask=None if is_causal else attn_mask,
-            dropout_p=0.0,
-            is_causal=is_causal,
+            dropout_p=0.0, is_causal=is_causal,
         )
         return out, None
 
@@ -59,53 +68,47 @@ def compressed_attention(
         num_kv = num_heads
         group = 1
 
-    # Pass query/key to prepare_prefill so policy-driven scorers can compute snap.
+    # Let policy-driven scorers precompute (e.g. snap from query/key).
     scorer.prepare_prefill(seq_len_q, device, query.dtype, query=query, key=key, num_kv=num_kv)
 
-    # Fast path for scorers that pre-compute scores without the Q-tiled loop
-    # (e.g. TriAttentionScorer). Uses FlashAttention for the attention output.
+    # ── Step 1: attention OUTPUT via FlashAttention on full K/V ───────────────
+    is_causal = attn_mask is None and seq_len_q > 1
+    output = F.scaled_dot_product_attention(
+        query, key, value,
+        attn_mask=None if is_causal else attn_mask,
+        dropout_p=0.0, is_causal=is_causal,
+    )
+
+    # Precomputed-score scorers (e.g. TriAttentionScorer): scores already ready.
     precomp = getattr(scorer, "_precomputed_scores", None)
     if precomp is not None:
-        is_causal = attn_mask is None and seq_len_q > 1
-        out = F.scaled_dot_product_attention(
-            query, key, value,
-            attn_mask=None if is_causal else attn_mask,
-            dropout_p=0.0,
-            is_causal=is_causal,
-        )
         scorer.finalize_prefill()
-        return out, precomp
+        return output, precomp
 
+    # ── Step 2: SCORING over the bounded recent query window ─────────────────
     acc_scores = torch.zeros(
         (batch_size, num_kv, seq_len_k), dtype=torch.float32, device=device
     )
-    output = torch.empty_like(query)
-
     k_pos = torch.arange(seq_len_k, device=device)
     q_offset = seq_len_k - seq_len_q
 
-    for q_start in range(0, seq_len_q, q_block_size):
+    # Skip old queries whose forgetting weight is negligible. Single matmul if the
+    # window fits one tile; Q-tiled (memory-efficient) otherwise (a=0 -> all).
+    q_score_start = scorer.score_query_start(seq_len_q)
+    q_score_start = max(0, min(q_score_start, seq_len_q - 1))   # always >= 1 query
+
+    for q_start in range(q_score_start, seq_len_q, q_block_size):
         q_end = min(q_start + q_block_size, seq_len_q)
         qb = q_end - q_start
         q_chunk = query[:, :, q_start:q_end, :]
         q_pos = torch.arange(q_start + q_offset, q_end + q_offset, device=device)
 
         s = torch.matmul(q_chunk, key.transpose(2, 3)) * sm_scale
-
         causal = k_pos.view(1, seq_len_k) > q_pos.view(qb, 1)
         s.masked_fill_(causal.view(1, 1, qb, seq_len_k), float("-inf"))
-
         if attn_mask is not None:
             s = s + attn_mask[:, :, q_start:q_end, :].to(s.dtype)
-
         probs = F.softmax(s, dim=-1)
-
-        output[:, :, q_start:q_end, :] = torch.matmul(
-            probs.to(value.dtype), value
-        )
-
-        if hasattr(scorer, "observe_probs"):
-            scorer.observe_probs(q_start, q_end, probs)
 
         q_weights = scorer.get_query_weights(
             q_start=q_start, q_end=q_end, device=device, dtype=probs.dtype,
@@ -113,23 +116,16 @@ def compressed_attention(
         if q_weights is None:
             continue
 
-        # Per-head mode: scorer returns (num_kv, qb) where each KV head has its
-        # own weight curve. Otherwise treat as (N_actions, qb) action-batch.
-        per_head = bool(getattr(scorer, "is_per_head", lambda: False)())
+        # (qb,) single curve, or (N_actions, qb) action-batch (data generation).
         if q_weights.ndim == 1:
             qw_view = q_weights.view(1, 1, qb, 1)
         elif q_weights.ndim == 2:
-            if per_head and q_weights.size(0) == num_kv:
-                # Expand (num_kv, qb) → (num_q_heads, qb) by broadcasting within group
-                qw_full = q_weights.unsqueeze(1).expand(num_kv, group, qb).reshape(num_heads, qb)
-                qw_view = qw_full.view(1, num_heads, qb, 1)
-            else:
-                N_actions = q_weights.size(0)
-                if N_actions not in (1, batch_size):
-                    raise ValueError(
-                        f"q_weights leading dim {N_actions} must be 1 or batch_size {batch_size}"
-                    )
-                qw_view = q_weights.view(N_actions, 1, qb, 1)
+            N_actions = q_weights.size(0)
+            if N_actions not in (1, batch_size):
+                raise ValueError(
+                    f"q_weights leading dim {N_actions} must be 1 or batch_size {batch_size}"
+                )
+            qw_view = q_weights.view(N_actions, 1, qb, 1)
         else:
             raise ValueError(f"q_weights.ndim must be 1 or 2, got {q_weights.ndim}")
 

@@ -15,7 +15,6 @@ from .base import Scorer
 from .a2sf import A2SFScorer
 from .snap import SnapScorer
 from .sigmoid import SigmoidScorer
-from .per_lh_policy import PerLHPolicyScorer, load_policies, A_VALUES, B_VALUES
 from .triattention import TriAttentionScorer
 
 
@@ -28,26 +27,6 @@ def _build_snap(cfg, num_kv, layer_idx=None):
 
 
 def _build_sigmoid(cfg, num_kv, layer_idx=None):
-    # Per-(L, h) policy mode: cfg.per_lh_policy_bank present.
-    bank = getattr(cfg, "per_lh_policy_bank", None)
-    if bank is not None and layer_idx is not None:
-        # Build dict {h: policy} for this layer
-        layer_policies = {h: bank[(layer_idx, h)] for h in range(num_kv)
-                            if (layer_idx, h) in bank}
-        if layer_policies:
-            return PerLHPolicyScorer(
-                num_kv, layer_idx=layer_idx,
-                policies_per_head=layer_policies,
-                a_values=A_VALUES, b_values=B_VALUES,
-                query_window=int(getattr(cfg, "per_lh_query_window", 16)),
-                topk=int(getattr(cfg, "per_lh_topk", 64)),
-                sink_mask=int(getattr(cfg, "per_lh_sink_mask", 4)),
-            )
-    # Per-(L, h) static lookup mode.
-    per_lh_a = getattr(cfg, "per_lh_a", None)
-    per_lh_b = getattr(cfg, "per_lh_b", None)
-    if per_lh_a is not None and per_lh_b is not None and layer_idx is not None:
-        return SigmoidScorer(num_kv, a=per_lh_a[layer_idx], b=per_lh_b[layer_idx])
     return SigmoidScorer(num_kv, a=cfg.a, b=cfg.b)
 
 
