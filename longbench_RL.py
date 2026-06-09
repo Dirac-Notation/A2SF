@@ -47,14 +47,6 @@ def parse_args(args=None):
                         help="Optional path to {task_type: action_idx} JSON. When set, the RL "
                              "agent is bypassed and the action_idx for that task is used directly. "
                              "Used for ablation Config A (per-task fixed action).")
-    parser.add_argument("--per_lh_lookup", type=str, default=None,
-                        help="Path to per-(L,h) static lookup .pt with per_lh_a/per_lh_b "
-                             "(shape (n_layers, n_kv_heads)). When set, overrides agent action: "
-                             "each layer's scorer uses per-head (a, b) from lookup table.")
-    parser.add_argument("--per_lh_policies_dir", type=str, default=None,
-                        help="Directory containing per-(L,h) policy weights (L*h*.pt). "
-                             "When set, each layer uses PerLHPolicyScorer that runs the policy "
-                             "during prefill on the layer's snap to choose per-head (a, b).")
     parser.add_argument("--per_prompt_actions_json", type=str, default=None,
                         help="JSON {dataset: [action_idx, ...]} (one per prompt in order). "
                              "When set, each prompt uses its assigned action_idx (agent bypassed).")
@@ -126,8 +118,6 @@ def _rl_worker(
     pyramid_kv: bool = False,
     pyramid_ratio: float = 4.0,
     fixed_actions: Optional[dict] = None,
-    per_lh_lookup: Optional[str] = None,
-    per_lh_policies_dir: Optional[str] = None,
     per_prompt_actions: Optional[dict] = None,
 ):
     os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpu_group)
@@ -140,29 +130,6 @@ def _rl_worker(
     model.config.chunk_size = int(chunk_size)
     model.config.pyramid_kv = bool(pyramid_kv)
     model.config.pyramid_ratio = float(pyramid_ratio)
-    if per_lh_lookup is not None:
-        lk = torch.load(per_lh_lookup, map_location="cpu", weights_only=False)
-        model.config.per_lh_a = lk["per_lh_a"]
-        model.config.per_lh_b = lk["per_lh_b"]
-        print(f"[worker {worker_id}] per-(L,h) lookup loaded: shape {lk['per_lh_a'].shape}")
-    if per_lh_policies_dir is not None:
-        from utils_real_drop.scorers import load_policies
-        # Pick first weight file to read in_dim / hidden
-        from pathlib import Path
-        sample = sorted(Path(per_lh_policies_dir).glob("L*h*.pt"))[0]
-        sample_ckpt = torch.load(sample, map_location="cpu", weights_only=False)
-        in_dim = sample_ckpt["in_dim"]; hidden = sample_ckpt["hidden"]
-        n_layers = model.model_runner.model.config.num_hidden_layers
-        n_kv = model.model_runner.model.config.num_key_value_heads
-        bank = load_policies(per_lh_policies_dir, n_layers, n_kv, in_dim, hidden)
-        # Move policies to model device
-        dev = next(model.model_runner.model.model.layers[0].parameters()).device
-        for k, m in bank.items(): bank[k] = m.to(dev)
-        model.config.per_lh_policy_bank = bank
-        topk_from_dim = (in_dim - 3) // 2
-        model.config.per_lh_topk = topk_from_dim
-        print(f"[worker {worker_id}] per-(L,h) policies loaded: {len(bank)} policies, "
-                f"in_dim={in_dim} (topk={topk_from_dim}), hidden={hidden}")
     if chunk_size or pyramid_kv:
         print(f"[worker {worker_id}] modifiers: chunk_size={chunk_size} pyramid_kv={pyramid_kv} ratio={pyramid_ratio}")
     tokenizer = model.model_runner.tokenizer
@@ -339,8 +306,6 @@ def _run_longbench_rl_multi_gpu(args):
                 pyramid_kv=bool(args.pyramid_kv),
                 pyramid_ratio=float(args.pyramid_ratio),
                 fixed_actions=fixed_actions,
-                per_lh_lookup=args.per_lh_lookup,
-                per_lh_policies_dir=args.per_lh_policies_dir,
                 per_prompt_actions=per_prompt_actions,
             ),
         )

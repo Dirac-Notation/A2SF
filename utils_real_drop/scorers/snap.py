@@ -21,3 +21,7 @@ class SnapScorer(Scorer):
         if local_start < qb:
             w[local_start:] = 1.0
         return w
+
+    def score_query_start(self, seq_len_q: int) -> int:
+        # Only the last `observation_window` queries have weight 1; the rest 0.
+        return max(0, seq_len_q - self.observation_window)

@@ -2,6 +2,11 @@ from typing import Optional
 
 import torch
 
+# Query weights below this are treated as negligible: queries whose forgetting
+# weight is < SCORE_WEIGHT_EPS are skipped during score accumulation. Smaller =
+# more exact, larger window. See `score_query_start`.
+SCORE_WEIGHT_EPS = 1e-5
+
 
 class Scorer:
     """Per-layer scorer.
@@ -38,3 +43,12 @@ class Scorer:
         self, q_start: int, q_end: int, device: torch.device, dtype: torch.dtype
     ) -> Optional[torch.Tensor]:
         return None
+
+    def score_query_start(self, seq_len_q: int) -> int:
+        """Smallest prefill query index whose weight is non-negligible.
+
+        Queries in [0, score_query_start) have weight < SCORE_WEIGHT_EPS and are
+        skipped during score accumulation, bounding scoring to the recent window.
+        Default 0 = unbounded support (all queries needed, e.g. H2O / a=0).
+        """
+        return 0
