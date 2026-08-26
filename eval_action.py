@@ -63,13 +63,13 @@ def main() -> None:
     parser.add_argument(
         "--input",
         type=str,
-        default="runs/a2sf_rl/evaluation_progress.jsonl",
+        default="runs/waits_rl/evaluation_progress.jsonl",
         help="Path to evaluation_progress.jsonl",
     )
     parser.add_argument(
         "--output",
         type=str,
-        default="runs/a2sf_rl/eval_actions_a_hist_last.png",
+        default="runs/waits_rl/eval_actions_a_hist_last.png",
         help="Output image path",
     )
     args = parser.parse_args()

@@ -12,22 +12,45 @@ Adding a new scorer:
 from typing import List, Optional
 
 from .base import Scorer
-from .a2sf import A2SFScorer
 from .snap import SnapScorer
-from .sigmoid import SigmoidScorer
+from .waits import WaitsScorer
 from .triattention import TriAttentionScorer
+from .streaming import StreamingLLMScorer
+from .keydiff import KeyDiffScorer
+from .l2norm import L2NormScorer
 
 
-def _build_a2sf(cfg, num_kv, layer_idx=None):
-    return A2SFScorer(num_kv, forgetting_factor=cfg.a)
+def _build_streamingllm(cfg, num_kv, layer_idx=None):
+    n = getattr(cfg, "n_sink", None)
+    return StreamingLLMScorer(num_kv, n_sink=4 if n is None else int(n))
+
+
+def _build_keydiff(cfg, num_kv, layer_idx=None):
+    return KeyDiffScorer(num_kv)
+
+
+def _build_l2norm(cfg, num_kv, layer_idx=None):
+    return L2NormScorer(num_kv)
 
 
 def _build_snap(cfg, num_kv, layer_idx=None):
     return SnapScorer(num_kv, observation_window=cfg.observation_window)
 
 
-def _build_sigmoid(cfg, num_kv, layer_idx=None):
-    return SigmoidScorer(num_kv, a=cfg.a, b=cfg.b)
+def _build_waits(cfg, num_kv, layer_idx=None):
+    # N3 head-portfolio: cfg.a_heads/b_heads = per-kv-head curve lists (len num_kv).
+    a_heads = getattr(cfg, "a_heads", None)
+    b_heads = getattr(cfg, "b_heads", None)
+    if a_heads is not None and b_heads is not None:
+        return WaitsScorer(num_kv, a=a_heads[0], b=b_heads[0],
+                           a_heads=a_heads, b_heads=b_heads)
+    # per-layer schedule: cfg.a_schedule/b_schedule are length-num_layers lists.
+    # If present, layer ℓ uses (a_schedule[ℓ], b_schedule[ℓ]); else uniform cfg.a/cfg.b.
+    a_sched = getattr(cfg, "a_schedule", None)
+    b_sched = getattr(cfg, "b_schedule", None)
+    if a_sched is not None and b_sched is not None and layer_idx is not None:
+        return WaitsScorer(num_kv, a=a_sched[layer_idx], b=b_sched[layer_idx])
+    return WaitsScorer(num_kv, a=cfg.a, b=cfg.b, curve=(getattr(cfg, "curve", None) or "sigmoid"))
 
 
 def _build_triattention(cfg, num_kv, layer_idx=None):
@@ -38,10 +61,12 @@ def _build_triattention(cfg, num_kv, layer_idx=None):
 
 
 _REGISTRY = {
-    "a2sf": _build_a2sf,
+    "waits": _build_waits,        # canonical: the unified sigmoid-based WAITS scorer
     "snap": _build_snap,
-    "sigmoid": _build_sigmoid,
     "triattention": _build_triattention,
+    "streamingllm": _build_streamingllm,
+    "keydiff": _build_keydiff,
+    "l2norm": _build_l2norm,
 }
 
 
@@ -70,9 +95,8 @@ def build_scorers(
 
 __all__ = [
     "Scorer",
-    "A2SFScorer",
     "SnapScorer",
-    "SigmoidScorer",
+    "WaitsScorer",
     "TriAttentionScorer",
     "build_scorers",
 ]

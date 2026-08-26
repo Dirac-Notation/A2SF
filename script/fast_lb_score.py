@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Action grid constants only (the (a, b) definitions written into each record);
 # this is the action space, not model architecture.
-from RL.a2sf_model import SIGMOID_A_VALUES, SIGMOID_B_VALUES
+from RL.action_grid import SIGMOID_A_VALUES, SIGMOID_B_VALUES
 
 DEFAULT_INDEX = "runs/fast_lb_eval/index.pt"
 

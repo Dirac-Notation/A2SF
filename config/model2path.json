@@ -1,8 +1,9 @@
 {
-    "llama3-1b": "meta-llama/Llama-3.2-1B-Instruct",
-    "llama3-8b": "meta-llama/Llama-3.1-8B-Instruct",
-    "qwen2": "Qwen/Qwen2.5-7B-Instruct",
-    "qwen2-0.5b": "Qwen/Qwen2.5-0.5B-Instruct",
-    "opt": "facebook/opt-6.7b",
-    "opt-125m": "facebook/opt-125m"
+  "llama3-1b": "meta-llama/Llama-3.2-1B-Instruct",
+  "llama3-8b": "meta-llama/Llama-3.1-8B-Instruct",
+  "qwen2": "Qwen/Qwen2.5-7B-Instruct",
+  "qwen2-0.5b": "Qwen/Qwen2.5-0.5B-Instruct",
+  "mistral-7b": "/home/smp9898/models/mistral-7b-v0.2",
+  "qwen3-1.7b": "/home/smp9898/.cache/huggingface/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e",
+  "qwen3-32b": "Qwen/Qwen3-32B"
 }

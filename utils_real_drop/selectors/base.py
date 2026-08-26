@@ -37,9 +37,10 @@ def pyramid_budgets(num_layers: int, base_budget: int, ratio: float = 4.0) -> Li
 class Selector:
     """Score → kept-indices for every layer of the model."""
 
-    def __init__(self, budgets: List[int], recent_budget: int = 16):
+    def __init__(self, budgets: List[int], recent_budget: int = 16, n_sink: int = 0):
         self.budgets = [max(int(b), 2) for b in budgets]
         self.recent_budget = int(recent_budget)
+        self.n_sink = int(n_sink)            # always-keep first n_sink (attention-sink) tokens
         self.num_layers = len(self.budgets)
 
     def budget_for(self, layer_idx: int) -> int:

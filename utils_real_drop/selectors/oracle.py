@@ -4,7 +4,7 @@ precomputed kept-token indices supplied by the caller.
 The intended use is the two-pass oracle evaluation: first run full-cache
 generation while capturing per-decode-step attention to derive the
 "post-generation reference set", then run a second pass with a
-CompressedKVCache whose selector is this OracleSelector preloaded with
+CompressedCache whose selector is this OracleSelector preloaded with
 those indices. The framework's standard prefill→compress→decode flow
 takes care of position_ids / RoPE without any monkey-patching.
 """

@@ -95,7 +95,7 @@ def load_model(device: str = "cuda", dtype=torch.bfloat16):
     tok = AutoTokenizer.from_pretrained(mp)
     model = AutoModelForCausalLM.from_pretrained(
         mp, torch_dtype=dtype,
-        device_map={"": device}, attn_implementation="sdpa",
+        device_map={"": device}, attn_implementation="sdpa",   # efficient prefill
     ).eval()
     return tok, model
 
@@ -219,10 +219,16 @@ class AttentionCollector:
             q = attn_mod.q_proj(hidden)
             q = q.view(1, W, self.num_heads, self.head_dim).transpose(1, 2)
             pos_ids = torch.arange(S - W, S, device=device).unsqueeze(0)
-            cos, sin = attn_mod.rotary_emb(q, pos_ids)
+            # transformers v5: rotary_emb moved from per-attn-module to model level
+            rotary = getattr(attn_mod, "rotary_emb", None) or self.model.model.rotary_emb
+            cos, sin = rotary(q, pos_ids)
             q_rot, _ = apply_rotary_pos_emb(q, q, cos, sin)
 
-            k = past_kv[i][0]                          # (1, nkv, S, D)
+            # v5 cache: layer keys via .layers[i].keys (fallback to legacy tuple access)
+            try:
+                k = past_kv.layers[i].keys             # (1, nkv, S, D)
+            except (AttributeError, TypeError):
+                k = past_kv[i][0]
             q_g = q_rot.view(1, self.num_kv_heads, self.group_size, W, self.head_dim)
             k_t = k.unsqueeze(2).transpose(-1, -2)
             scores = torch.matmul(q_g, k_t) / math.sqrt(self.head_dim)
@@ -272,6 +278,10 @@ def teacher_forcing_answer_score(model, tokenizer, pred_text, past_kv, seq_len, 
     answer_score = torch.zeros(n_layers, n_heads, seq_len, dtype=torch.float32)
 
     import warnings
+    # teacher-forcing needs attention weights -> eager just for these (few-query) forwards;
+    # prefill stays sdpa (efficient). restore afterwards.
+    _prev_impl = model.config._attn_implementation
+    model.config._attn_implementation = "eager"
     with torch.no_grad(), warnings.catch_warnings():
         warnings.simplefilter("ignore")
         for start in range(0, N_pred, _TF_BATCH):
@@ -286,6 +296,7 @@ def teacher_forcing_answer_score(model, tokenizer, pred_text, past_kv, seq_len, 
                     a = attn_l[0, :, :, :seq_len].float()   # (n_heads, K, seq_len)
                     answer_score[li] += a.sum(dim=1).cpu()
             del out
+    model.config._attn_implementation = _prev_impl
     return answer_score
 
 

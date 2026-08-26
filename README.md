@@ -46,7 +46,7 @@ model = KVLlamaForCausalLM.from_pretrained(
 # Pass `compression_config=None` for the un-compressed baseline.
 # For A2SF compression, build a config object with the fields the policy needs:
 compression_config = SimpleNamespace(
-    compression_method="a2sf",   # one of: "full"/None, "a2sf", "snap", "sigmoid"
+    compression_method="waits",   # one of: "full"/None, "waits", "snap", "sigmoid"
     total_budget=256,            # total tokens kept per layer (recent_budget=16 fixed)
     forgetting_factor=0.95,
 )
@@ -58,12 +58,12 @@ out = model.generate(**inputs, max_new_tokens=64, do_sample=False)
 print(tokenizer.decode(out[0, inputs.input_ids.shape[1]:], skip_special_tokens=True))
 ```
 
-`compression_method` accepts `"full"` (or `None`), `"a2sf"`, `"snap"`,
+`compression_method` accepts `"full"` (or `None`), `"waits"`, `"snap"`,
 `"sigmoid"`. Each method needs a few extra fields on the config object:
 
 | method     | required fields                                |
 |------------|------------------------------------------------|
-| `a2sf`     | `total_budget`, `forgetting_factor`            |
+| `waits`     | `total_budget`, `forgetting_factor`            |
 | `snap`     | `total_budget`, `observation_window`           |
 | `sigmoid`  | `total_budget`, `a`, `b`                       |
 
@@ -78,7 +78,7 @@ utils_real_drop/
 ├── cache.py         # CompressedKVCache — HF-compatible KV storage + compress hook
 └── policies/
     ├── base.py      # CompressionPolicy abstract base
-    ├── a2sf.py
+    ├── waits.py
     ├── snap.py
     ├── sigmoid.py
     └── __init__.py  # build_policies() dispatcher / registry

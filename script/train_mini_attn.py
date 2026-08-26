@@ -84,8 +84,11 @@ class MiniCrossAttn(nn.Module):
         max_len: int         = 32768,
         use_distance_bias: bool = True,
         causal_mode: str     = "bidir-causal",
+        n_out: int           = 1,
+        readout: str         = "crossattn",
     ):
         super().__init__()
+        self.readout = readout
         self.embed_dim = embed_dim
         self.hidden = hidden
         self.n_heads = n_heads
@@ -94,6 +97,11 @@ class MiniCrossAttn(nn.Module):
         self.max_len = max_len
         self.use_distance_bias = use_distance_bias
         self.causal_mode = causal_mode
+        # n_out=1 (default): mean over heads -> (B, L), identical to the original
+        # RL-compatible single-output model. n_out>1: learned head-mixing readout
+        # giving (B, n_out, L) for per-layer oracle targets (experimentation).
+        self.n_out = int(n_out)
+        self.out_mix = nn.Linear(n_heads, self.n_out, bias=False) if self.n_out > 1 else None
 
         self.down_proj = nn.Linear(embed_dim, hidden, bias=False)
         self.norm_in = nn.LayerNorm(hidden)
@@ -112,6 +120,13 @@ class MiniCrossAttn(nn.Module):
         self.q_proj = nn.Linear(hidden, hidden, bias=False)
         self.k_proj = nn.Linear(hidden, hidden, bias=False)
 
+        # Alternative readout: free per-token MLP head (no observation-window
+        # constraint). Diagnostic for whether the cross-attn readout limits what
+        # importance the encoder can express.
+        if readout == "mlp":
+            self.mlp_head = nn.Sequential(
+                nn.Linear(hidden, hidden), nn.GELU(), nn.Linear(hidden, self.n_out))
+
     def forward(self, embeds: torch.Tensor):
         """
         embeds: (B, L, embed_dim) or (L, embed_dim)
@@ -127,6 +142,15 @@ class MiniCrossAttn(nn.Module):
         h = self.norm_in(h)
         for blk in self.self_attn_layers:
             h = blk(h)                                  # (B, L, hidden)
+
+        if self.readout == "mlp":                       # free per-token head
+            scores = self.mlp_head(h)                   # (B, L, n_out)
+            scores = scores.transpose(1, 2)             # (B, n_out, L)
+            if self.n_out == 1:
+                scores = scores.squeeze(1)              # (B, L)
+            if squeeze or B == 1:
+                scores = scores.squeeze(0)              # (L,) or (n_out, L)
+            return (scores,)
 
         # Cross-attention: last W tokens as Q, all as K
         W = min(self.query_window, L)
@@ -160,8 +184,12 @@ class MiniCrossAttn(nn.Module):
 
         attn = F.softmax(logits, dim=-1)                 # (B, H, W, L)
 
-        # Per-token score: sum over W queries, then mean over heads
-        scores = attn.sum(dim=2).mean(dim=1)             # (B, L)
+        # Per-token score: sum over W queries -> (B, H, L)
+        per_head = attn.sum(dim=2)                       # (B, H, L)
+        if self.out_mix is None:                         # n_out=1: mean over heads (original)
+            scores = per_head.mean(dim=1)                # (B, L)
+        else:                                            # n_out>1: learned head-mix -> (B, n_out, L)
+            scores = self.out_mix(per_head.transpose(1, 2)).transpose(1, 2)  # (B, n_out, L)
         if squeeze or B == 1:
-            scores = scores.squeeze(0)                   # (L,)
+            scores = scores.squeeze(0)                   # (L,) or (n_out, L)
         return (scores,)

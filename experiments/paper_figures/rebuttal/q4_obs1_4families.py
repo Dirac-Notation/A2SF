@@ -24,8 +24,8 @@ rcParams.update({
     'font.family': 'serif', 'font.size': 12,
     'axes.labelsize': 13, 'axes.titlesize': 14,
     'xtick.labelsize': 10, 'ytick.labelsize': 10,
-    'legend.fontsize': 12, 'axes.linewidth': 1.0,
-    'figure.dpi': 180,
+    'legend.fontsize': 13, 'axes.linewidth': 1.0,
+    'figure.dpi': 150,
 })
 
 BUDGET = int(os.environ.get('BUDGET', '128'))
@@ -109,7 +109,7 @@ def per_prompt_median_r2(w_tan, d, W, fit_fn):
 
 
 def draw_4family(out_dir):
-    fig, axes = plt.subplots(1, 4, figsize=(15, 4.4))
+    fig, axes = plt.subplots(1, 4, figsize=(13, 3.8))
     band_colors = plt.get_cmap('tab10').colors
 
     legend_handles = []
@@ -139,13 +139,12 @@ def draw_4family(out_dir):
         fit_handles = []
         for fam_name, fit_fn, fcolor in FAMILIES:
             yhat, popt, r2_mean = fit_fn(d, mean, W)
-            r2_med = per_prompt_median_r2(w, d, W, fit_fn)
             ls = '--' if fam_name == 'sigmoid' else (':' if fam_name == 'exp'
                   else ('-.' if fam_name == 'linear' else (0, (3, 1, 1, 1))))
             h, = ax.plot(d, yhat, ls=ls, color=fcolor, lw=2.0,
                           label=f'{fam_name} fit')
             fit_handles.append((fam_name, h))
-            r2_lines.append(f"{fam_name:>7s}: R²={r2_mean:+0.2f} / med={r2_med:+0.2f}")
+            r2_lines.append(f"{fam_name:>7s}: R²={r2_mean:+0.2f}")
 
         # Annotate R² (upper-left)
         ax.text(0.03, 0.97, '\n'.join(r2_lines),
@@ -164,10 +163,10 @@ def draw_4family(out_dir):
             legend_handles = [h_band, h_mean] + [h for _, h in fit_handles]
             legend_labels  = ['mean ± std', 'mean'] + [n for n, _ in fit_handles]
 
-    fig.subplots_adjust(left=0.05, right=0.99, top=0.80, bottom=0.16, wspace=0.25)
-    fig.text(0.525, 0.03,
+    fig.subplots_adjust(left=0.07, right=0.99, top=0.82, bottom=0.16, wspace=0.28)
+    fig.text(0.525, 0.02,
              r'query distance $d$   ($\leftarrow$ older  $\cdot$  recent $\rightarrow$)',
-             ha='center', fontsize=13)
+             ha='center', fontsize=12)
     # Legend at top of figure
     fig.legend(legend_handles, legend_labels,
                 loc='upper center', bbox_to_anchor=(0.5, 0.99),

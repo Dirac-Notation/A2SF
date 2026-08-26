@@ -8,7 +8,7 @@ usage() {
     echo "Options:"
     echo "  -b, --budget          Token budget (default: 1024)"
     echo "  -m, --model           Model name (default: llama3-1b)"
-    echo "  -c, --rl_checkpoint   RL checkpoint path (default: runs/a2sf_rl/policy_final.pt)"
+    echo "  -c, --rl_checkpoint   RL checkpoint path (default: runs/waits_rl/policy_final.pt)"
     echo "  -g, --gpus_per_model  GPUs per model instance (default: 1)"
     echo "  -h, --help            Show this help message"
     exit 0
@@ -16,7 +16,7 @@ usage() {
 
 budget=1024
 model="llama3-1b"
-rl_checkpoint="runs/a2sf_rl/policy_final.pt"
+rl_checkpoint="runs/waits_rl/policy_final.pt"
 gpus_per_model=1
 
 while [[ $# -gt 0 ]]; do

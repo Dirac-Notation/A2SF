@@ -1,45 +1,28 @@
-# The per-model reimplementations (kv_llama/kv_qwen/kv_opt) target transformers
-# 4.46.2 internals; under transformers v5 those APIs are gone, so guard the import.
-# The v5 path (utils_real_drop.v5_compress) uses only scorers/ + selectors/.
-try:
-    from utils_real_drop.kv_llama import KVLlamaForCausalLM
-    from utils_real_drop.kv_qwen import KVQwen2ForCausalLM
-    from utils_real_drop.kv_opt import KVOPTForCausalLM
-    from utils_real_drop.cache import CompressedKVCache
-    _KV_446_AVAILABLE = True
-except Exception:  # e.g. transformers v5
-    _KV_446_AVAILABLE = False
+"""KV-cache compression (transformers v5), model-agnostic.
 
-# HF config.model_type -> KV-compression model class (4.46.2 path only).
-_MODEL_TYPE_TO_KV_CLASS = {
-    "llama": KVLlamaForCausalLM,
-    "qwen2": KVQwen2ForCausalLM,
-    "opt": KVOPTForCausalLM,
-} if _KV_446_AVAILABLE else {}
-
-
-def get_kv_class(model_type: str):
-    """Return the KV-compression model class for an HF `config.model_type`."""
-    if model_type not in _MODEL_TYPE_TO_KV_CLASS:
-        raise ValueError(
-            f"Unsupported model_type {model_type!r}. "
-            f"Supported: {sorted(_MODEL_TYPE_TO_KV_CLASS)}"
-        )
-    return _MODEL_TYPE_TO_KV_CLASS[model_type]
-
-
-def load_kv_model(model_path: str, **from_pretrained_kwargs):
-    """Load the right KV-compression model for `model_path` by inspecting its config."""
-    from transformers import AutoConfig
-    cfg = AutoConfig.from_pretrained(model_path)
-    return get_kv_class(cfg.model_type).from_pretrained(model_path, **from_pretrained_kwargs)
-
+The compression mechanism lives in `compress.py`: ONE custom attention function
+("waits") registered into transformers' `ALL_ATTENTION_FUNCTIONS` plus a
+`CompressedCache`, reusing `scorers/` + `selectors/`. There are no per-model
+reimplementations. Load any HF model via `utils.load_model(shortname)` /
+`utils.load_compressed_lm(path)`; the returned model exposes the
+`model.init_cache(cfg)` + `model.generate(...)` interface.
+"""
+from utils_real_drop.compress import (
+    CompressionConfig,
+    CompressedCache,
+    init_cache,
+    make_cache,
+    attach_pipeline_api,
+    load_pipeline_model,
+    load_compressed_model,
+)
 
 __all__ = [
-    "KVLlamaForCausalLM",
-    "KVQwen2ForCausalLM",
-    "KVOPTForCausalLM",
-    "CompressedKVCache",
-    "get_kv_class",
-    "load_kv_model",
+    "CompressionConfig",
+    "CompressedCache",
+    "init_cache",
+    "make_cache",
+    "attach_pipeline_api",
+    "load_pipeline_model",
+    "load_compressed_model",
 ]

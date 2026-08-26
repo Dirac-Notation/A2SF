@@ -104,5 +104,9 @@ class TriAttentionScorer(Scorer):
 
         self._precomputed_scores = base_scores + extra         # [B, H, N]  fp32
 
+    def score_keys(self, query, key, num_kv):
+        # attention-free: scores were computed in prepare_prefill from calibrated Q stats + K
+        return self._precomputed_scores  # [B, num_kv, Sk] fp32
+
     def get_query_weights(self, q_start, q_end, device, dtype):
         return None  # not used — fast path bypasses Q-tiled loop

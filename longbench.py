@@ -7,12 +7,12 @@ import time
 from tqdm import tqdm
 import torch
 
-from utils import load_model, set_seed, CompressionConfig
+from utils import load_model, set_seed, CompressionConfig, build_chat_prompt, chat_stop_strings
 
 
 def parse_args(args=None):
     parser = argparse.ArgumentParser(description="LongBench end-to-end evaluation (multi-GPU, multi-process)")
-    parser.add_argument("--model", type=str, required=True, choices=["llama3-8b", "llama3-1b", "qwen2", "opt"])
+    parser.add_argument("--model", type=str, required=True, choices=["llama3-8b", "llama3-1b", "qwen2", "mistral-7b"])
     parser.add_argument("--method", type=str, default="full")
     parser.add_argument("--window", type=int, default=16)
     parser.add_argument("--budget", type=int, default=128)
@@ -27,6 +27,8 @@ def parse_args(args=None):
     )
     parser.add_argument("--aj_offset", type=float, default=0.1, help="(AJ only) offset for aj_offset weight.")
     parser.add_argument("--recent_budget", type=int, default=16, help="(AJ only) number of keys always kept from the tail.")
+    parser.add_argument("--n_sink", type=int, default=0, help="Always-keep first n_sink (attention-sink) tokens. Helps attention-free scorers (KeyDiff/L2/TriAtt).")
+    parser.add_argument("--ada_kv", action="store_true", help="Ada-KV head-wise adaptive budget allocation (orthogonal to scorer; pad-to-max sim). Composes with any --method / --waits_table.")
     parser.add_argument("--chunk_size", type=int, default=0,
                         help="ChunkKV: 0 = off (token-level select), >0 = group head tokens into chunks of this size.")
     parser.add_argument("--chunk_group_size", type=int, default=1,
@@ -39,8 +41,18 @@ def parse_args(args=None):
                         help="Cross-server shard count (round-robin task distribution).")
     parser.add_argument("--shard_id", type=int, default=0,
                         help="This instance's shard id ∈ [0, shard_count).")
+    parser.add_argument("--shard_weights", type=str, default=None,
+                        help="Comma-separated per-shard weights (len == shard_count) for "
+                             "GPU-speed-proportional splitting, e.g. '1,1,1.5,1.5' for "
+                             "3090,3090,4090,4090. Omit for equal round-robin. Each shard takes a "
+                             "contiguous slice of the (deterministically shuffled) task list sized "
+                             "by its weight fraction.")
     parser.add_argument("--run_name", type=str, default=None,
                         help="Override auto-generated run name (output dir suffix).")
+    parser.add_argument("--curve", type=str, default="sigmoid",
+                        choices=["sigmoid", "exp", "linear", "gauss"],
+                        help="WAITS weight-curve family (rebuttal alt-function study). "
+                             "Non-sigmoid curves read b as the scale (tau/W/sigma).")
     parser.add_argument("--waits_table", type=str, default=None,
                         help="Per-prompt WAITS action table JSON (result_txt/backup/waits_action_table.json). "
                              "If set, overrides --method/--window with per-prompt (a, b) from the table.")
@@ -50,6 +62,12 @@ def parse_args(args=None):
                         help="Skip samples whose tokenized length >= this value; 0=no limit (Phase 1: short sequences).")
     parser.add_argument("--sigmoid_a", type=float, default=None,
                         help="Override 'a' parameter for sigmoid compression (use with --method sigmoid).")
+    parser.add_argument("--key_prior", type=str, default=None,
+                        help="Key-position prior curve multiplying accumulated scores before "
+                             "selection: 'band:gamma:lo:hi' or 'sink:gamma:d:c'. Composes with "
+                             "any --method / --waits_table. Default off.")
+    parser.add_argument("--value_weight", type=float, default=None,
+                        help="Value-aware scoring exponent p: score *= ||v_k||^p. Default off.")
     parser.add_argument("--triattention_stats", type=str, default=None,
                         help="Path to calibrated TriAttention stats .pt file. "
                              "Sets compression_method=triattention automatically.")
@@ -101,6 +119,8 @@ def _longbench_worker(
     aj_weight_fn: str = "aj_offset",
     aj_offset: float = 0.1,
     recent_budget: int = 16,
+    n_sink: int = 0,
+    ada_kv: bool = False,
     chunk_size: int = 0,
     chunk_group_size: int = 1,
     pyramid_kv: bool = False,
@@ -109,7 +129,10 @@ def _longbench_worker(
     min_prompt_tokens: int = 0,
     max_prompt_tokens: int = 0,
     sigmoid_a: float = None,
+    curve: str = "sigmoid",
     triattention_stats: dict = None,
+    key_prior: str = None,
+    value_weight: float = None,
 ):
     """
     CUDA_VISIBLE_DEVICES를 gpu_group으로 설정하고 모델을 로드한 뒤,
@@ -135,12 +158,17 @@ def _longbench_worker(
     config["aj_weight_fn"] = aj_weight_fn
     config["aj_offset"] = aj_offset
     config["recent_budget"] = recent_budget
+    config["n_sink"] = n_sink
+    config["ada_kv"] = ada_kv
     config["chunk_size"] = int(chunk_size)
     config["chunk_group_size"] = int(chunk_group_size)
     config["pyramid_kv"] = bool(pyramid_kv)
     config["pyramid_ratio"] = float(pyramid_ratio)
+    config["key_prior"] = key_prior
+    config["value_weight"] = value_weight
     if sigmoid_a is not None:
         config["a"] = float(sigmoid_a)
+    config["curve"] = str(curve)
     if triattention_stats is not None:
         config["compression_method"] = "triattention"
         config["triattention_stats"] = triattention_stats
@@ -163,9 +191,9 @@ def _longbench_worker(
                     tokenized_prompt[-half:], skip_special_tokens=True
                 )
 
-            if dataset not in ["trec", "triviaqa", "samsum", "lsht", "lcc", "repobench-p"]:
-                if "llama" in model_name:
-                    prompt = f"[INST]{prompt}[/INST]"
+            # Per-model chat template (config/model2chat.json): llama/mistral -> [INST],
+            # qwen -> native ChatML, etc. Few-shot/completion datasets skip wrapping.
+            prompt = build_chat_prompt(prompt, model_name, tokenizer, dataset)
 
             encoded = tokenizer(prompt, truncation=False, return_tensors="pt")
             input_ids = encoded.input_ids.to(model.device)
@@ -184,42 +212,56 @@ def _longbench_worker(
             if waits_table is not None:
                 ab = waits_table.get(dataset, [None] * (sample_idx + 1))[sample_idx]
                 if ab is not None:
-                    config["compression_method"] = "sigmoid"
+                    config["compression_method"] = "waits"
                     config["a"] = float(ab[0])
                     config["b"] = int(ab[1])
 
-            model.init_cache(config)
-
-            with torch.inference_mode():
+            if method == "kvzip":
+                from utils_real_drop.kvzip import kvzip_generate
+                stop_ids = [tokenizer.eos_token_id]
                 if dataset == "samsum":
-                    output = model.generate(
-                        input_ids=input_ids,
-                        attention_mask=attention_mask,
-                        max_new_tokens=max_gen,
-                        num_beams=1,
-                        do_sample=False,
-                        min_length=context_length + 1,
-                        eos_token_id=[
-                            tokenizer.eos_token_id,
-                            tokenizer.encode("\n", add_special_tokens=False)[-1],
-                        ],
-                        pad_token_id=tokenizer.eos_token_id,
-                        tokenizer=tokenizer,
-                        stop_strings="[/INST]",
-                        num_logits_to_keep=1,
-                    )[0]
-                else:
-                    output = model.generate(
-                        input_ids=input_ids,
-                        attention_mask=attention_mask,
-                        max_new_tokens=max_gen,
-                        num_beams=1,
-                        do_sample=False,
-                        pad_token_id=tokenizer.eos_token_id,
-                        tokenizer=tokenizer,
-                        stop_strings="[/INST]",
-                        num_logits_to_keep=1,
-                    )[0]
+                    try:
+                        stop_ids.append(tokenizer.encode("\n", add_special_tokens=False)[-1])
+                    except Exception:
+                        pass
+                gen_ids = kvzip_generate(
+                    model, tokenizer, input_ids, max_new_tokens=max_gen,
+                    budget=budget, recent_budget=recent_budget, n_sink=n_sink,
+                    stop_token_ids=stop_ids,
+                ).to(input_ids.device)
+                output = torch.cat([input_ids[0], gen_ids])
+            else:
+                model.init_cache(config)
+                with torch.inference_mode():
+                    if dataset == "samsum":
+                        output = model.generate(
+                            input_ids=input_ids,
+                            attention_mask=attention_mask,
+                            max_new_tokens=max_gen,
+                            num_beams=1,
+                            do_sample=False,
+                            min_length=context_length + 1,
+                            eos_token_id=[
+                                tokenizer.eos_token_id,
+                                tokenizer.encode("\n", add_special_tokens=False)[-1],
+                            ],
+                            pad_token_id=tokenizer.eos_token_id,
+                            tokenizer=tokenizer,
+                            stop_strings=chat_stop_strings(model_name),
+                            num_logits_to_keep=1,
+                        )[0]
+                    else:
+                        output = model.generate(
+                            input_ids=input_ids,
+                            attention_mask=attention_mask,
+                            max_new_tokens=max_gen,
+                            num_beams=1,
+                            do_sample=False,
+                            pad_token_id=tokenizer.eos_token_id,
+                            tokenizer=tokenizer,
+                            stop_strings=chat_stop_strings(model_name),
+                            num_logits_to_keep=1,
+                        )[0]
 
             pred = tokenizer.decode(output[context_length:], skip_special_tokens=True)
             result_queue.put(
@@ -235,7 +277,8 @@ def _longbench_worker(
                 )
             )
     except Exception as exc:  # pragma: no cover
-        result_queue.put(("__error__", f"worker {worker_id} gpus={gpu_group}: {exc}"))
+        import traceback as _tb
+        result_queue.put(("__error__", f"worker {worker_id} gpus={gpu_group} ds={dataset if 'dataset' in dir() else '?'}: {exc}\n{_tb.format_exc()}"))
 
 
 def _run_longbench_multi_gpu(args):
@@ -294,8 +337,24 @@ def _run_longbench_multi_gpu(args):
     _random.Random(42).shuffle(tasks)
     if args.shard_count > 1:
         n_total = len(tasks)
-        tasks = [t for i, t in enumerate(tasks) if i % args.shard_count == args.shard_id]
-        print(f"[longbench] shard {args.shard_id+1}/{args.shard_count}: {len(tasks)}/{n_total} tasks")
+        if args.shard_weights:
+            # GPU-speed-proportional split (e.g. 3090:4090 = 1:1.5). Each shard gets a
+            # contiguous slice of the shuffled list sized by its weight fraction; slices
+            # are disjoint and cover all tasks because every shard shares the seed-42 shuffle.
+            w = [float(x) for x in args.shard_weights.split(",")]
+            if len(w) != args.shard_count:
+                raise ValueError(f"--shard_weights has {len(w)} entries, expected shard_count={args.shard_count}")
+            cum = [0.0]
+            for x in w:
+                cum.append(cum[-1] + x)
+            lo = int(round(n_total * cum[args.shard_id] / cum[-1]))
+            hi = int(round(n_total * cum[args.shard_id + 1] / cum[-1]))
+            tasks = tasks[lo:hi]
+            print(f"[longbench] weighted shard {args.shard_id+1}/{args.shard_count} "
+                  f"(w={w[args.shard_id]}): {len(tasks)}/{n_total} tasks")
+        else:
+            tasks = [t for i, t in enumerate(tasks) if i % args.shard_count == args.shard_id]
+            print(f"[longbench] shard {args.shard_id+1}/{args.shard_count}: {len(tasks)}/{n_total} tasks")
 
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for multi-GPU LongBench evaluation.")
@@ -350,6 +409,8 @@ def _run_longbench_multi_gpu(args):
                 args.aj_weight_fn,
                 float(args.aj_offset),
                 int(args.recent_budget),
+                int(args.n_sink),
+                bool(args.ada_kv),
                 int(args.chunk_size),
                 int(args.chunk_group_size),
                 bool(args.pyramid_kv),
@@ -358,7 +419,10 @@ def _run_longbench_multi_gpu(args):
                 int(args.min_prompt_tokens),
                 int(args.max_prompt_tokens),
                 args.sigmoid_a,
+                str(args.curve),
                 triattention_stats_data,
+                args.key_prior,
+                args.value_weight,
             ),
         )
         p.start()
@@ -381,7 +445,9 @@ def _run_longbench_multi_gpu(args):
         dataset, sample_idx, payload = item
         out_path = os.path.join(output_dir, f"{dataset}.jsonl")
         with open(out_path, "a", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False)
+            # include sample idx so cross-server/sharded outputs can be re-aligned
+            # (build_lb_index_from_all.py keys on "idx"); harmless extra field for scoring.
+            json.dump({"idx": sample_idx, **payload}, f, ensure_ascii=False)
             f.write("\n")
 
         remaining -= 1
