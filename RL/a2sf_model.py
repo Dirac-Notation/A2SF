@@ -10,6 +10,10 @@ from .env import A2SFEnv, A2SFModelRunner
 
 
 # Sigmoid action space: flat pair lists (paired actions, NOT cartesian).
+# NOTE: deliberate DUPLICATE of RL/action_grid.py, kept inline because this file is the
+# version-locked submitted-method workbench (history #68) - do not refactor to an import;
+# if action_grid.py ever changes, this copy must NOT follow (it pins the submitted grid).
+# Verified identical to action_grid.py as of 2026-08-26.
 # a=0 makes b irrelevant (σ(0)=0.5 uniform), so only one (0, 1) entry kept.
 # 13 unique (a, b) pairs (matches champion ckpt simple_ucb_v5_maxo, LB128=26.95):
 #   (0, 1) + cartesian({0.01, 0.1, 10} × {1, 16, 32, 128}).

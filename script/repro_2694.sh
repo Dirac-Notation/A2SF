@@ -31,7 +31,7 @@ cd "$(dirname "$0")/.."
 SEED=${1:-42}
 RUN=runs/repro_2694_seed${SEED}
 
-python RL/train.py --model llama3-1b --budget 128 \
+python RL/train_perprompt_submitted.py --model llama3-1b --budget 128 \
   --states_file     runs/states/old_none.pt \
   --data_file       datasets/training/scored/llama3-1b/train.jsonl \
   --val_data_file   datasets/training/scored/llama3-1b/validation.jsonl \

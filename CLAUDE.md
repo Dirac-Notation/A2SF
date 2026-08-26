@@ -116,9 +116,12 @@ recover from git if ever needed.)
   (key-position prior curve; proven no-gain, kept as paper ablation) and
   `value_weight` (score ×‖v_k‖^p, value-aware scoring — under test).
 
-### Reinforcement Learning (`RL/`) — the (task, metric) routing DIARL (6 files)
-The whole RL folder is the deployed routing policy; the per-prompt/deep-agent/joint machinery was
-removed 2026-06-16 (recover from git / `logs/history/54...`).
+### Reinforcement Learning (`RL/`) — the (task, metric) routing DIARL
+The deployed routing policy = the 5 DIARL files below (+ `__init__.py`). The folder ALSO holds
+the version-locked per-prompt submitted-method workbench (`train_perprompt_submitted.py`,
+`a2sf_model.py`, `agent/`, `env/`, `nll_reward.py`) — removed 2026-06-16 (history #54), restored
+2026-07-24 for rebuttal reproduction (history #68; `script/repro_2694.sh`). Closed branch: keep,
+don't extend. See RL/README.md.
 - `action_grid.py` — D/A: the 13 paired (a, b) actions (`SIGMOID_A/B_VALUES`, `HARD_LIKE_INDICES`,
   `NUM_ACTIONS`). Single source of truth for the action grid.
 - `metadata.py` — I: task/metric vocab + one-hot index helpers (`*_TYPE_ORDER`, `*_to_index`,
@@ -141,9 +144,11 @@ removed 2026-06-16 (recover from git / `logs/history/54...`).
   Optional `--chunk_size` (ChunkKV), `--chunk_group_size` (LIR), `--pyramid_kv`,
   `--ada_kv`, `--n_sink`, `--triattention_stats`, `--key_prior`, `--value_weight`.
   (`--fixed_actions_json` was removed.)
-  Cross-server: `--shard_count N --shard_id i` (+ `--shard_weights "1,1,1.5,1.5"` for
-  GPU-speed-proportional splitting; 3090=1.0, 4090=1.5). Each shard writes locally → rsync +
-  cat-merge per-dataset jsonl on the host before scoring.
+  Cross-server (STANDARD): sample-level global queue `script/orchestrator_lb.py` +
+  `script/worker_lb.py` (persistent per-GPU workers over ssh, dynamic pull; guide
+  `script/GLOBAL_QUEUE.md`). Legacy static split `--shard_count N --shard_id i`
+  (+ `--shard_weights "1,1,1.5,1.5"`; 3090=1.0, 4090=1.5) still works: each shard writes
+  locally → rsync + cat-merge per-dataset jsonl on the host before scoring.
 - **Per-model chat template** (`utils.build_chat_prompt` + `config/model2chat.json`): mode per
   model — `inst` = `[INST]{p}[/INST]` (Llama/Mistral; preserves existing baselines), `native` =
   `tokenizer.apply_chat_template` (Qwen ChatML etc.), `raw` = none. Unlisted → `native`. Few-shot/

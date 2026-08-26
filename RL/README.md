@@ -28,5 +28,20 @@ python longbench.py --model llama3-1b --budget 128 \
     --waits_table runs/waits_tables/waits_llama3-1b.json --run_name WAITS_llama3-1b
 ```
 
-The earlier per-prompt mini-attn / deep-agent / joint machinery was removed 2026-06-16
-(see `logs/history/54...`; recover the code from git history if reviving a per-prompt RL model).
+## Per-prompt submitted-method workbench (version-locked)
+
+The per-prompt mini-attn machinery was removed 2026-06-16 (history #54), then partially
+RESTORED 2026-07-24 (history #68) as the version-locked workbench that reproduces the
+NeurIPS-submitted per-prompt numbers (1B 26.94, `script/repro_2694.sh`). It is a closed
+research branch - keep for rebuttal/camera-ready reproduction, do not extend:
+
+| file | what |
+|---|---|
+| `train_perprompt_submitted.py` | the submitted trainer (old train.py: top-K UCB + MSE, mini-attn state) |
+| `a2sf_model.py` | ModelConfig + agent/env wiring; carries a deliberate inline copy of the 13-grid |
+| `agent/` | `NeuralUCBAgent` (submitted), `SimpleUCBAgent`/`LoRAUCBAgent` (sweep variants) |
+| `env/` | episode env + `mini_attn_encoder` (submitted state) + legacy `AttentionEncoder` |
+| `nll_reward.py` | N1 gold-NLL reward probe (closed 2026-07-13, history #67) |
+
+Consumers outside this folder: `script/{fast_lb_select,fast_lb_eval,repro_2694.sh}`,
+`script/gsm8k_cot_eval.py`, `benchmark_ttft.py --rl_ckpt`.
