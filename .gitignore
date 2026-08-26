@@ -190,3 +190,4 @@ cython_debug/
 .claude/
 result_txt/
 __pycache__/
+!script/_archive/*.sh
