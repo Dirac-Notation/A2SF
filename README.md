@@ -1,118 +1,90 @@
-# A2SF (Accumulative Attention Score with Forgetting)
+# WAITS — KV-Cache Compression with a Sigmoid Forgetting Curve
 
-## Overview
+WAITS reduces LLM inference memory by selectively retaining key-value pairs using
+accumulative attention scores weighted by a sigmoid forgetting curve
+`w[q] = 1 / (1 + exp(-a * (q - (N - b - 0.5))))`. A learned bandit policy routes each
+(task, metric) cell to one of 5 regime-representative `(a, b)` curves, whose limits
+recover H2O (`a=0`), TOVA (`a→∞, b=1`), and SnapKV (`a→∞, b=window`).
 
-A key-value (KV) cache compression technique using accumulative attention scores
-with a forgetting mechanism. The repo also ships SnapKV and a sigmoid-window
-variant under the same compression interface, plus a Reinforcement Learning
-agent that learns per-layer compression parameters.
+(The repo/env name `A2SF` is the project's legacy name.)
 
----
-
-## Preparation
-
-### Python Version
-
-- Python 3.8 (other versions are untested).
-
-### Environment setup
+## Environment
 
 ```bash
-conda env create -n A2SF python=3.8
+conda create -n A2SF python=3.12
 conda activate A2SF
-pip install -r pip.txt
+pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cu128
+pip install -r pip.txt   # transformers==5.10.2, datasets<4.0.0, ...
 ```
 
-Key pinned dependencies: `transformers==4.46.2`, `datasets<4.0.0`,
-`sentence-transformers==2.7.0`.
+Install the cu128 torch BEFORE `pip.txt` (its `torch` line is unpinned).
 
----
+## Quickstart
 
-## Example
+The compression mechanism is a single model-agnostic transformers-v5 attention plugin
+(`utils_real_drop/compress.py`, registered as `"waits"`). Any HF model using the
+AttentionInterface works — no per-model code.
 
 ```python
-import torch
-from types import SimpleNamespace
-from transformers import AutoTokenizer
+import utils
 
-from utils_real_drop import KVLlamaForCausalLM
+model, tokenizer = utils.load_model("llama3-8b")   # config/model2path.json shortnames
 
-model_name = "meta-llama/Llama-3.2-1B-Instruct"
-tokenizer = AutoTokenizer.from_pretrained(model_name)
-model = KVLlamaForCausalLM.from_pretrained(
-    model_name, torch_dtype=torch.float16
-).to("cuda").eval()
+# fixed WAITS action (a, b) at budget 128
+model.init_cache({
+    "compression_method": "waits", "sigmoid_a": 1.0, "recent_budget": 16,
+    "select_budget": 128,
+})
+out = model.generate(**inputs, max_new_tokens=64)
 
-# Pass `compression_config=None` for the un-compressed baseline.
-# For A2SF compression, build a config object with the fields the policy needs:
-compression_config = SimpleNamespace(
-    compression_method="waits",   # one of: "full"/None, "waits", "snap", "sigmoid"
-    total_budget=256,            # total tokens kept per layer (recent_budget=16 fixed)
-    forgetting_factor=0.95,
-)
-model.init_cache(compression_config)
-
-prompt = "Summarize the following passage in one sentence: ..."
-inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-out = model.generate(**inputs, max_new_tokens=64, do_sample=False)
-print(tokenizer.decode(out[0, inputs.input_ids.shape[1]:], skip_special_tokens=True))
+model.init_cache(None)   # disable compression
 ```
 
-`compression_method` accepts `"full"` (or `None`), `"waits"`, `"snap"`,
-`"sigmoid"`. Each method needs a few extra fields on the config object:
+## Evaluation
 
-| method     | required fields                                |
-|------------|------------------------------------------------|
-| `waits`     | `total_budget`, `forgetting_factor`            |
-| `snap`     | `total_budget`, `observation_window`           |
-| `sigmoid`  | `total_budget`, `a`, `b`                       |
+```bash
+# LongBench, routed WAITS (champion): (task, metric) -> (a, b) lookup table
+python longbench.py --model llama3-8b --budget 128 \
+    --waits_table runs/waits_tables/waits_llama3-8b_u5b.json --run_name WAITS_8b
 
----
+# Baselines (aliases of the snap scorer): TOVA = --method snap --window 1,
+# SnapKV = --method snap --window 16, H2O = --method snap --window 32768.
+python longbench.py --model llama3-8b --budget 128 --method snap --window 16 --run_name SnapKV
 
-## Architecture (`utils_real_drop/`)
-
-```
-utils_real_drop/
-├── kv_llama.py      # KVLlamaForCausalLM — Llama wiring (RoPE, repeat_kv, layer loop)
-├── attention.py     # compressed_attention(q, k, v, *, policy, ...) — model-agnostic kernel
-├── cache.py         # CompressedKVCache — HF-compatible KV storage + compress hook
-└── policies/
-    ├── base.py      # CompressionPolicy abstract base
-    ├── waits.py
-    ├── snap.py
-    ├── sigmoid.py
-    └── __init__.py  # build_policies() dispatcher / registry
+# Fixed WAITS action
+python longbench.py --model llama3-8b --budget 128 --method waits --window 16 --sigmoid_a 1 --run_name waits_1_16
 ```
 
-The attention kernel uses K-tiled online softmax (real flash-attention style),
-so prefill memory does **not** scale with the full sequence length; only with
-the q-block × k-block tile. Causal masking is generated per-block — no
-`[B, 1, S_q, S_k]` mask tensor is ever materialized.
+Other entry points: `evaluate_needle.py` (needle-in-a-haystack), `benchmark_ttft.py`
+(prefill latency), `longbench_oracle.py` (oracle upper bound). Multi-server eval uses the
+sample-level global queue (`script/orchestrator_lb.py` + `script/worker_lb.py`,
+see `script/GLOBAL_QUEUE.md`).
 
-### Adding a new compression method
+## Training the routing policy
 
-1. Subclass `CompressionPolicy` in `utils_real_drop/policies/foo.py`.
-2. Implement `prepare_prefill`, `get_query_weights`, `select`.
-3. Register it in `utils_real_drop/policies/__init__.py::_REGISTRY`.
+```bash
+# 1) score the training recipe (multi-GPU, full-cache + per-action inference)
+python RL/dataset.py --model llama3-8b ...
 
-Nothing in `attention.py`, `cache.py`, or `kv_llama.py` needs to change.
-
-### Adding a new model (Qwen, Mistral, …)
-
-Create `utils_real_drop/kv_<model>.py` and use the same three calls inside its
-attention forward:
-
-```python
-key, value = cache.update(key, value, layer_idx)
-key   = repeat_kv(key,   num_groups)
-value = repeat_kv(value, num_groups)
-out, selected = compressed_attention(
-    q, key, value,
-    policy=cache.get_policy(layer_idx),
-    attn_mask=mask, head_dim=head_dim,
-)
-if selected is not None:
-    cache.compress(layer_idx, selected)
+# 2) train the LinUCB router and export a deploy table
+python RL/train.py --model llama3-8b \
+    --recipe datasets/training/raw/recipe_v3_llama3-8b/train.jsonl \
+    --actions "0:1,0.01:128,1:16,10:1,10:16" --epochs 64 --seed 0 \
+    --save_agent runs/selectors/llama3-8b_u5b.npz
 ```
 
-`cache`, `attention`, and `policies` are model-agnostic and can be reused as-is.
+See `RL/README.md` for the D-I-A-R-L pipeline layout and `CLAUDE.md` for the full
+architecture notes.
+
+## Repository layout
+
+| path | what |
+|---|---|
+| `utils_real_drop/` | the v5 compression plugin: `compress.py` + `scorers/` (waits, snap, triattention, streamingllm, keydiff, l2norm) + `selectors/` (top-k, ChunkKV, Ada-KV, oracle) + `kvzip.py` |
+| `RL/` | the (task, metric) routing bandit (D-I-A-R-L) + version-locked submitted-method workbench |
+| `longbench*.py`, `evaluate_needle.py` | evaluation pipelines |
+| `datasets/` | training-recipe generators (non-LongBench sources) + eval data prep |
+| `script/` | index/store builders, eval orchestration, campaign runners |
+| `config/` | model paths, per-dataset prompts/lengths, task families, chat-template modes |
+
+Supported eval models: LLaMA 3.2 1B / 3.1 8B Instruct, Qwen 2.5 7B, Mistral-7B-Instruct-v0.2.

@@ -1,6 +1,6 @@
 """Unified fast-eval store: per-sample x per-action {pred, score} for LongBench.
 
-File: runs/fast_lb_eval/store_<model>_<budget>.jsonl.gz
+File: result_txt/backup/fast_store/store_<model>_<budget>.jsonl.gz (canonical, see store_path())
   one line per LB sample:
   {"dataset": ds, "idx": i, "answers": [...], "all_classes": ..., "length": L,
    "actions": {"<a>:<b>": {"pred": str, "score": float}, ..., "full": {...}}}

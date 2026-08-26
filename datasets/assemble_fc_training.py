@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Assemble RL training data with FC reward from a scored pool.
 
-Merges the two outputs of generate_sigmoid_dataset.py:
+Merges the two outputs of RL/dataset.py (formerly generate_sigmoid_dataset.py):
   <scored_dir>/common.jsonl      — metadata + full_cache_pred/full_cache_score
   <scored_dir>/budget_<B>.jsonl  — per-sample action_outputs/action_scores_gt/action_scores_fc
 
-into the record format RL/train.py reads (it indexes r[score_field][str(budget)]).
+into the record format RL/train.py reads via --recipe (the current trainer uses
+action_scores_gt_by_budget; the FC field is kept for analysis only).
 The bandit reward is FC (action_scores_fc_by_budget); GT is kept alongside for
 eval/comparison. MaxO is intentionally dropped (see reward-design discussion).
 
@@ -17,10 +18,8 @@ in the same dir.
 
 Train with:
   python RL/train.py --model llama3-1b --budget 128 \
-      --data_file      datasets/training/scored/faithful_v1/train.jsonl \
-      --val_data_file  datasets/training/scored/faithful_v1/validation.jsonl \
-      --score_field action_scores_fc_by_budget \
-      --val_score_field action_scores_fc_by_budget ...
+      --recipe datasets/training/raw/recipe_v3_<m>/train.jsonl ...
+  (the old --data_file/--score_field flags belong to RL/train_perprompt_submitted.py)
 """
 import argparse, json, os, random
 from collections import defaultdict
