@@ -63,6 +63,11 @@ def parse_args():
     p.add_argument("--seed", type=int, default=42)
 
     # UCB exploration
+    p.add_argument("--loss", choices=["mse", "listwise"], default="mse",
+                   help="listwise = the repro_2694 recipe loss (reconstructed 2026-08-26, "
+                        "bit-exact vs runs/repro_2694_seed42/train.log.json).")
+    p.add_argument("--loss_temp", type=float, default=0.1,
+                   help="listwise softmax temperature (repro_2694 recipe uses 0.1).")
     p.add_argument("--ucb_topk", type=int, default=4,
                    help="MSE loss is computed over the top-K UCB-ranked actions per sample.")
     p.add_argument("--ucb_beta", type=float, default=1.0,
@@ -422,7 +427,17 @@ def main():
 
             pred_k = reward_pred.gather(1, topk_idx)   # (B, K) with grad
             true_k = r.gather(1, topk_idx)
-            loss = F.mse_loss(pred_k, true_k)
+            if args.loss == "listwise":
+                # ListNet CE over the top-K UCB-selected actions; temperature on the
+                # TARGET only (predictions unscaled). Reconstruction of the original lost
+                # uncommitted at history #54 - validated BIT-EXACT against
+                # runs/repro_2694_seed42/train.log.json (seed 42: losses and r_argmax
+                # identical to full float precision over the first 3 epochs, 2026-08-26).
+                target = F.softmax(true_k / args.loss_temp, dim=-1)
+                logp = F.log_softmax(pred_k, dim=-1)
+                loss = -(target * logp).sum(dim=-1).mean()
+            else:
+                loss = F.mse_loss(pred_k, true_k)
 
             opt.zero_grad(); loss.backward(); opt.step()
 
