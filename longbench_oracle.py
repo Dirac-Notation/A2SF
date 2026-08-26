@@ -5,7 +5,7 @@ Two-pass per example:
             SDPA monkey-patch) and accumulated to derive the per-layer
             "post-generation reference set" K_post (top-(budget - local) keys
             per kv-head).
-  Pass 2 – fresh prefill+decode through CompressedKVCache + OracleSelector
+  Pass 2 – fresh prefill+decode through CompressedCache + OracleSelector
             with K_post as precomputed indices. Framework handles
             position_ids/RoPE/cache layout natively.
 
@@ -66,8 +66,7 @@ def _oracle_worker(
 
     import json as _json
     from transformers import AutoTokenizer
-    from utils_real_drop import KVLlamaForCausalLM
-    from utils import CompressionConfig
+    from utils import CompressionConfig, load_compressed_lm
 
     with open("config/model2path.json") as f:
         model_path = _json.load(f)[model_name]
@@ -75,9 +74,10 @@ def _oracle_worker(
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    model = KVLlamaForCausalLM.from_pretrained(
-        model_path, torch_dtype=torch.bfloat16, device_map="auto",
-    ).eval()
+    # v5 plugin: Pass 1 monkey-patches F.scaled_dot_product_attention (the "waits"
+    # attention fn calls it, so capture still works); Pass 2 uses CompressedCache +
+    # OracleSelector via init_cache(oracle cfg). (Completed: B=128/256/512 = 30.22/31.01/31.40.)
+    model = load_compressed_lm(model_path, dtype=torch.bfloat16, device_map="auto")
     device = next(model.parameters()).device
     eos_ids = {tokenizer.eos_token_id}
 

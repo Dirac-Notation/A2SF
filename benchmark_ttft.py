@@ -1,5 +1,5 @@
 """
-TTFT (Time-to-First-Token) benchmark for A2SF compression methods.
+TTFT (Time-to-First-Token) benchmark for WAITS compression methods.
 
 Measures prefill+first-decode latency for:
   - Full KV cache (no compression)
@@ -41,8 +41,7 @@ import torch
 from transformers import AutoTokenizer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from utils_real_drop.kv_llama import KVLlamaForCausalLM
-from utils_real_drop.cache import CompressedKVCache
+from utils import load_compressed_lm
 
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
@@ -55,16 +54,13 @@ class CompressionConfig(dict):
         self[key] = value
 
 
-def load_model(model_name: str, device: str) -> Tuple[KVLlamaForCausalLM, AutoTokenizer]:
+def load_model(model_name: str, device: str) -> Tuple[torch.nn.Module, AutoTokenizer]:
     with open("config/model2path.json") as f:
         model_path = json.load(f)[model_name]
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    model = KVLlamaForCausalLM.from_pretrained(
-        model_path, torch_dtype=torch.bfloat16, device_map=device
-    )
-    model.eval()
+    model = load_compressed_lm(model_path, dtype=torch.bfloat16, device_map=device)
     model.init_cache(None)
     return model, tokenizer
 
@@ -106,7 +102,7 @@ def _sync():
 
 
 def time_llm_generate(
-    model: KVLlamaForCausalLM,
+    model: torch.nn.Module,
     input_ids: torch.Tensor,
     attn_mask: torch.Tensor,
     cfg: Optional[CompressionConfig],
@@ -138,7 +134,7 @@ def time_llm_generate(
 
 
 def time_rl_components(
-    model: KVLlamaForCausalLM,
+    model: torch.nn.Module,
     encoder,
     agent,
     text: str,
@@ -184,7 +180,7 @@ def time_rl_components(
         a = float(a_val.item())
         b = int(round(b_val.item()))
         cfg = CompressionConfig()
-        cfg["compression_method"] = "sigmoid"
+        cfg["compression_method"] = "waits"
         cfg["a"] = a
         cfg["b"] = b
         cfg["total_budget"] = budget
@@ -267,7 +263,8 @@ def print_table(results: Dict, budget: int, lengths: List[int], has_rl: bool):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="llama3-1b")
-    ap.add_argument("--gpu", default="0", help="CUDA device index (single GPU)")
+    ap.add_argument("--gpu", default="0",
+                    help="CUDA device index, or comma list (e.g. '0,1') for model parallel")
     ap.add_argument("--rl_ckpt", default="", help="Path to RL agent checkpoint (.pt)")
     ap.add_argument("--budgets", nargs="+", type=int, default=[128],
                     help="KV cache budgets to benchmark (default: 128)")
@@ -278,8 +275,10 @@ def main():
     ap.add_argument("--warmup", type=int, default=3, help="Warmup runs (discarded)")
     args = ap.parse_args()
 
-    device = f"cuda:{args.gpu}"
+    # mask first, then address the masked ordinals (cuda:0 is always the first
+    # visible GPU); comma list -> HF balanced model parallel
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
+    device = "auto" if "," in args.gpu else "cuda:0"
 
     print(f"[benchmark_ttft] model={args.model}  device={device}")
     print(f"[benchmark_ttft] budgets={args.budgets}  lengths={args.lengths}")
@@ -296,9 +295,11 @@ def main():
     has_rl = bool(args.rl_ckpt)
 
     if has_rl:
+        # legacy per-prompt deep-agent (MiniAttnEncoder + NeuralUCBAgent); modules
+        # restored from git for the submitted-version rebuttal workbench (history #68)
         print(f"[benchmark_ttft] loading RL model from {args.rl_ckpt}...")
-        # Load via A2SFModel to reuse the same LLM (access through model_runner.model)
-        # But A2SFModel loads its own copy of the LLM, so we reuse encoder/agent only.
+        # Load via WaitsModel to reuse the same LLM (access through model_runner.model)
+        # But WaitsModel loads its own copy of the LLM, so we reuse encoder/agent only.
         ckpt = torch.load(args.rl_ckpt, map_location="cpu", weights_only=False)
         arch_config = ckpt.get("arch_config", {}) or {}
         state_dict = ckpt.get("agent_state_dict", ckpt)
@@ -317,9 +318,14 @@ def main():
             device=str(model_device),
             encoder_topk=int(arch_config.get("encoder_topk", 16)),
             max_input_length=int(arch_config.get("encoder_max_input_length", 32768)),
-            include_hidden_pool=bool(arch_config.get("encoder_include_hidden_pool", True)),
+            # state layout must match the precomputed-states pipeline the agent was
+            # trained on: hidden_pool only if the agent consumes it, view count from
+            # num_views (arch_config's encoder_include_hidden_pool flag is stale)
+            include_hidden_pool=bool(int(arch_config.get("num_hidden_pool", 0)) > 0),
             hidden_pool_window=int(arch_config.get("encoder_hidden_pool_window", 0)),
+            single_view=bool(int(arch_config.get("num_views", 2)) == 1),
             feature_mode=str(arch_config.get("encoder_feature_mode", "stats")),
+            extra_view=str(arch_config.get("extra_view", "none")),
         )
         encoder.eval()
 

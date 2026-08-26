@@ -78,6 +78,7 @@ class MetaDataset(Dataset):
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--data_file", default="datasets/training/scored/llama3-1b/train.jsonl")
+    p.add_argument("--score_field", default=SCORE_FIELD)
     p.add_argument("--val_data_file", default=None)
     p.add_argument("--save_dir", required=True)
     p.add_argument("--epochs", type=int, default=200)
@@ -150,7 +151,7 @@ def main():
 
     train_records, val_records = [], []
     def _valid(r):
-        raw = r.get(SCORE_FIELD)
+        raw = r.get(args.score_field)
         scores = raw.get(SCORE_BUDGET) if isinstance(raw, dict) else raw
         return scores and len(scores) == n_actions
 
@@ -169,8 +170,8 @@ def main():
     print(f"Train samples: {len(train_records)}, Val samples: {len(val_records)}")
     print(f"state_dim={STATE_DIM}  meta_dim={META_DIM}  (task types={len(TASK_TYPE_ORDER)}, metric types={len(METRIC_TYPE_ORDER)})")
 
-    train_ds = MetaDataset(train_records, SCORE_FIELD)
-    val_ds   = MetaDataset(val_records,   SCORE_FIELD)
+    train_ds = MetaDataset(train_records, args.score_field)
+    val_ds   = MetaDataset(val_records,   args.score_field)
     loader   = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
 
     agent = NeuralUCBAgent(

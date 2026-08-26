@@ -29,7 +29,7 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
-from RL.a2sf_model import SIGMOID_A_VALUES, SIGMOID_B_VALUES
+from RL.action_grid import SIGMOID_A_VALUES, SIGMOID_B_VALUES
 from longbench_eval import scorer as lb_scorer
 
 DATASETS = [
@@ -40,7 +40,6 @@ DATASETS = [
     "samsum", "trec", "triviaqa",
     "passage_count", "passage_retrieval_en",
 ]
-CHAT_SKIP = {"lcc", "repobench-p", "trec", "triviaqa", "samsum"}
 
 
 # ── worker ────────────────────────────────────────────────────────────────────
@@ -52,8 +51,7 @@ def _worker(worker_id, gpu_id, model_name, budget,
     torch.set_grad_enabled(False)
     print(f"[w{worker_id}] GPU={gpu_id} starting", flush=True)
 
-    from utils import load_model
-    from utils_real_drop import KVLlamaForCausalLM
+    from utils import load_compressed_lm, build_chat_prompt
 
     with open("config/model2path.json") as f:
         model_path = json.load(f)[model_name]
@@ -61,15 +59,14 @@ def _worker(worker_id, gpu_id, model_name, budget,
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    model = KVLlamaForCausalLM.from_pretrained(
-        model_path, torch_dtype=torch.bfloat16, device_map="auto",
-    ).eval()
+    # version-dispatched (4.46.2 kv_* or v5 plugin); both expose init_cache/generate.
+    model = load_compressed_lm(model_path, dtype=torch.bfloat16, device_map="auto")
     device = next(model.parameters()).device
 
     from utils import CompressionConfig
     def make_cfg(a, b):
         cfg = CompressionConfig()
-        cfg.compression_method = "sigmoid"
+        cfg.compression_method = "waits"
         cfg.total_budget = int(budget)
         cfg.local_ratios = 0.125
         cfg.a = torch.tensor([a], dtype=torch.float32, device=device)
@@ -94,10 +91,7 @@ def _worker(worker_id, gpu_id, model_name, budget,
                 prompt_raw = (tokenizer.decode(raw_ids[:h], skip_special_tokens=True)
                             + tokenizer.decode(raw_ids[-h:], skip_special_tokens=True))
 
-            if dataset not in CHAT_SKIP and "llama" in model_name:
-                prompt = f"[INST]{prompt_raw}[/INST]"
-            else:
-                prompt = prompt_raw
+            prompt = build_chat_prompt(prompt_raw, model_name, tokenizer, dataset)
 
             encoded    = tokenizer(prompt, truncation=False, return_tensors="pt")
             input_ids  = encoded.input_ids.to(device)

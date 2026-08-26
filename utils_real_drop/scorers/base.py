@@ -44,6 +44,13 @@ class Scorer:
     ) -> Optional[torch.Tensor]:
         return None
 
+    def score_keys(self, query, key, num_kv):
+        """ATTENTION-FREE direct scoring: return per-key importance [B, num_kv, Sk]
+        computed from key/value vectors or position WITHOUT attention scores
+        (StreamingLLM, L2-norm, KeyDiff, TriAttention). Default None -> the caller
+        falls back to attention-based `_accumulate_scores`. key: [B, num_kv, Sk, hd]."""
+        return None
+
     def score_query_start(self, seq_len_q: int) -> int:
         """Smallest prefill query index whose weight is non-negligible.
 

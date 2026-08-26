@@ -39,6 +39,8 @@ def build_selector(compression_config, num_layers: int) -> Optional[Selector]:
     pyramid_ratio = float(getattr(compression_config, "pyramid_ratio", 4.0) or 4.0)
     base_budget = int(compression_config.total_budget)
     recent_budget = int(getattr(compression_config, "recent_budget", 16) or 16)
+    n_sink = int(getattr(compression_config, "n_sink", 0) or 0)
+    ada_kv = bool(getattr(compression_config, "ada_kv", False))
 
     if pyramid_kv:
         budgets = pyramid_budgets(num_layers, base_budget, ratio=pyramid_ratio)
@@ -60,7 +62,10 @@ def build_selector(compression_config, num_layers: int) -> Optional[Selector]:
             chunk_size=chunk_size,
             layer_group_size=chunk_group_size,
         )
-    return TokenSelector(budgets, recent_budget=recent_budget)
+    if ada_kv:
+        from .ada import AdaSelector
+        return AdaSelector(budgets, recent_budget=recent_budget, n_sink=n_sink)
+    return TokenSelector(budgets, recent_budget=recent_budget, n_sink=n_sink)
 
 
 __all__ = [

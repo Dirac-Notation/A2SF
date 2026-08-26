@@ -1,13 +1,13 @@
 #!/bin/bash
 
-# Example training script for A2SF RL agent
+# Example training script for WAITS RL agent
 
 usage() {
     echo "Usage: bash RL/training.sh [OPTIONS]"
     echo ""
     echo "Options:"
     echo "  -g, --gpu                  GPU device ID (default: 0)"
-    echo "  -s, --save_dir             Directory to save checkpoints and logs (default: runs/a2sf_rl)"
+    echo "  -s, --save_dir             Directory to save checkpoints and logs (default: runs/waits_rl)"
     echo "  -b, --token_budget         Token budget for KV cache compression (default: 128)"
     echo "  -d, --train_data_path      Path to training data JSONL file (default: datasets/training/scored/llama3-1b/train.jsonl)"
     echo "  -e, --episodes_per_update  Number of episodes per parameter update (default: 32)"
@@ -16,7 +16,7 @@ usage() {
 }
 
 gpu=0
-save_dir="runs/a2sf_rl"
+save_dir="runs/waits_rl"
 token_budget=128
 train_data_path="datasets/training/scored/llama3-1b/train.jsonl"
 episodes_per_update=16
@@ -34,7 +34,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-echo "Starting A2SF RL Training Example"
+echo "Starting WAITS RL Training Example"
 echo "================================="
 echo "GPU: $gpu"
 echo "Save dir: $save_dir"

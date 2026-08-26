@@ -19,7 +19,7 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from RL.a2sf_model import SIGMOID_A_VALUES, SIGMOID_B_VALUES
+from RL.action_grid import SIGMOID_A_VALUES, SIGMOID_B_VALUES
 from longbench_eval import scorer as lb_scorer
 
 DATASETS = [

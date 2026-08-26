@@ -49,7 +49,7 @@ fi
 rl_checkpoint="${save_dir}/policy_final.pt"
 
 echo "============================================"
-echo "  A2SF RL: Train → Predict → Evaluate"
+echo "  WAITS RL: Train → Predict → Evaluate"
 echo "============================================"
 echo "Model:              $model"
 echo "Budget:             $budget"

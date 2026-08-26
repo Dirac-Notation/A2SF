@@ -14,9 +14,6 @@ import re
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from utils import load_model, set_seed, CompressionConfig
-from RL.a2sf_model import ModelConfig
-from RL.agent.neural_ucb_agent import NeuralUCBAgent
-from RL.env import AttentionEncoder
 from longbench_eval import dataset2metric
 
 # Must match keys used when training NeuralUCBPolicy (RL/trainer.py).
@@ -54,106 +51,6 @@ def load_dataset(file_path):
             data.append(json.loads(line))
     return data
 
-def load_rl_agent(checkpoint_path, device, target_model, target_tokenizer):
-    """Load RL agent and frozen metadata encoder for inference."""
-    if not os.path.exists(checkpoint_path):
-        raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
-
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    model_cfg_any = checkpoint.get("model_config", None) or checkpoint.get("config", None)
-    config = ModelConfig(model="llama3")
-    if model_cfg_any is not None:
-        if isinstance(model_cfg_any, dict):
-            if "a_values" in model_cfg_any:
-                config.a_values = model_cfg_any["a_values"]
-            if "b_values" in model_cfg_any:
-                config.b_values = model_cfg_any["b_values"]
-        else:
-            if hasattr(model_cfg_any, "a_values"):
-                config.a_values = model_cfg_any.a_values
-            if hasattr(model_cfg_any, "b_values"):
-                config.b_values = model_cfg_any.b_values
-
-    context_encoder = AttentionEncoder(
-        target_model=target_model,
-        target_tokenizer=target_tokenizer,
-        device=device,
-        output_dim=-1,
-        num_query_tokens=16,
-    ).to(device)
-
-    arch_config = checkpoint.get("arch_config")
-    if arch_config is not None:
-        state_dim = int(arch_config["state_dim"])
-        num_heads = int(arch_config["num_heads"])
-        num_metric_types = int(arch_config.get("num_metric_types", 10))
-        side_dim = int(arch_config.get("side_dim", 65536))
-        num_task_types = int(arch_config.get("num_task_types", 0))
-        num_hidden_pool = int(arch_config.get("num_hidden_pool", 0))
-        backbone_depth = int(arch_config.get("backbone_depth", 2))
-        a_values = arch_config["a_values"].to(dtype=torch.float32).clone()
-        b_values = arch_config["b_values"].to(dtype=torch.float32).clone()
-    else:
-        state_dim = int(context_encoder.output_dim)
-        num_heads = int(context_encoder.num_heads)
-        num_metric_types = int(context_encoder.num_metric_types)
-        num_task_types = int(getattr(context_encoder, "num_task_types", 0))
-        side_dim = int(context_encoder.side_dim)
-        num_hidden_pool = int(getattr(context_encoder, "hidden_pool_dim", 0))
-        backbone_depth = 2
-        a_values = config.a_values
-        b_values = config.b_values
-
-    agent = NeuralUCBAgent(
-        state_dim=state_dim,
-        a_values=a_values,
-        b_values=b_values,
-        num_metric_types=num_metric_types,
-        num_task_types=num_task_types,
-        side_dim=side_dim,
-        num_heads=num_heads,
-        num_hidden_pool=num_hidden_pool,
-        backbone_depth=backbone_depth,
-    ).to(device)
-
-    # Load agent weights (supports legacy policy_state_dict checkpoints)
-    if "agent_state_dict" in checkpoint:
-        agent.load_state_dict(checkpoint["agent_state_dict"], strict=False)
-    elif "policy_state_dict" in checkpoint:
-        agent.load_state_dict(checkpoint["policy_state_dict"], strict=False)
-    else:
-        raise ValueError("Checkpoint missing agent_state_dict (and legacy policy_state_dict).")
-
-    agent.eval()
-    context_encoder.eval()
-    return agent, context_encoder, config
-
-
-def get_rl_action(
-    agent,
-    context_encoder,
-    prompt,
-    generation_length,
-    token_budget,
-    device,
-    task_type=None,
-    dataset=None,
-    metric_type="qa_f1_score",
-):
-    state = context_encoder.encode_context(
-        prompt,
-        generation_length,
-        token_budget,
-        task_type=task_type,
-        dataset=dataset,
-    ).to(device, dtype=torch.float32)
-    with torch.no_grad():
-        (a_tensor, b_tensor), _ = agent.act(state, metric_type=metric_type)
-    a_val = float(a_tensor.view(-1)[0].item()) if isinstance(a_tensor, torch.Tensor) else float(a_tensor)
-    b_val = float(b_tensor.view(-1)[0].item()) if isinstance(b_tensor, torch.Tensor) else float(b_tensor)
-    return a_val, b_val
-
-
 def evaluate_model(
     model,
     tokenizer,
@@ -164,8 +61,6 @@ def evaluate_model(
     model_name=None,
     window=None,
     budget=None,
-    rl_agent=None,
-    context_encoder=None,
 ):
     """Evaluate the model on the needle-in-haystack task with budget settings."""
     results = defaultdict(list)
@@ -174,42 +69,27 @@ def evaluate_model(
     os.makedirs("result_txt/needle", exist_ok=True)
     if method == "full":
         result_file = f"result_txt/needle/{model_name}_{method}.jsonl"
+    elif method == "waits" and config is not None:
+        abtag = f"a{config['a']}_b{config['b']}".replace(".", "_")
+        result_file = f"result_txt/needle/{model_name}_{method}_{abtag}_budget{budget}.jsonl"
     else:
         result_file = f"result_txt/needle/{model_name}_{method}_window{window}_budget{budget}.jsonl"
     
     # Open file in write mode to overwrite any existing content
     with open(result_file, 'w', encoding='utf-8') as f:
         for sample in tqdm(dataset, desc="Evaluating samples"):
-            # Get the prompt and expected answer
+            # Get the prompt and expected answer (supports new password/distractor schema)
             prompt = sample["prompt"]
-            expected_answer = sample["answer"]
-            needle_position = sample["needle_position"]
-            total_tokens = sample["total_tokens"]
-            
-            # Add [INST] tags for Llama models
-            if "llama" in model_name.lower():
+            expected_answer = sample.get("answer") or sample.get("password")
+            needle_position = float(sample.get("needle_position", sample.get("position_pct")))
+            total_tokens = int(float(sample.get("total_tokens", sample.get("actual_tokens"))))
+
+            # [INST] only if not already baked into the prompt (new dataset bakes it)
+            if "llama" in model_name.lower() and "[INST]" not in prompt:
                 prompt = f"[INST]{prompt}[/INST]"
 
             run_config = config
-            if run_config and method == "sigmoid" and rl_agent is not None and context_encoder is not None:
-                token_budget = int(run_config.total_budget) if run_config.total_budget is not None else int(budget)
-                a_val, b_val = get_rl_action(
-                    rl_agent,
-                    context_encoder,
-                    prompt,
-                    generation_length=64,
-                    token_budget=token_budget,
-                    device=device,
-                    task_type=sample.get("task_type"),
-                    dataset=sample.get("dataset"),
-                    metric_type=sample.get("metric_type") or "qa_f1_score",
-                )
-                run_config = CompressionConfig()
-                for k, v in config.items():
-                    run_config[k] = v
-                run_config.a = float(a_val)
-                run_config.b = float(b_val)
-            
+
             # Initialize cache with budget settings if provided
             if run_config:
                 model.init_cache(run_config)
@@ -338,16 +218,6 @@ def main(args):
         model, tokenizer = load_model(model_name)
         print("Model loaded successfully!")
 
-        rl_agent = None
-        context_encoder = None
-        rl_config = None
-        if args.rl_checkpoint:
-            first_layer_device = next(model.model.layers[0].parameters()).device
-            rl_agent, context_encoder, rl_config = load_rl_agent(
-                args.rl_checkpoint, first_layer_device, model, tokenizer
-            )
-            print(f"Loaded RL agent from: {args.rl_checkpoint}")
-
         for dataset_path in datasets:
             dataset_name = os.path.basename(dataset_path).split('.')[0]
             dataset_data = load_dataset(dataset_path)
@@ -363,6 +233,10 @@ def main(args):
                         config["total_budget"] = cur_budget
                         config["a"] = 10
                         config["b"] = cur_window
+                        # single fixed WAITS action override (sweep one (a,b))
+                        if cur_method == "waits" and args.sigmoid_a is not None:
+                            config["a"] = float(args.sigmoid_a)
+                            config["b"] = float(args.sigmoid_b)
 
                         results = evaluate_model(
                             model=model,
@@ -374,12 +248,20 @@ def main(args):
                             model_name=model_name,
                             window=cur_window,
                             budget=cur_budget,
-                            rl_agent=rl_agent,
-                            context_encoder=context_encoder,
                         )
 
                         metrics = calculate_metrics(results)
-                        
+
+                        # overall accuracy (micro-avg over all samples) + append to sweep CSV
+                        tot_c = sum(m["correct_count"] for m in metrics.values())
+                        tot_n = sum(m["total_count"] for m in metrics.values())
+                        overall_acc = 100.0 * tot_c / tot_n if tot_n else 0.0
+                        ab = f"a{config['a']}_b{config['b']}" if cur_method == "waits" else f"w{cur_window}"
+                        os.makedirs("result_txt/needle", exist_ok=True)
+                        with open("result_txt/needle/sweep_results.csv", "a") as cf:
+                            cf.write(f"{model_name},{cur_method},{ab},{cur_budget},{overall_acc:.2f},{tot_c}/{tot_n}\n")
+                        print(f"[NIAH] {model_name} {cur_method} {ab} b{cur_budget} -> OVERALL {overall_acc:.2f}% ({tot_c}/{tot_n})")
+
                         if cur_method == "full":
                             output_file = f"plots/needle/needle_heatmap_{model_name}_full.png"
                         else:
@@ -423,13 +305,14 @@ def main(args):
 
 def parse_args(args=None):
     parser = argparse.ArgumentParser(description="Evaluate model predictions on needle-in-haystack task.")
-    parser.add_argument("--model", type=str, nargs='+', default=["llama2"], choices=["llama", "llama2", "llama3", "opt", "qwen2"])
+    parser.add_argument("--model", type=str, nargs='+', default=["llama3-8b"], choices=["llama3-1b", "llama3-8b", "qwen2", "mistral-7b"])
+    parser.add_argument("--sigmoid_a", type=float, default=None, help="Override sigmoid a (single fixed WAITS action). Use with --method sigmoid.")
+    parser.add_argument("--sigmoid_b", type=float, default=None, help="Override sigmoid b (single fixed WAITS action). Use with --method sigmoid.")
     parser.add_argument("--dataset", type=str, nargs='+', default=["datasets/needle_dataset.jsonl"])
     parser.add_argument("--budget", type=int, nargs='+', default=[128], help="Total budget for compression")
-    parser.add_argument("--method", type=str, nargs='+', default=["snap"], help="Compression method (full, a2sf, h2o, snap, sigmoid)")
+    parser.add_argument("--method", type=str, nargs='+', default=["snap"], help="Compression method (full, waits, h2o, snap, sigmoid)")
     parser.add_argument("--window", type=int, nargs='+', default=[16], help="Observation window size")
-    parser.add_argument("--rl_checkpoint", type=str, default=None, help="Optional RL checkpoint path. If set, sigmoid method uses RL-selected a,b per sample.")
-    
+
     return parser.parse_args(args)
 
 if __name__ == "__main__":
