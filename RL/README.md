@@ -28,6 +28,18 @@ python longbench.py --model llama3-1b --budget 128 \
     --waits_table runs/waits_tables/waits_llama3-1b.json --run_name WAITS_llama3-1b
 ```
 
+## Three tracks
+
+| track | where | rule |
+|---|---|---|
+| **R** routing champion (LinUCB) | the 5 DIARL files above | deployed method; extend normally |
+| **P** submitted per-prompt (NeuralUCB) | `train_perprompt_submitted.py`, `a2sf_model.py`, `agent/`, `env/` | **version-locked** reproduction; never edit for new research. Gate: `script/smoke_neuralucb.sh` (ckpt eval = 26.94 + 2-epoch train vs seed-42 log) |
+| **D** dev (agent upgrades) | `dev/` | all NeuralUCB structure experiments; seeded with a copy of the submitted agent, imports `RL.env` read-only |
+
+The listwise loss (repro_2694 recipe) was lost uncommitted at history #54 and reconstructed
+bit-exact 2026-08-26 (top-K CE, temperature on target only) - validated against
+`runs/repro_2694_seed42/train.log.json`.
+
 ## Per-prompt submitted-method workbench (version-locked)
 
 The per-prompt mini-attn machinery was removed 2026-06-16 (history #54), then partially
