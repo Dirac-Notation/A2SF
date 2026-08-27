@@ -1,0 +1,16 @@
+{
+  "date": "2026-08-27",
+  "valid_rows": {
+    "feas1b_fixed  (0.1,32 uniform)": 25.73,
+    "feas8b_fixed  (0.1,16 uniform)": 35.86,
+    "store_8b_full_cache_subset": "42.8 (full-LB 기준)",
+    "store_sample_oracle_uniform": "+7.9~+11.4 (4모델, full-LB, metric-noise 일부)"
+  },
+  "invalidated": "비인과 캡처 버그로 1차 oracle/shuffled/agent 행 및 보상 수치 전량 폐기 (수정 후 재수집 완료)",
+  "pending": "8B oracle 행 (LB 샘플×헤드 KVP-보상 오라클 배정의 정확도) — pass1 캐시 92/800 샘플 축적",
+  "verdicts_so_far": {
+    "wikitext_profile": "상위 13개 액션 사실상 등가 (regret 중앙값 5위 1.2~1.6%), 꼬리(TOVA/(1,1)/H2O)만 불량. 1B/8B 동일",
+    "winner_map": "1등 액션은 명목상 다양하나 86~89%가 1·2등 동률, 다양성은 a=0.1 내 b 변동 수준",
+    "agent_training": "보류 — 타깃이 평평해 학습 무의미 판정 (oracle 결과 조건부)"
+  }
+}
