@@ -191,3 +191,5 @@ cython_debug/
 result_txt/
 __pycache__/
 !script/_archive/*.sh
+*.tar.gz
+*.MOVED.txt

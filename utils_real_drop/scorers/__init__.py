@@ -38,6 +38,14 @@ def _build_snap(cfg, num_kv, layer_idx=None):
 
 
 def _build_waits(cfg, num_kv, layer_idx=None):
+    # per-(layer, head) table: cfg.a_heads_by_layer/b_heads_by_layer =
+    # list[num_layers][num_kv]. Takes precedence over the flat variants below.
+    a_lh = getattr(cfg, "a_heads_by_layer", None)
+    b_lh = getattr(cfg, "b_heads_by_layer", None)
+    if a_lh is not None and b_lh is not None and layer_idx is not None:
+        row_a, row_b = a_lh[layer_idx], b_lh[layer_idx]
+        return WaitsScorer(num_kv, a=row_a[0], b=row_b[0],
+                           a_heads=row_a, b_heads=row_b)
     # N3 head-portfolio: cfg.a_heads/b_heads = per-kv-head curve lists (len num_kv).
     a_heads = getattr(cfg, "a_heads", None)
     b_heads = getattr(cfg, "b_heads", None)
