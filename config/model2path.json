@@ -5,5 +5,6 @@
   "qwen2-0.5b": "Qwen/Qwen2.5-0.5B-Instruct",
   "mistral-7b": "/home/smp9898/models/mistral-7b-v0.2",
   "qwen3-1.7b": "/home/smp9898/.cache/huggingface/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e",
-  "qwen3-32b": "Qwen/Qwen3-32B"
+  "qwen3-32b": "Qwen/Qwen3-32B",
+  "mistral-7b-v03": "mistralai/Mistral-7B-Instruct-v0.3"
 }

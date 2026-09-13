@@ -8,7 +8,7 @@ ratio >= 1, lower is better. reward = -ratio.
 Ties are broken randomly (seeded per doc) - grid-order artifacts otherwise decide.
 
 Output: <dump_dir>/rewards.npz  { ratio: [D, C, L, H] f32, doc_ids: [D] }
-Usage:  python iclr/build_rewards.py --dump_dir /data2/smp9898/iclr_traces/llama3-1b
+Usage:  python iclr/build_rewards.py --dump_dir $ICLR_TRACES/llama3-1b
 """
 import argparse
 import glob

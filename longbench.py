@@ -12,7 +12,7 @@ from utils import load_model, set_seed, CompressionConfig, build_chat_prompt, ch
 
 def parse_args(args=None):
     parser = argparse.ArgumentParser(description="LongBench end-to-end evaluation (multi-GPU, multi-process)")
-    parser.add_argument("--model", type=str, required=True, choices=["llama3-8b", "llama3-1b", "qwen2", "mistral-7b"])
+    parser.add_argument("--model", type=str, required=True, choices=["llama3-8b", "llama3-1b", "qwen2", "mistral-7b", "mistral-7b-v03"])
     parser.add_argument("--method", type=str, default="full")
     parser.add_argument("--window", type=int, default=16)
     parser.add_argument("--budget", type=int, default=128)
