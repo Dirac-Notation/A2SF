@@ -1,0 +1,10 @@
+{
+  "llama3-1b": "inst",
+  "llama3-8b": "inst",
+  "mistral-7b": "inst",
+  "qwen2": "native",
+  "qwen2-0.5b": "native",
+  "qwen3-1.7b": "native",
+  "qwen3-32b": "native",
+  "mistral-7b-v03": "inst"
+}
