@@ -200,7 +200,7 @@ def main():
     cfg = model.config
     L, Hkv = cfg.num_hidden_layers, cfg.num_key_value_heads
 
-    out_dir = args.out_dir or f"/data2/smp9898/iclr_traces/{args.model}"
+    out_dir = args.out_dir or f"{os.environ.get('ICLR_TRACES', '/data2/smp9898/iclr_traces')}/{args.model}"
     os.makedirs(out_dir, exist_ok=True)
     if args.doc_offset == 0:
         with open(os.path.join(out_dir, "meta.json"), "w") as f:

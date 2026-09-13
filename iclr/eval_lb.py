@@ -19,6 +19,8 @@ import json
 import os
 import sys
 
+TRACES = os.environ.get("ICLR_TRACES", "/data2/smp9898/iclr_traces")
+
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -33,7 +35,7 @@ DATASETS = ["narrativeqa", "qasper", "multifieldqa_en", "hotpotqa", "2wikimqa",
             "samsum", "passage_count", "passage_retrieval_en", "lcc", "repobench-p"]
 
 
-# ── capture plumbing (trace_dump과 동일한 등록 방식) ──────────────────────────
+# ── capture plumbing (registered the same way as trace_dump) ──────────────────────────
 from iclr.trace_dump import (CANDIDATES, Capture, w0_capture_attention,
                              curve_weights, _CAP)
 from iclr.build_rewards import auc_cost
@@ -182,13 +184,13 @@ def main():
             if len(samples) >= args.n_samples:
                 break
 
-    cache_dir = f"/data2/smp9898/iclr_traces/lb_pass1/{args.model}/{args.dataset}"
+    cache_dir = f"{TRACES}/lb_pass1/{args.model}/{args.dataset}"
     os.makedirs(cache_dir, exist_ok=True)
     out_dir = f"result_txt/pred/128/{args.run_tag}_{args.row}"
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, f"{args.dataset}.jsonl")
 
-    # ── pass 1 (agent/oracle/shuffled 공용) ──
+    # ---- pass 1, shared by agent / oracle / shuffled ----
     need_pass1 = args.row in ("agent", "oracle", "shuffled")
     if need_pass1:
         from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -250,7 +252,7 @@ def main():
         del m1
         torch.cuda.empty_cache()
 
-    # ── pass 2: 압축 생성 ──
+    # ---- pass 2: compressed generation ----
     model, tokenizer = utils.load_model(args.model)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token

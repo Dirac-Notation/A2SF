@@ -20,12 +20,12 @@ def main():
     args = ap.parse_args()
     os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-    print(f"== {args.tag} 정확도 사다리 ==")
+    print(f"== {args.tag} accuracy ladder ==")
     per_row = {}
     for row in ROWS:
         p = f"result_txt/pred/128/{args.tag}_{row}/result.json"
         if not os.path.exists(p):
-            print(f"  {row:9s}: (미완)")
+            print(f"  {row:9s}: (incomplete)")
             continue
         r = json.load(open(p))
         per_row[row] = r
@@ -38,11 +38,11 @@ def main():
             diffs = {d: per_row[row]["individual_scores"][d] - base[d]
                      for d in base if d in per_row[row]["individual_scores"]}
             top = sorted(diffs.items(), key=lambda x: -abs(x[1]))[:5]
-            print(f"  Δ({row}-fixed) 상위: " +
+            print(f"  Δ({row}-fixed) top: " +
                   ", ".join(f"{d} {v:+.1f}" for d, v in top))
 
     # head-choice structure from pass-1 tables
-    cache_root = f"/data2/smp9898/iclr_traces/lb_pass1/{args.model}"
+    cache_root = f"{os.environ.get('ICLR_TRACES', '/data2/smp9898/iclr_traces')}/lb_pass1/{args.model}"
     for row in ["oracle", "agent"]:
         files = glob.glob(os.path.join(cache_root, "*", f"s*_{row}.json"))
         if not files:
@@ -59,8 +59,8 @@ def main():
                             for l in range(ch_all.shape[1])])
         total = sum(cnt.values())
         top_actions = ", ".join(f"a{k}:{v*100//total}%" for k, v in cnt.most_common(5))
-        print(f"  [{row}] 샘플 {len(files)}개 | 액션 분포 {top_actions} | "
-              f"헤드 선택 일관성(샘플 간) 평균 {consist.mean():.2f}")
+        print(f"  [{row}] {len(files)} samples | action mix {top_actions} | "
+              f"mean cross-sample head-selection consistency {consist.mean():.2f}")
 
 
 if __name__ == "__main__":
