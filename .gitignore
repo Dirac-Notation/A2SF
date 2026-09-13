@@ -4,6 +4,7 @@
 !pip.txt
 *.jsonl
 *.json
+!config/*.json
 *.sh
 !script/*.sh
 *.pt
