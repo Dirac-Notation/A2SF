@@ -73,8 +73,7 @@ python RL/train.py --model llama3-8b \
     --save_agent runs/selectors/llama3-8b_u5b.npz
 ```
 
-See `RL/README.md` for the D-I-A-R-L pipeline layout and `CLAUDE.md` for the full
-architecture notes.
+See `RL/README.md` for the D-I-A-R-L pipeline layout.
 
 ## Repository layout
 

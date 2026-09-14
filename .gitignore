@@ -189,6 +189,7 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 .claude/
+CLAUDE.md
 result_txt/
 __pycache__/
 !script/_archive/*.sh
