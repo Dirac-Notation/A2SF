@@ -1,6 +1,6 @@
 # Label-free routing
 
-The deployed router described in `CLAUDE.md` picks a sigmoid curve from a `(task, metric)`
+The deployed router (`RL/`) picks a sigmoid curve from a `(task, metric)`
 lookup, which requires the task label at inference time. The code here removes that
 dependency: the decision is made from a single short probe forward pass, and the training
 corpus never touches LongBench, which stays a pure test set.
