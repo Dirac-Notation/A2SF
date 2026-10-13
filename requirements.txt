@@ -1,0 +1,3 @@
+torch==2.8.0
+transformers==5.10.2
+# triton is installed with torch (3.4.0); only needed for the kernel path
